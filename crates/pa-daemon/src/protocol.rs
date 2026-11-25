@@ -176,6 +176,10 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "delete_bot",
     "pull_bot_files",
     "list_bots",
+    "list_bot_secrets",
+    "set_bot_secret_inject",
+    "add_bot_secret",
+    "remove_bot_secret",
 ];
 
 /// Parsed client command envelope.
@@ -943,6 +947,10 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::DeleteBot { .. }
         | DaemonCommand::PullBotFiles { .. }
         | DaemonCommand::ListBots { .. }
+        | DaemonCommand::ListBotSecrets { .. }
+        | DaemonCommand::SetBotSecretInject { .. }
+        | DaemonCommand::AddBotSecret { .. }
+        | DaemonCommand::RemoveBotSecret { .. }
         | DaemonCommand::AckResult { .. }
         | DaemonCommand::PrepareUpdateRestart { .. }
         | DaemonCommand::CommitUpdateRestart { .. }
@@ -1012,6 +1020,10 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::DeleteBot { .. } => "delete_bot",
         DaemonCommand::PullBotFiles { .. } => "pull_bot_files",
         DaemonCommand::ListBots { .. } => "list_bots",
+        DaemonCommand::ListBotSecrets { .. } => "list_bot_secrets",
+        DaemonCommand::SetBotSecretInject { .. } => "set_bot_secret_inject",
+        DaemonCommand::AddBotSecret { .. } => "add_bot_secret",
+        DaemonCommand::RemoveBotSecret { .. } => "remove_bot_secret",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",
         DaemonCommand::WaitForIdle { .. } => "wait_for_idle",
         DaemonCommand::WaitForHeadlessCompletion { .. } => "wait_for_headless_completion",

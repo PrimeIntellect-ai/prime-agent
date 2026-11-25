@@ -8,16 +8,15 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use base64::Engine as _;
 use pa_core::auth::{AuthCredential, AuthStorage};
 use pa_core::settings::BotGitIdentity;
 use pa_sandbox::transport::SandboxTransport;
 use pa_sandbox::{HeaderRule, PrimeSandboxClient};
 
-use super::credentials::{
-    ensure_secret, key_fingerprint, GUEST_API_KEY_PLACEHOLDER, PLATFORM_CA_PATH,
-};
+use super::credentials::{key_fingerprint, GUEST_API_KEY_PLACEHOLDER, PLATFORM_CA_PATH};
+use super::secrets::{Candidate, SecretKind};
 
 /// The auth storage entry that holds the stored token.
 pub const GITHUB_AUTH_ID: &str = "prime-agent-bots-github";
@@ -27,8 +26,6 @@ pub const SET_TOKEN_COMMAND: &str = "prime-agent bots github set";
 const API_HOST: &str = "api.github.com";
 /// The git smart-HTTP host.
 const GIT_HOST: &str = "github.com";
-/// The rule hosts a GitHub bot uses.
-pub const RULE_HOSTS: usize = 2;
 /// The platform's limit on one secret value.
 const MAX_SECRET_BYTES: usize = 16 * 1024;
 
@@ -174,40 +171,23 @@ fn rules(owner: &str) -> BTreeMap<String, HeaderRule> {
     ])
 }
 
-/// Put the current token in the account's GitHub secrets and return the
-/// header rules. `None` when no token is available.
-///
-/// # Errors
-/// Returns an error when a secret cannot be created or updated.
-pub async fn provision<T: SandboxTransport>(
-    client: &PrimeSandboxClient<T>,
-    agent_dir: &Path,
-    owner: &str,
-) -> Result<Option<BTreeMap<String, HeaderRule>>> {
-    let agent_dir = agent_dir.to_path_buf();
-    // Reading the token may run the gh CLI: keep it off the runtime.
-    let Some((token, _)) = tokio::task::spawn_blocking(move || resolve_token(&agent_dir))
-        .await
-        .context("the GitHub token read failed")?
-    else {
-        return Ok(None);
-    };
+/// The GitHub plan candidate: the current token as the account's two
+/// secrets, with their header rules. `None` when no token is available.
+/// Blocking: it may run the gh CLI.
+#[must_use]
+pub fn candidate(agent_dir: &Path, owner: &str) -> Option<Candidate> {
+    let (token, _) = resolve_token(agent_dir)?;
     let [token_secret, basic_secret] = secret_names(owner);
-    ensure_secret(
-        client,
-        &token_secret,
-        &token,
-        "Prime Agent bot GitHub token",
-    )
-    .await?;
-    ensure_secret(
-        client,
-        &basic_secret,
-        &basic_value(&token),
-        "Prime Agent bot GitHub git credential",
-    )
-    .await?;
-    Ok(Some(rules(owner)))
+    Some(Candidate {
+        name: GITHUB_AUTH_ID.to_string(),
+        kind: SecretKind::GitHub,
+        secrets: vec![
+            (token_secret, token.clone()),
+            (basic_secret, basic_value(&token)),
+        ],
+        rules: rules(owner),
+        stale: false,
+    })
 }
 
 /// Delete the account's GitHub secrets: bots lose GitHub access within a
@@ -383,7 +363,7 @@ mod tests {
             rules[GIT_HOST].headers["Authorization"],
             "Basic ${prime.secrets.PRIME_AGENT_GITHUB_OWNER1_BASIC}"
         );
-        assert_eq!(rules.len(), RULE_HOSTS);
+        assert_eq!(rules.len(), 2);
         assert_eq!(
             basic_value("ghp_abc"),
             base64::engine::general_purpose::STANDARD.encode("x-access-token:ghp_abc")
@@ -406,6 +386,18 @@ mod tests {
         assert!(off.is_empty());
     }
 
+    /// Put the candidate's secrets on the platform, as provisioning does.
+    async fn ensure(agent_dir: &Path, platform: &Platform) {
+        let candidate = candidate(agent_dir, "OWNER1").unwrap();
+        assert!(!format!("{:?}", candidate.rules).contains("ghp_"));
+        let client = client(platform);
+        for (name, value) in &candidate.secrets {
+            super::super::credentials::ensure_secret(&client, name, value, "test")
+                .await
+                .unwrap();
+        }
+    }
+
     /// A new token creates both secrets; a rotated one updates them in
     /// place. The token goes only into secret bodies, never into the rules.
     #[tokio::test]
@@ -420,11 +412,7 @@ mod tests {
             json!({ "data": [] }),
             created("PRIME_AGENT_GITHUB_OWNER1_BASIC"),
         ]);
-        let rules = provision(&client(&platform), dir.path(), "OWNER1")
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!format!("{rules:?}").contains("ghp_first"));
+        ensure(dir.path(), &platform).await;
         let bodies: Vec<(String, String)> = platform
             .requests
             .lock()
@@ -446,10 +434,7 @@ mod tests {
         ] });
         *platform.answers.lock().unwrap() =
             VecDeque::from([listed.clone(), json!({}), listed, json!({})]);
-        provision(&client(&platform), dir.path(), "OWNER1")
-            .await
-            .unwrap()
-            .unwrap();
+        ensure(dir.path(), &platform).await;
         let updates: Vec<String> = platform
             .requests
             .lock()

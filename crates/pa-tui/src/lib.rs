@@ -99,6 +99,7 @@ pub mod prompt_stash;
 pub mod provider_auth;
 pub mod queued;
 pub(crate) mod search_input;
+pub mod secrets_view;
 pub mod selection;
 mod sequence_guard;
 pub mod session;

@@ -667,6 +667,45 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// The `/secrets` view: every secret bots can get, with its status
+    /// and hosts. The mutating commands answer with the same list.
+    ListBotSecrets {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// Turn one secret on or off for bots (`bots.inject.<name>`).
+    SetBotSecretInject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        inject: bool,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// Add or replace a custom bot secret. The daemon keeps `value` in the
+    /// auth storage and never sends it back.
+    AddBotSecret {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        host: String,
+        header: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scheme: Option<String>,
+        value: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// Remove a custom bot secret and its platform secrets.
+    RemoveBotSecret {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     /// The `/factory` view's bridge lane over the session kernel's factory
     /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`).
     /// Rust-native extension, advertised by the `factory_activity` capability.

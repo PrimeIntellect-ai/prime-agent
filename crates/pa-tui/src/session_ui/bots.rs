@@ -109,6 +109,7 @@ const LOCAL_ONLY_COMMANDS: &[&str] = &[
     "nightly",
     "plugins",
     "resume",
+    "secrets",
     "settings",
     "share",
     "telemetry",

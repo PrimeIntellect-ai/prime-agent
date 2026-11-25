@@ -343,6 +343,7 @@ fn reqwest_method(method: Method) -> reqwest::Method {
         Method::Get => reqwest::Method::GET,
         Method::Post => reqwest::Method::POST,
         Method::Patch => reqwest::Method::PATCH,
+        Method::Put => reqwest::Method::PUT,
         Method::Delete => reqwest::Method::DELETE,
     }
 }

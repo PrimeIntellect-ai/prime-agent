@@ -74,6 +74,10 @@ impl AgentView {
                 dock.extend(mcp_view.render(&self.theme, width, kb));
                 Some(dock)
             }
+            Some(Overlay::Secrets(secrets_view)) => {
+                dock.extend(secrets_view.render(&self.theme, width, kb));
+                Some(dock)
+            }
             Some(Overlay::Factory(factory_view)) => {
                 dock.extend(factory_view.render(&self.theme, width, kb));
                 Some(dock)

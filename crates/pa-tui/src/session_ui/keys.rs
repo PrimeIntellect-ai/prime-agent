@@ -354,6 +354,7 @@ impl SessionUi {
                 return self.handle_choice_picker_key(key, view).await
             }
             Some(Overlay::Mcp(_)) => return self.handle_mcp_view_key(key, view),
+            Some(Overlay::Secrets(_)) => return self.handle_secrets_view_key(key, view).await,
             Some(Overlay::Factory(_)) => return self.handle_factory_view_key(key, view).await,
             Some(Overlay::Bots(_)) => return self.handle_bots_view_key(key, view),
             Some(Overlay::Heartbeats(_)) => {

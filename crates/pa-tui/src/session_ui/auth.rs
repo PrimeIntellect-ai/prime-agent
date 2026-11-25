@@ -307,6 +307,9 @@ impl SessionUi {
                 view.close_overlay_if(|overlay| matches!(overlay, Overlay::AuthPanel(_)));
                 self.note(&note, view);
             }
+            AuthPanelRequest::BotSecretSettled { secret } => {
+                self.finish_bot_secret(secret, view).await;
+            }
             AuthPanelRequest::TracesSettled { outcome, gen } => {
                 // A superseded run's late settle cannot clear a newer login: the generation guard.
                 if gen == self.traces_login_gen {

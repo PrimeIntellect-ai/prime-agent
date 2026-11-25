@@ -21,6 +21,7 @@ pub mod registry;
 pub mod relay;
 pub mod remote_parent;
 pub mod replies;
+pub mod secrets;
 pub mod send;
 pub mod version;
 

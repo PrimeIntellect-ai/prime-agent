@@ -17,6 +17,7 @@ mod notes;
 mod panels;
 mod prompt;
 mod queue;
+mod secrets;
 mod sessions_fork;
 mod settings;
 mod share;
