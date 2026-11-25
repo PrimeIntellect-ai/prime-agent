@@ -1,0 +1,1 @@
+feat: the daemon gains a bot manager (not yet user-facing): a bot is one Prime VM sandbox that runs the same prime-agent release as this machine; the manager creates, resumes, restores from a checkpoint, pauses, and deletes bots with labeled, idempotent creates, and rebuilds its cache from the platform labels at boot
