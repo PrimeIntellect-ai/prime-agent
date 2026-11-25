@@ -174,7 +174,6 @@ pub struct BotManager {
     /// until its bootstrap writes it. Keyed by sandbox id.
     guest_auth: Mutex<HashMap<String, GuestCredentials>>,
     image: String,
-    release: ReleaseSource,
     /// The owner's agent dir: its `factory.enabled` carries into the bot.
     agent_dir: PathBuf,
 }
@@ -209,7 +208,6 @@ impl BotManager {
                 .ok()
                 .filter(|image| !image.is_empty())
                 .unwrap_or_else(|| DEFAULT_BOT_IMAGE.to_string()),
-            release: ReleaseSource::resolve(),
             agent_dir: agent_dir.to_path_buf(),
         })
     }
@@ -829,7 +827,8 @@ impl BotManager {
             )
             .await?;
         if guest.stdout.trim() != local {
-            let install = Install::prepare(local, &self.release)?;
+            // A tarball placed next to the binary after the daemon started is still picked up.
+            let install = Install::prepare(local, &ReleaseSource::resolve())?;
             let mut env: BTreeMap<String, String> = install.env.into_iter().collect();
             // The install stops a guest daemon that runs another version.
             env.insert(
