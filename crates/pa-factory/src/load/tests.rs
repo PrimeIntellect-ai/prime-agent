@@ -325,6 +325,14 @@ fn every_load_error_names_its_place() {
             "rubrics/quality.toml: rule[0].default: \"high\" is not a severity",
         ),
         (
+            &[],
+            &[(
+                "rubrics/quality.toml",
+                "[[rule]]\nid = \"a\"\ncheck = \"Does {{nope}} hold?\"\ndefault = \"blocker\"\n",
+            )],
+            "rubrics/quality.toml: states.review-a: {{nope}} is neither a param nor an input of this state",
+        ),
+        (
             &[("name = \"judge-b\"", "name = \"judge-a\"")],
             &[],
             "states.review-b.agent.name: \"judge-a\" already labels state \"review-a\"",
