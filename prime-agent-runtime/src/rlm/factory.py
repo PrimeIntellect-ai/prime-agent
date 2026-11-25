@@ -63,6 +63,9 @@ GUARD_OPS: tuple[str, ...] = ("eq", "ne", "gt", "gte", "lt", "lte", "exists", "c
 # max_entries, max_transitions, max_children) live only in the Rust
 # ``pa_factory::limits``; a run asks for them through the
 # ``factory.limits`` host request before it starts (``_check_limits``).
+#: Write-time copy of ``pa_factory::limits::MAX_RETRIES``: the harness write
+#: path validates synchronously and must report the same bound message.
+MAX_RETRIES = 10
 TRANSITIONS_PER_STATE_DEFAULT = 10
 RUN_FAILURE_POLICY_DEFAULT = "escalate"
 RUN_MAX_PARALLEL_DEFAULT = 8
@@ -317,7 +320,9 @@ def _validate_state_fields(
         elif run_budget is not None and budget > run_budget:
             errors.append(f"{noun} {ref} budget_ms {budget} exceeds the run budget_ms {run_budget}")
 
-    if is_resident and state.get("retries", NODE_RETRIES_DEFAULT) != 0:
+    if "retries" in state and not (_is_int(state.get("retries")) and 0 <= state.get("retries") <= MAX_RETRIES):
+        errors.append(f"{noun} {ref} retries must be an integer between 0 and {MAX_RETRIES}")
+    elif is_resident and state.get("retries", NODE_RETRIES_DEFAULT) > 0:
         errors.append(f"resident {noun} {ref} cannot declare retries")
 
     if "failure_policy" in state and state.get("failure_policy") not in FAILURE_POLICIES:
