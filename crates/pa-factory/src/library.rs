@@ -237,7 +237,7 @@ pub fn read_machine_md(path: &Path) -> Result<MachineMd, String> {
 /// The machine name rule (the skill library's): lowercase a-z, 0-9 and
 /// hyphens, at most 64 characters, not ending in a hyphen.
 #[must_use]
-pub fn machine_name_errors(name: &str) -> Vec<String> {
+pub(crate) fn machine_name_errors(name: &str) -> Vec<String> {
     if name.is_empty() {
         return vec!["machine name must be a non-empty string".to_string()];
     }
@@ -287,7 +287,7 @@ fn machine_description_errors(description: Option<&str>) -> Vec<String> {
 ///
 /// # Errors
 /// Every problem, each prefixed with `source`.
-pub fn parse_machine_md(text: &str, source: &str) -> Result<MachineMd, Vec<String>> {
+pub(crate) fn parse_machine_md(text: &str, source: &str) -> Result<MachineMd, Vec<String>> {
     let normalized = text
         .trim_start_matches('\u{feff}')
         .replace("\r\n", "\n")
@@ -372,7 +372,10 @@ pub fn parse_machine_md(text: &str, source: &str) -> Result<MachineMd, Vec<Strin
     let mut errors = machine_name_errors(&name);
     errors.extend(machine_description_errors(description.as_deref()));
     if !errors.is_empty() {
-        return Err(errors);
+        return Err(errors
+            .into_iter()
+            .map(|error| format!("{source}: {error}"))
+            .collect());
     }
     Ok(MachineMd {
         name,
