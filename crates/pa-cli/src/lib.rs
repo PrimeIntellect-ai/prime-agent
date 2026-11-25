@@ -60,6 +60,7 @@ pub use mode::{AppMode, MissingSubsystem, RunOptions, Runtime, UnavailableRuntim
 pub(crate) mod piped_stdin;
 pub(crate) mod print_autonomous;
 pub(crate) mod print_boundary;
+pub(crate) mod print_daemon;
 pub(crate) mod print_goal;
 pub(crate) mod print_rlm;
 pub mod print_runtime;

@@ -8,9 +8,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use pa_core::autonomous::{
-    autonomous_limit_reason, autonomous_status, create_autonomous_runtime_state,
-    describe_autonomous_limit, latest_autonomous_gate_attempt, now_millis, AgentAutonomousConfig,
-    AutonomousDriver, AutonomousFollowUp, AutonomousRuntimeState, ShellAutonomousDriver,
+    autonomous_limit_reason, autonomous_limit_reason_of_status, autonomous_status,
+    create_autonomous_runtime_state, describe_autonomous_limit, latest_autonomous_gate_attempt,
+    now_millis, AgentAutonomousConfig, AgentAutonomousStatus, AutonomousDriver, AutonomousFollowUp,
+    AutonomousRuntimeState, ShellAutonomousDriver,
 };
 use pa_core::session_engine::engine::SessionEngine;
 use pa_core::session_engine::provider_adapter::json_round_trip;
@@ -210,46 +211,50 @@ impl HeadlessAutonomous {
         Ok(ran)
     }
 
-    /// The print-mode exit contract: stderr text when the run must exit
-    /// non-zero — a configured gate still failing (after its retry window or
-    /// an autonomous limit), or an ungated run stopping before terminal
-    /// evidence.
+    /// The print-mode exit contract over this run's state (see
+    /// [`autonomous_exit_stderr`]).
     pub async fn exit_stderr(&self) -> Option<String> {
         let state = self.state.lock().await;
-        let status = autonomous_status(&state);
-        let now = now_millis();
-        let limit = autonomous_limit_reason(&state, now);
-        if let Some(failure) = status
-            .last_gate_failure
-            .as_ref()
-            .filter(|_| status.enabled && !status.gates.commands.is_empty())
-        {
-            let limit_text = limit
-                .map(|reason| {
-                    format!(
-                        "; autonomous limit reached: {}",
-                        describe_autonomous_limit(&status, reason, now)
-                    )
-                })
-                .unwrap_or_default();
+        autonomous_exit_stderr(&autonomous_status(&state), now_millis())
+    }
+}
+
+/// The print-mode exit contract: stderr text when the run must exit
+/// non-zero — a configured gate still failing (after its retry window or
+/// an autonomous limit), or an ungated run stopping before terminal
+/// evidence. The daemon-client print reads the status from the daemon.
+pub(crate) fn autonomous_exit_stderr(status: &AgentAutonomousStatus, now: u64) -> Option<String> {
+    let limit = autonomous_limit_reason_of_status(status, now);
+    if let Some(failure) = status
+        .last_gate_failure
+        .as_ref()
+        .filter(|_| status.enabled && !status.gates.commands.is_empty())
+    {
+        let limit_text = limit
+            .map(|reason| {
+                format!(
+                    "; autonomous limit reached: {}",
+                    describe_autonomous_limit(status, reason, now)
+                )
+            })
+            .unwrap_or_default();
+        return Some(format!(
+            "Autonomous quality gate still failing after attempt {}/{}: {}{}",
+            latest_autonomous_gate_attempt(status),
+            status.gates.max_retries,
+            failure.exit_text,
+            limit_text
+        ));
+    }
+    if status.enabled && status.gates.commands.is_empty() {
+        if let Some(reason) = limit {
             return Some(format!(
-                "Autonomous quality gate still failing after attempt {}/{}: {}{}",
-                latest_autonomous_gate_attempt(&status),
-                status.gates.max_retries,
-                failure.exit_text,
-                limit_text
+                "Autonomous run stopped before terminal evidence; {}",
+                describe_autonomous_limit(status, reason, now)
             ));
         }
-        if status.enabled && status.gates.commands.is_empty() {
-            if let Some(reason) = limit {
-                return Some(format!(
-                    "Autonomous run stopped before terminal evidence; {}",
-                    describe_autonomous_limit(&status, reason, now)
-                ));
-            }
-        }
-        None
     }
+    None
 }
 
 async fn latest_assistant(engine: &SessionEngine) -> Option<pa_types::ai::AssistantMessage> {
