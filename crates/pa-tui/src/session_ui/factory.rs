@@ -162,6 +162,11 @@ impl super::SessionUi {
             .and_then(|factory_view| factory_view.node.as_mut())
         {
             node.set_request_epoch(request_epoch);
+            // A run with no spec id has no machine to read files from: the
+            // files document reports none instead of loading forever.
+            if fetch_files && spec_id.is_none() {
+                node.set_files(crate::factory_view::node::NodeFiles::default());
+            }
         }
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
