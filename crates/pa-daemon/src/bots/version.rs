@@ -79,21 +79,27 @@ pub fn guest_tarball_path(version: &str) -> String {
     format!("{GUEST_TARBALL_DIR}/{}", tarball_name(version))
 }
 
-/// One install run: the script env and the optional stdin payload.
+/// One install run: the script env and the local tarball, if any.
 #[derive(Debug, Clone)]
 pub struct Install {
     pub env: Vec<(String, String)>,
-    pub stdin: Option<Vec<u8>>,
+    /// The local tarball. The manager uploads it over the gateway transfer
+    /// endpoint, or writes it to the exec stream when that fails.
+    pub tarball: Option<Vec<u8>>,
 }
 
 impl Install {
+    /// The guest path a local tarball is uploaded to. The install script
+    /// removes it.
+    pub const UPLOAD_PATH: &'static str = "/root/.prime-agent-install.tar.gz";
+
     /// Prepare the install of `version` from `source`.
     ///
     /// # Errors
     /// Returns an error when the local tarball cannot be read.
     pub fn prepare(version: &str, source: &ReleaseSource) -> Result<Self> {
         let mut env = vec![("PA_VERSION".to_string(), version.to_string())];
-        let stdin = match source {
+        let tarball = match source {
             ReleaseSource::Published => None,
             ReleaseSource::LocalTarball(path) => {
                 let bytes = std::fs::read(path)
@@ -103,7 +109,7 @@ impl Install {
                 Some(bytes)
             }
         };
-        Ok(Self { env, stdin })
+        Ok(Self { env, tarball })
     }
 }
 
@@ -142,31 +148,32 @@ command -v prime-agent >/dev/null 2>&1 && prime-agent relay --probe >/dev/null 2
   && prime-agent --version || true
 "#;
 
-/// Fetches the `$PA_VERSION` linux-x64 release tarball (or reads it from
-/// stdin), verifies it, and installs it with the release's own `install.sh
-/// --archive`. That installer writes the managed layout the self-update reads,
-/// installs uv, and stops a daemon that runs another version. The install
-/// fails when the build has no bot guest side. Its `guest_tool` step installs
-/// the pinned tools the bot image lacks (Node.js with npm, and the GitHub CLI).
+/// Fetches the `$PA_VERSION` linux-x64 release tarball (or takes the local
+/// one the manager uploaded, or wrote to stdin), verifies it, and installs
+/// it with the release's own `install.sh --archive`. That installer writes
+/// the managed layout the self-update reads, installs uv, and stops a daemon
+/// that runs another version. The install fails when the build has no bot
+/// guest side. Its `guest_tool` step installs the pinned tools the bot image
+/// lacks (Node.js with npm, and the GitHub CLI).
 pub const INSTALL_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 asset="prime-agent-${PA_VERSION}-linux-x64.tar.gz"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work"; rm -f "${PA_TARBALL_PATH:-}"' EXIT
 cd "$work"
-if [ -n "${PA_TARBALL_BYTES:-}" ]; then
+local_tarball=""
+if [ -n "${PA_TARBALL_PATH:-}" ]; then
+  # The daemon uploaded the tarball over the gateway transfer endpoint.
+  test -f "$PA_TARBALL_PATH"
+  echo "${PA_TARBALL_SHA256}  $PA_TARBALL_PATH" | sha256sum -c - >/dev/null
+  mv "$PA_TARBALL_PATH" "$asset"
+  local_tarball=1
+elif [ -n "${PA_TARBALL_BYTES:-}" ]; then
+  # Fallback: the daemon wrote the tarball to this process's stdin.
   head -c "$PA_TARBALL_BYTES" > "$asset"
   echo "${PA_TARBALL_SHA256}  $asset" | sha256sum -c - >/dev/null
-  tar -xzf "$asset" package.json
-  tarball_version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
-  if [ "$tarball_version" != "$PA_VERSION" ]; then
-    echo "the bot tarball is prime-agent ${tarball_version}, not ${PA_VERSION}" >&2
-    exit 4
-  fi
-  # A bot that spawns bots installs its children from this same tarball.
-  mkdir -p /root/.prime-agent-bot-tarball
-  cp "$asset" /root/.prime-agent-bot-tarball/
+  local_tarball=1
 else
   base="https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${PA_VERSION}"
   status="$(curl -sSL --retry 3 -o SHA256SUMS -w '%{http_code}' "$base/SHA256SUMS" || true)"
@@ -180,6 +187,17 @@ else
   test -s expected
   sha256sum -c expected >/dev/null
 fi
+if [ -n "$local_tarball" ]; then
+  tar -xzf "$asset" package.json
+  tarball_version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+  if [ "$tarball_version" != "$PA_VERSION" ]; then
+    echo "the bot tarball is prime-agent ${tarball_version}, not ${PA_VERSION}" >&2
+    exit 4
+  fi
+  # A bot that spawns bots installs its children from this same tarball.
+  mkdir -p /root/.prime-agent-bot-tarball
+  cp "$asset" /root/.prime-agent-bot-tarball/
+fi
 if command -v prime-agent >/dev/null 2>&1; then
   prime-agent shutdown --force >/dev/null 2>&1 || true
 fi
@@ -191,7 +209,8 @@ if ! prime-agent relay --probe >/dev/null 2>&1; then
   exit 5
 fi
 # Guest tools the bot image lacks: one pinned, checksummed tarball each,
-# unpacked to /opt/<command> with its bin/ linked onto PATH.
+# unpacked to /opt/<command> with its bin/ linked onto PATH. The bot image
+# already carries both, so these are no-ops there.
 guest_tool() { # guest_tool COMMAND URL SHA256
   command -v "$1" >/dev/null 2>&1 && return 0
   curl -fsSL --retry 3 -o "$1.tar.gz" "$2"

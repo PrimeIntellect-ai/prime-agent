@@ -6,7 +6,8 @@
 //!
 //! [`CommandSessionClient`] runs processes in a VM sandbox through the
 //! sandbox gateway's `ConnectRPC` `command_session` stream (Start, Connect,
-//! `SendInput`, `SendSignal`). [`PlatformGatewayAuthSource`] fetches the
+//! `SendInput`, `SendSignal`), and [`PrimeSandboxClient::upload_file`] writes
+//! one file through the gateway's multipart transfer endpoint. [`PlatformGatewayAuthSource`] fetches the
 //! sandbox-bound gateway credentials it needs, and [`secrets`] lists and
 //! creates the platform secrets that header rules reference.
 //!
@@ -38,7 +39,10 @@ pub use command_session::{
     VmSignal,
 };
 pub use error::{SandboxError, SandboxErrorCode, MAX_RESPONSE_PREVIEW_CHARS};
-pub use gateway::{GatewayAuth, GatewayOptions, MAX_ERROR_BODY_BYTES};
+pub use gateway::{
+    GatewayAuth, GatewayOptions, UploadRequest, UploadResult, MAX_ERROR_BODY_BYTES,
+    MAX_TRANSFER_BYTES,
+};
 pub use secrets::PlatformSecret;
 pub use transport::{
     ReqwestSandboxTransport, SandboxTransport, TransportRequest, TransportResponse,

@@ -10,10 +10,10 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use pa_sandbox::{
     CommandSessionClient, CommandSessionErrorCode, CommandSessionEvent, CommandSessionOptions,
-    CommandSpec, HeaderRule, InputChannel, OutputChannel, PlatformGatewayAuthSource,
-    PrimeSandboxClient, SandboxError, SandboxErrorCode, SandboxStatus, SendInputOptions,
-    SendSignalOptions, StartOptions, StartRequest, StreamOptions, VmCreateRequest, VmSignal,
-    MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
+    CommandSpec, GatewayOptions, HeaderRule, InputChannel, OutputChannel,
+    PlatformGatewayAuthSource, PrimeSandboxClient, SandboxError, SandboxErrorCode, SandboxStatus,
+    SendInputOptions, SendSignalOptions, StartOptions, StartRequest, StreamOptions, UploadRequest,
+    VmCreateRequest, VmSignal, MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
 };
 
 use super::credentials;
@@ -137,6 +137,15 @@ pub trait BotPlatform: Send + Sync {
         env: &'a BTreeMap<String, String>,
         stdin: Option<&'a [u8]>,
     ) -> BoxFuture<'a, PlatformResult<ExecOutput>>;
+    /// Write `bytes` to `path` in the guest through the gateway's multipart
+    /// transfer endpoint. The bot install uses it so one request carries the
+    /// release tarball instead of one exec chunk per megabyte.
+    fn upload<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        path: &'a str,
+        bytes: &'a [u8],
+    ) -> BoxFuture<'a, PlatformResult<()>>;
     /// Start `command` in the guest with its stdio as a byte stream; dropping
     /// the write half ends the process.
     fn open_stream<'a>(
@@ -580,6 +589,27 @@ impl BotPlatform for PrimePlatform {
                         "the gateway sent no command result in time".into(),
                     ))
                 })
+        }
+        .boxed()
+    }
+
+    fn upload<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        path: &'a str,
+        bytes: &'a [u8],
+    ) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            let request = UploadRequest {
+                path: path.to_string(),
+                filename: "bot-tarball.tar.gz".to_string(),
+                content: bytes.to_vec(),
+            };
+            self.client
+                .upload_file(sandbox_id, request, &GatewayOptions::default())
+                .await
+                .map(|_upload| ())
+                .map_err(|error| map_error(&error))
         }
         .boxed()
     }

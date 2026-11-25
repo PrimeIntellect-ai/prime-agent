@@ -45,8 +45,11 @@ use sha2::{Digest, Sha256};
 pub use manager::{AttachGuard, BotManager};
 pub use registry::{BotRecord, BotStatus};
 
-/// The image a new bot boots; the bootstrap installs everything else.
-pub const DEFAULT_BOT_IMAGE: &str = "python:3.12-bookworm";
+/// The image a new bot boots: the team bot image, which already carries the
+/// pinned guest tools, uv, the kernel venv and a prime-agent release. A bot
+/// whose version matches that release skips the install. Rebuild it with
+/// `make bot-image` (packaging/bot-image/README.md).
+pub const DEFAULT_BOT_IMAGE: &str = "prime/primeintellect/prime-agent-bot:latest";
 /// Overrides [`DEFAULT_BOT_IMAGE`].
 pub const BOT_IMAGE_ENV: &str = "PRIME_AGENT_BOT_IMAGE";
 /// The label every bot sandbox carries.

@@ -1657,14 +1657,33 @@ impl BotManager {
                 "PRIME_AGENT_DAEMON_SOCKET".to_string(),
                 super::GUEST_DAEMON_SOCKET.to_string(),
             );
+            // One multipart request carries a local tarball. The exec stream
+            // stays as the fallback: a guest whose gateway has no transfer
+            // endpoint must still get the build.
+            let mut stdin = None;
+            if let Some(bytes) = install.tarball.as_deref() {
+                match self
+                    .platform
+                    .upload(&sandbox_id, Install::UPLOAD_PATH, bytes)
+                    .await
+                {
+                    Ok(()) => {
+                        env.insert(
+                            "PA_TARBALL_PATH".to_string(),
+                            Install::UPLOAD_PATH.to_string(),
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "pa-daemon: bot {}: tarball upload failed, using the exec stream: {error}",
+                            record.name
+                        );
+                        stdin = Some(bytes);
+                    }
+                }
+            }
             let output = self
-                .exec_ready(
-                    &sandbox_id,
-                    version::INSTALL_SCRIPT,
-                    &env,
-                    install.stdin.as_deref(),
-                    deadline,
-                )
+                .exec_ready(&sandbox_id, version::INSTALL_SCRIPT, &env, stdin, deadline)
                 .await?;
             if let Some(message) = version::install_failure(output.exit_code, local) {
                 bail!(message);

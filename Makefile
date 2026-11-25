@@ -182,6 +182,12 @@ bot-tarball:
 	cp $(BOT_DIST)/prime-agent-$(VERSION)-linux-x64.tar.gz target/debug/
 	cp $(BOT_DIST)/prime-agent-$(VERSION)-linux-x64.tar.gz target/release/
 
+# The bot guest image in the Prime registry (packaging/bot-image/README.md).
+# Manual only: it pushes a real image and bakes its VM artifact.
+bot-image:
+	@test -n "$(VERSION)" || { echo "VERSION is required (the release the image carries)"; exit 1; }
+	packaging/bot-image/build.sh --version "$(VERSION)" $(if $(BOT_TARBALL),--tarball "$(BOT_TARBALL)",) --tag "$(or $(BOT_IMAGE_TAG),latest)"
+
 # Bundled-catalog gates (scripts/release/test_catalog_assets.py): the
 # offline fixture passes the full packer validation, the packer hard-fails
 # on missing/invalid assets, network mode is verified against a local HTTP
@@ -223,7 +229,7 @@ shard-gates:
 	python3 scripts/test_ci_test_shard.py
 	python3 scripts/test_ci_pr_crates.py
 
-.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package bot-tarball catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates perf
+.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package bot-tarball bot-image catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates perf
 
 # Offline packaging contract tests for updaters shipped since Prime Agent 0.6.
 legacy-upgrade-gates:
