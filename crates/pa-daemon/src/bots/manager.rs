@@ -359,38 +359,64 @@ impl BotManager {
 
     /// Send every running or paused bot its header rules again, from the
     /// current secrets plan. The platform replaces each sandbox's whole
-    /// policy; a paused sandbox gets it on resume. Returns the bots
-    /// updated and one message per bot that kept its old rules.
-    pub async fn refresh_network_rules(&self) -> (usize, Vec<String>) {
-        let mut updated = 0;
+    /// policy; a paused sandbox gets it on resume. A secret that the plan
+    /// leaves out is gone from the new rules, the bot's own model key
+    /// included. Returns one message per bot that kept its old rules.
+    pub async fn refresh_network_rules(&self) -> Vec<String> {
         let mut failures = Vec::new();
         for bot in self.list() {
             let bot_lock = self.lock_for(&bot.bot_id);
             let _held = bot_lock.lock().await;
-            let Ok(record) = self.record(&bot.bot_id) else {
+            let Ok(mut record) = self.record(&bot.bot_id) else {
                 continue;
             };
             let Some(sandbox_id) = record
                 .sandbox_id
-                .as_deref()
+                .clone()
                 .filter(|_| matches!(record.status, BotStatus::Running | BotStatus::Paused))
             else {
                 continue;
             };
-            let outcome = match self.guest_credentials(&record, record.github).await {
-                Ok((credentials, _)) => self
+            // The bot's own key or login stays required unless the user
+            // turned it off; then the new rules leave it out.
+            let provider = guest_provider(&record).to_string();
+            let required = self.injects(&provider).await.then_some(provider.as_str());
+            let outcome = match self.credentials_for(required, record.github).await {
+                Ok((credentials, logins)) => self
                     .platform
-                    .set_network_rules(sandbox_id, &credentials.network_rules)
+                    .set_network_rules(&sandbox_id, &credentials.network_rules)
                     .await
+                    .map(|()| logins)
                     .map_err(anyhow::Error::from),
                 Err(error) => Err(error),
             };
             match outcome {
-                Ok(()) => updated += 1,
+                Ok(logins) => {
+                    // The refresher follows the logins the new rules carry.
+                    record.logins = logins;
+                    let running = record.status == BotStatus::Running;
+                    let watch = running && !record.logins.is_empty();
+                    if let Err(error) = self.save(record.clone()) {
+                        failures.push(format!("{}: {error:#}", record.name));
+                    } else if watch {
+                        self.watch_logins();
+                    }
+                }
                 Err(error) => failures.push(format!("{}: {error:#}", record.name)),
             }
         }
-        (updated, failures)
+        failures
+    }
+
+    /// Whether `bots.inject.<name>` gives bots the secret `name`.
+    async fn injects(&self, name: &str) -> bool {
+        let (agent_dir, name) = (self.agent_dir.clone(), name.to_string());
+        tokio::task::spawn_blocking(move || {
+            pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir)
+                .get_bots_inject(&name)
+        })
+        .await
+        .unwrap_or(true)
     }
 
     /// Record a settled guest turn.
@@ -997,10 +1023,20 @@ impl BotManager {
         record: &BotRecord,
         github: bool,
     ) -> Result<(GuestCredentials, Vec<String>)> {
-        let provider = guest_provider(record);
-        let logins = self.logins.prepare(provider).await?;
+        self.credentials_for(Some(guest_provider(record)), github)
+            .await
+    }
+
+    /// The header rules and guest auth for a bot that needs `provider`'s
+    /// key or login (`None`: whatever the plan gives, with no required one).
+    async fn credentials_for(
+        &self,
+        provider: Option<&str>,
+        github: bool,
+    ) -> Result<(GuestCredentials, Vec<String>)> {
+        let logins = self.logins.prepare(provider.unwrap_or_default()).await?;
         let key_provider =
-            (!logins.providers.iter().any(|login| login == provider)).then_some(provider);
+            provider.filter(|provider| !logins.providers.iter().any(|login| login == provider));
         let mut credentials = retry(|| {
             self.platform
                 .credentials(key_provider, github, logins.rules.len())

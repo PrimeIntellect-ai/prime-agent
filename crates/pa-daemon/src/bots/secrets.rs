@@ -434,18 +434,22 @@ fn is_custom_secret_of(secret: &str, name: &str) -> bool {
 }
 
 /// Store a custom secret: the value in the auth storage, the host and
-/// header in `bots.secrets`. Blocking.
+/// header in `bots.secrets`. When the settings save fails, the auth
+/// storage gets its old value back, so no value ever pairs with another
+/// host. Blocking.
 ///
 /// # Errors
 /// Returns the reason the secret is refused, or a storage error.
 pub fn add(agent_dir: &Path, new: &NewSecret) -> Result<()> {
     let def = validate(new, &view_plan(agent_dir, ""))?;
+    let id = custom_auth_id(&new.name);
     let mut auth = AuthStorage::create(agent_dir);
     if let Some(error) = auth.load_error() {
         bail!("the auth storage could not be read: {error}");
     }
+    let previous = auth.get_all().credential(&id);
     auth.set(
-        &custom_auth_id(&new.name),
+        &id,
         AuthCredential::ApiKey {
             key: new.value.clone(),
             prime_team: None,
@@ -454,43 +458,56 @@ pub fn add(agent_dir: &Path, new: &NewSecret) -> Result<()> {
     if let Some(error) = auth.drain_errors().into_iter().next() {
         bail!("the secret was not stored: {error}");
     }
-    SettingsManager::create(agent_dir, agent_dir).set_bots_secret(&new.name, Some(&def))
+    let saved =
+        SettingsManager::create(agent_dir, agent_dir).set_bots_secret(&new.name, Some(&def));
+    if saved.is_err() {
+        match previous {
+            Some(credential) => auth.set(&id, credential),
+            None => auth.remove(&id),
+        }
+    }
+    saved
 }
 
-/// Remove a custom secret from this machine and from the platform. Bots
-/// lose it with the next rules update; a deleted platform secret stops
-/// working within a minute.
+/// Remove a custom secret: its platform secrets first, then the value and
+/// the settings entry on this machine. A failed platform delete changes
+/// nothing here, so the removal can run again. Bots lose the secret with
+/// the next rules update; a deleted platform secret stops working within
+/// a minute.
 ///
 /// # Errors
-/// Returns an error for a secret that is not custom, a storage error, or
-/// a failed platform delete.
+/// Returns an error for a secret that is not custom, a failed platform
+/// delete, or a storage error.
 pub async fn remove(agent_dir: &Path, name: &str) -> Result<()> {
-    let dir = agent_dir.to_path_buf();
-    let owned = name.to_string();
+    let (dir, owned) = (agent_dir.to_path_buf(), name.to_string());
     let client = tokio::task::spawn_blocking(move || -> Result<_> {
-        let mut settings = SettingsManager::create(&dir, &dir);
-        if !settings.get_bots_secrets().contains_key(&owned) {
+        if !SettingsManager::create(&dir, &dir)
+            .get_bots_secrets()
+            .contains_key(&owned)
+        {
             bail!("\"{owned}\" is not a custom secret; turn it off for bots instead");
         }
+        // Without a Prime credential no platform secret was ever made.
+        Ok(super::prime_client(&dir).ok().map(|(client, _)| client))
+    })
+    .await??;
+    if let Some(client) = client {
+        for secret in client.list_secrets().await? {
+            if is_custom_secret_of(&secret.name, name) {
+                client.delete_secret(&secret.id).await?;
+            }
+        }
+    }
+    let (dir, owned) = (agent_dir.to_path_buf(), name.to_string());
+    tokio::task::spawn_blocking(move || -> Result<()> {
         let mut auth = AuthStorage::create(&dir);
         auth.remove(&custom_auth_id(&owned));
         if let Some(error) = auth.drain_errors().into_iter().next() {
             bail!("the secret was not removed: {error}");
         }
-        settings.set_bots_secret(&owned, None)?;
-        // Without a Prime credential no platform secret was ever made.
-        Ok(super::prime_client(&dir).ok().map(|(client, _)| client))
+        SettingsManager::create(&dir, &dir).set_bots_secret(&owned, None)
     })
-    .await??;
-    let Some(client) = client else {
-        return Ok(());
-    };
-    for secret in client.list_secrets().await? {
-        if is_custom_secret_of(&secret.name, name) {
-            client.delete_secret(&secret.id).await?;
-        }
-    }
-    Ok(())
+    .await?
 }
 
 /// A new custom secret, as the `/secrets` view sends it.
@@ -603,7 +620,11 @@ pub fn validate(new: &NewSecret, existing: &[Planned]) -> Result<BotSecretDef> {
         |candidate| !off.contains(candidate),
         MAX_RULE_HOSTS,
     );
-    if planned.last().map(|added| added.status) != Some(SecretStatus::Ok) {
+    // A secret that is off for bots needs no rule host.
+    if !matches!(
+        planned.last().map(|added| added.status),
+        Some(SecretStatus::Ok | SecretStatus::Off)
+    ) {
         if let Some(holder) = planned.iter().find(|entry| {
             entry.status.injected()
                 && entry.candidate.name != *name
@@ -762,5 +783,14 @@ mod tests {
         assert!(validate(&new("more", "more.example.com", None), &full).is_err());
         let off = plan(vec![candidate("wide", &hosts)], |_| false, MAX_RULE_HOSTS);
         assert!(validate(&new("more", "more.example.com", None), &off).is_ok());
+        // A secret that is off needs no host: its replacement saves on a full plan.
+        let mut ci = candidate("ci", &["ci.example.com"]);
+        ci.kind = SecretKind::Custom;
+        let full_and_off = plan(
+            vec![candidate("wide", &hosts), ci],
+            |name| name != "ci",
+            MAX_RULE_HOSTS,
+        );
+        assert!(validate(&new("ci", "ci2.example.com", None), &full_and_off).is_ok());
     }
 }

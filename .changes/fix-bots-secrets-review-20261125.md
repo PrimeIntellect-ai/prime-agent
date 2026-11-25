@@ -1,0 +1,1 @@
+- Fixed `/secrets` changes so they always reach running and paused bots: a bot whose own key is turned off loses it, a failed update is retried and listed in the view, concurrent changes no longer undo each other, and a failed remove can run again.

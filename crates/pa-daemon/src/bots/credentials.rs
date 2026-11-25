@@ -456,7 +456,8 @@ async fn provision_planned(
                 // Stable names: the value may have changed since the last check.
                 listed = None;
                 ensure_secret(client, secret, value, &description).await
-            } else if confirmed.contains(&scoped) {
+            } else if confirmed.contains(&scoped) && candidate.kind != SecretKind::Custom {
+                // `/secrets` can delete a custom secret, so it is listed every time.
                 Ok(())
             } else {
                 confirm_secret(client, secret, value, &description, &mut listed).await
