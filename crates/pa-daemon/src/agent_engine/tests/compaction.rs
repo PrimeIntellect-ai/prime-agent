@@ -816,22 +816,7 @@ fn threshold_compaction_aborted_mid_run_records_the_cancelled_outcome() {
         "the seed turn stays below the headroom"
     );
 
-    let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
-    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let admission = admit_parked(
-        &engine,
-        big_prompt,
-        std::sync::Arc::clone(&events),
-        std::sync::Arc::clone(&started),
-    );
-    wait_for_compaction_start(&started);
-    engine.abort_auto_compaction();
-    admission.join().expect("the aborted admission settles");
-
-    let events = events
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+    let events = admit_aborting_at_compaction_start(&engine, big_prompt);
     assert_cancelled_end_event(&events, "threshold", "Compaction cancelled");
     assert!(outcome_row_in_entries(&engine));
     assert!(outcome_row_in_live_context(&engine));
@@ -872,21 +857,11 @@ fn requested_compaction_aborted_mid_run_records_the_cancelled_outcome() {
             .block_on(async { core.turn_boundary.schedule_compaction(None).await });
     }
 
-    let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
-    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // A padded second turn keeps the cut's kept tail over the
     // 10-token keep-recent budget, leaving the first turn summarizable.
     let padded_turn_two = format!("turn two {}", "y".repeat(400));
-    let admission = admit_parked(
-        &engine,
-        padded_turn_two,
-        std::sync::Arc::clone(&events),
-        std::sync::Arc::clone(&started),
-    );
-    wait_for_compaction_start(&started);
+    let events = admit_aborting_at_compaction_start(&engine, padded_turn_two);
     let start_reason = events
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .find_map(|event| match event {
             EngineEvent::CompactionStart { event } => Some(event["reason"].clone()),
@@ -894,13 +869,6 @@ fn requested_compaction_aborted_mid_run_records_the_cancelled_outcome() {
         })
         .expect("the requested compaction_start event");
     assert_eq!(start_reason, serde_json::json!("requested"));
-    engine.abort_auto_compaction();
-    admission.join().expect("the aborted admission settles");
-
-    let events = events
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
     assert_cancelled_end_event(&events, "requested", "Requested compaction cancelled");
     assert!(outcome_row_in_entries(&engine));
     assert!(outcome_row_in_live_context(&engine));

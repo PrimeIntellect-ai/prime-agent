@@ -401,7 +401,6 @@ mod tests {
     use crate::agent_engine::tests::{admit, faux_engine_with_settings};
     use crate::agent_engine::{AgentEngineConfig, AgentSessionEngine};
     use crate::engine::EngineEvent;
-    use crate::engine::SessionEngine;
     use serde_json::{json, Value};
 
     /// The TS overflow error shape: an Anthropic token-overflow message.
@@ -845,22 +844,10 @@ mod tests {
             &mut seed_events,
         );
 
-        let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = std::sync::Arc::default();
-        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let admission = crate::agent_engine::tests::admit_parked(
+        let events = crate::agent_engine::tests::admit_aborting_at_compaction_start(
             &engine,
             format!("overflow probe {}", "x".repeat(48_000)),
-            std::sync::Arc::clone(&events),
-            std::sync::Arc::clone(&started),
         );
-        crate::agent_engine::tests::wait_for_compaction_start(&started);
-        engine.abort_auto_compaction();
-        admission.join().expect("the aborted admission settles");
-
-        let events = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         let starts = compaction_starts(&events);
         assert_eq!(starts.len(), 1);
         assert_eq!(starts[0]["reason"], "overflow");
