@@ -646,6 +646,24 @@ fn a_state_id_that_is_not_a_file_name_is_refused_before_writing() {
 }
 
 #[test]
+fn a_null_guard_is_an_unguarded_transition_and_two_joins_to_one_state_are_refused() {
+    let state = |id: &str, entry: bool| json!({"id": id, "entry": entry, "subagent": {"prompt": "P."}});
+    let null_guard = json!({
+        "states": [state("a", true), state("b", false)],
+        "transitions": [{"from": "a", "to": "b", "when": null}],
+    });
+    assert!(convert_spec(&null_guard, &meta("a")).is_ok());
+    let two_joins = json!({
+        "states": [state("a", true), state("b", true), state("c", true), state("d", false)],
+        "transitions": [{"from": ["a", "b"], "to": "d"}, {"from": ["b", "c"], "to": "d"}],
+    });
+    assert_eq!(
+        convert_spec(&two_joins, &meta("a")).unwrap_err(),
+        ["more than one join ends at state \"d\", which machine.toml cannot express"]
+    );
+}
+
+#[test]
 fn params_are_refused_not_dropped() {
     let spec = json!({"params": {"task": "ship it"}, "states": [{"id": "a", "entry": true, "subagent": {"prompt": "Do {task}."}}]});
     assert_eq!(
