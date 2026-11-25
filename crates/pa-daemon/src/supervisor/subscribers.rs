@@ -119,6 +119,16 @@ impl SessionSubscribers {
         }
     }
 
+    /// Whether any session has an attached client (the bot guest's idle
+    /// self-pause asks this).
+    pub(crate) fn any_attached(&self) -> bool {
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .any(|subscribers| !subscribers.is_empty())
+    }
+
     fn register(
         &self,
         active_session_id: &str,

@@ -186,6 +186,9 @@ impl Supervisor {
                     if trimmed.is_empty() {
                         continue;
                     }
+                    // Any inbound line is client activity: a bot guest's
+                    // idle self-pause re-arms on it (a no-op elsewhere).
+                    crate::bots::self_pause::note_client_activity();
                     // The arm's guard proved a slot free (this loop is the only slot
                     // acquirer), so the non-blocking take always succeeds.
                     let dispatch_slot = Arc::clone(&dispatch_slots)

@@ -25,6 +25,10 @@ sha2 = "0.11"
 hmac = "0.13"
 tar = "0.4"
 uuid = { version = "1", features = ["v4", "v7"] }
+# The relay pause registration call; TLS rides pa-ai's shared builder.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls-no-provider",
+] }
 
 [dev-dependencies]
 filetime = "0.2"

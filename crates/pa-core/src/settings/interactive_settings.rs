@@ -534,6 +534,53 @@ impl SettingsManager {
         Ok(())
     }
 
+    /// `bots.selfPauseMinutes`: how long a bot's guest daemon stays idle
+    /// before it asks the relay to pause its sandbox (see
+    /// [`crate::settings::BotsSettings`]). Unset is the default; `0`
+    /// disables the timer.
+    #[must_use]
+    pub fn get_bots_self_pause_minutes(&self) -> Option<u64> {
+        self.global_raw()?
+            .get("bots")?
+            .get("selfPauseMinutes")?
+            .as_u64()
+    }
+
+    /// `bots.relay.url`: the always-on relay that pauses a bot's sandbox
+    /// on the guest's request; unset turns the guest-side self-pause off.
+    /// The value is trimmed, and only `http(s)://` origins with a host
+    /// are accepted.
+    #[must_use]
+    pub fn get_bots_relay_url(&self) -> Option<String> {
+        let url = self
+            .global_raw()?
+            .get("bots")?
+            .get("relay")?
+            .get("url")?
+            .as_str()?
+            .trim()
+            .to_string();
+        let parsed = url::Url::parse(&url).ok()?;
+        let accepted = matches!(parsed.scheme(), "http" | "https")
+            && !parsed.host_str().unwrap_or_default().is_empty();
+        accepted.then_some(url)
+    }
+
+    /// `bots.relay.token`: the relay-issued credential the daemon presents
+    /// when it registers a bot's pause token with the relay.
+    #[must_use]
+    pub fn get_bots_relay_token(&self) -> Option<String> {
+        let token = self
+            .global_raw()?
+            .get("bots")?
+            .get("relay")?
+            .get("token")?
+            .as_str()?
+            .trim()
+            .to_string();
+        (!token.is_empty()).then_some(token)
+    }
+
     /// `bots.enabled` setter: persists the opt-in gate to the global
     /// scope (the same shared settings key the daemon's
     /// sandbox-admission gate reads).

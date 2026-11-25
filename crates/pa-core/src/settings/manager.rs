@@ -1339,6 +1339,83 @@ mod tests {
         assert_eq!(value["bots"]["enabled"], false);
     }
 
+    /// The bots relay settings read the GLOBAL scope strictly: the URL
+    /// must be an `http(s)://` origin with a host (anything else reads
+    /// as unset, so the guest-side self-pause stays off), and the token
+    /// and the idle minutes tolerate every malformed shape.
+    #[test]
+    fn bots_relay_settings_read_the_global_scope_strictly() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let read = |document: &str| {
+            let agent_dir = dir.path().join("agent");
+            if agent_dir.join("settings.json").exists() {
+                std::fs::remove_dir_all(&agent_dir).unwrap();
+            }
+            std::fs::create_dir_all(&agent_dir).unwrap();
+            std::fs::write(agent_dir.join("settings.json"), document).unwrap();
+            let manager = SettingsManager::create(&cwd, &agent_dir);
+            (
+                manager.get_bots_relay_url(),
+                manager.get_bots_relay_token(),
+                manager.get_bots_self_pause_minutes(),
+            )
+        };
+
+        // No file at all: everything unset.
+        let agent_dir = dir.path().join("agent-empty");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let manager = SettingsManager::create(&cwd, &agent_dir);
+        assert_eq!(manager.get_bots_relay_url(), None);
+        assert_eq!(manager.get_bots_relay_token(), None);
+        assert_eq!(manager.get_bots_self_pause_minutes(), None);
+
+        assert_eq!(
+            read(r#"{"bots": {"relay": {"url": "https://relay.example/"}}}"#),
+            (Some("https://relay.example/".to_string()), None, None)
+        );
+        // A trimmed URL with a token and minutes.
+        assert_eq!(
+            read(
+                r#"{"bots": {"relay": {"url": " https://relay.example ", "token": " t "}, "selfPauseMinutes": 3}}"#
+            ),
+            (
+                Some("https://relay.example".to_string()),
+                Some("t".to_string()),
+                Some(3)
+            )
+        );
+        // A plain http origin is allowed (a local test relay).
+        assert_eq!(
+            read(r#"{"bots": {"relay": {"url": "http://127.0.0.1:8080"}}}"#),
+            (Some("http://127.0.0.1:8080".to_string()), None, None)
+        );
+        // Wrong shapes stay unset.
+        for document in [
+            r#"{"bots": {"relay": {"url": "ftp://relay.example"}}}"#,
+            r#"{"bots": {"relay": {"url": "https://"}}}"#,
+            r#"{"bots": {"relay": {"url": ""}}}"#,
+            r#"{"bots": {"relay": {"url": "not a url"}}}"#,
+            r#"{"bots": {"relay": {"url": ["https://relay.example"]}}}"#,
+            r#"{"bots": [true]}"#,
+        ] {
+            let (url, _, _) = read(document);
+            assert_eq!(url, None, "{document} reads as unset");
+        }
+        // An empty token reads as unset; a non-number window as unset.
+        assert_eq!(
+            read(r#"{"bots": {"relay": {"url": "https://r.example", "token": " "}}}"#).1,
+            None
+        );
+        assert_eq!(
+            read(r#"{"bots": {"selfPauseMinutes": "10"}}"#).2,
+            None,
+            "a string window reads as unset"
+        );
+    }
+
     /// A corrupt global settings file makes the bots setter fail
     /// loud: the manager never rewrites a scope it failed to load, so
     /// the opt-in write is refused instead of silently skipped — the

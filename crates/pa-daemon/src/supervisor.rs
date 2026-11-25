@@ -430,6 +430,11 @@ impl Supervisor {
                 .append(&format!("bot ledger recovery failed: {error:#}")),
         }
 
+        // A bot guest daemon arms its idle self-pause (the bootstrap sets
+        // the env naming its configuration file); on any other host this
+        // is a no-op.
+        self.spawn_self_pause();
+
         // Update boot (spec §6): consume the roster from the spawn env BEFORE the sweep deletes
         // the file it points at, then run the restore + re-arm pass concurrently with serving —
         // reconnecting clients must see the resume contract (§10.3).

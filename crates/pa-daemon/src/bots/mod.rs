@@ -22,6 +22,7 @@ pub mod relay;
 pub mod remote_parent;
 pub mod replies;
 pub mod secrets;
+pub mod self_pause;
 pub mod send;
 pub mod version;
 
@@ -54,6 +55,9 @@ pub const GITHUB_LABEL: &str = "prime-agent-bot-github";
 pub const LOGIN_LABEL_PREFIX: &str = "prime-agent-bot-login:";
 /// The guest daemon's socket.
 pub const GUEST_DAEMON_SOCKET: &str = "/root/.prime/agent/bot-daemon.sock";
+/// The guest daemon's self-pause configuration file, rewritten by the
+/// bootstrap at every wake.
+pub const GUEST_SELF_PAUSE_FILE: &str = "/root/.prime/agent/bot-self-pause.json";
 
 /// The label that names one bot.
 #[must_use]

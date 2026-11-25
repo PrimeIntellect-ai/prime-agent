@@ -284,7 +284,12 @@ pub struct FactorySettings {
 /// turns off one credential's injection into new bots; `<name>` is its
 /// auth storage id (a provider id or `mcp:<server>`).
 /// `bots.secrets` holds the custom secrets' hosts and headers (their
-/// values stay in the auth storage).
+/// values stay in the auth storage). `bots.selfPauseMinutes` (default
+/// 10, `0` disables) is how long a bot's guest daemon stays idle before
+/// it asks the relay to pause its sandbox; `bots.relay.url` names that
+/// relay (unset turns the guest-side self-pause off), and
+/// `bots.relay.token` is the credential the daemon registers the bot's
+/// pause token with.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotsSettings {

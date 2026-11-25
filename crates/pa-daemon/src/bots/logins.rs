@@ -679,7 +679,9 @@ impl Logins {
             if lock(&self.state).pushed.get(name) == Some(&fingerprint) {
                 continue;
             }
-            self.platform.put_secret(name, value).await?;
+            self.platform
+                .put_secret(name, value, "Prime Agent bot login")
+                .await?;
             lock(&self.state).pushed.insert(name.clone(), fingerprint);
         }
         // Warn again only after a full recovery: a fresh login whose upload

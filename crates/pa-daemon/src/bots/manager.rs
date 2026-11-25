@@ -28,6 +28,8 @@ use super::{
 
 /// The budget for one wake, create, or pause.
 const OPERATION_BUDGET: Duration = Duration::from_mins(15);
+/// The relay registration call's deadline.
+const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
 /// Attempts for one platform call that answers 409, 429, 5xx, or a network
 /// error: about 30 s of backoff, so a busy account's rate limit passes.
 const RETRY_ATTEMPTS: u32 = 10;
@@ -119,6 +121,21 @@ export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 cd "$HOME"
 mkdir -p "$(dirname "$PRIME_AGENT_DAEMON_SOCKET")"
+# The guest daemon's idle self-pause configuration: written before the
+# daemon starts and rewritten at every wake, so a resumed daemon reads
+# its current sandbox id and settings.
+python3 - <<'PY'
+import json, os
+path = os.environ["PRIME_AGENT_BOT_SELF_PAUSE"]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w") as file:
+    json.dump({
+        "botId": os.environ["PRIME_AGENT_BOT_ID"],
+        "sandboxId": os.environ["PRIME_AGENT_BOT_SANDBOX_ID"],
+        "pauseUrl": os.environ.get("BOT_SELF_PAUSE_URL", ""),
+        "idleMinutes": int(os.environ.get("BOT_SELF_PAUSE_MINUTES", "10")),
+    }, file)
+PY
 if [ -n "${BOT_AUTH_JSON:-}" ] && { [ -n "${BOT_AUTH_OVERWRITE:-}" ] || [ ! -s "$HOME/.prime/agent/auth.json" ]; }; then
   (umask 077; printf '%s' "$BOT_AUTH_JSON" >"$HOME/.prime/agent/auth.json")
 fi
@@ -381,19 +398,21 @@ impl BotManager {
             // turned it off; then the new rules leave it out.
             let provider = guest_provider(&record).to_string();
             let required = self.injects(&provider).await.then_some(provider.as_str());
-            let outcome = match self.credentials_for(required, record.github).await {
-                Ok((credentials, logins)) => self
+            let outcome = match self.credentials_for(&record, required, record.github).await {
+                Ok((credentials, logins, relay_host)) => self
                     .platform
                     .set_network_rules(&sandbox_id, &credentials.network_rules)
                     .await
-                    .map(|()| logins)
+                    .map(|()| (logins, relay_host))
                     .map_err(anyhow::Error::from),
                 Err(error) => Err(error),
             };
             match outcome {
-                Ok(logins) => {
-                    // The refresher follows the logins the new rules carry.
+                Ok((logins, relay_host)) => {
+                    // The refresher follows the logins the new rules carry,
+                    // and the relay host they now carry.
                     record.logins = logins;
+                    record.pause_rule_host = relay_host;
                     let running = record.status == BotStatus::Running;
                     let watch = running && !record.logins.is_empty();
                     if let Err(error) = self.save(record.clone()) {
@@ -473,6 +492,8 @@ impl BotManager {
             github: spec.github,
             git_identity: spec.git_identity.clone(),
             logins: Vec::new(),
+            pause_token: Some(uuid::Uuid::new_v4().simple().to_string()),
+            pause_rule_host: None,
         })?;
         match self.ensure_running_locked(&spec.bot_id).await {
             Ok(record) => Ok(record),
@@ -670,6 +691,15 @@ impl BotManager {
     async fn ensure_running_locked(&self, bot_id: &str) -> Result<BotRecord> {
         let deadline = Instant::now() + OPERATION_BUDGET;
         let mut record = self.record(bot_id)?;
+        // A relay-configured wake gives a bot without a pause token one
+        // (a record rebuilt from labels); the save below the wake
+        // persists it. A relay whose host the sandbox's rules do not
+        // carry — configured after the spawn, changed, or a record
+        // rebuilt from labels — gets its rule pushed below.
+        let relay_host = self.relay_settings().await.rule_host();
+        if relay_host.is_some() && record.pause_token.is_none() {
+            record.pause_token = Some(uuid::Uuid::new_v4().simple().to_string());
+        }
         let woken = match self.resolve_existing(&mut record).await? {
             Some(sandbox) => {
                 let woken = self.wake(sandbox, deadline).await?;
@@ -680,6 +710,7 @@ impl BotManager {
             }
             None => None,
         };
+        let reused = woken.is_some();
         let sandbox = match woken {
             Some(sandbox) => sandbox,
             None => self.acquire_new(&mut record, deadline).await?,
@@ -687,11 +718,46 @@ impl BotManager {
         record.sandbox_id = Some(sandbox.id.clone());
         record.status = BotStatus::Running;
         self.save(record.clone())?;
+        // A reused sandbox whose rules predate the relay gets fresh ones
+        // before the bootstrap arms the guest's self-pause; without them
+        // every pause request would authenticate with the placeholder
+        // and fail. A sandbox this wake created already carries the rule
+        // (its create applied the fresh credentials). A failed push
+        // leaves the stale marker, so the next wake retries.
+        if relay_host.is_some() && record.pause_rule_host != relay_host && reused {
+            // Best effort, like the registration: a credentials failure
+            // must not block the wake (the sandbox keeps its old rules
+            // and stays usable); the stale marker makes the next wake
+            // retry the push.
+            if let Err(error) = self.push_relay_rules(&mut record, &sandbox).await {
+                eprintln!(
+                    "pa-daemon: bots: {}: the relay rules push failed: {error:#}",
+                    record.name
+                );
+            }
+        }
         // A resumed bot gets a fresh token before its first request.
         self.refresh_logins(&record).await;
         self.install_and_bootstrap(&mut record, deadline).await?;
         self.save(record.clone())?;
         Ok(record)
+    }
+
+    /// Push `record`'s fresh credentials — the relay pause rule included —
+    /// to its running sandbox, and follow the logins the new rules carry.
+    /// The record marks the relay host the pushed rules carry, so the
+    /// next wake pushes only when it changes again.
+    async fn push_relay_rules(&self, record: &mut BotRecord, sandbox: &BotSandbox) -> Result<()> {
+        let (credentials, logins, relay_host) =
+            self.guest_credentials(record, record.github).await?;
+        retry(|| {
+            self.platform
+                .set_network_rules(&sandbox.id, &credentials.network_rules)
+        })
+        .await?;
+        record.logins = logins;
+        record.pause_rule_host = relay_host;
+        Ok(())
     }
 
     /// The bot's live sandbox: the cached id when it is live, else the
@@ -872,8 +938,13 @@ impl BotManager {
             Some(checkpoint) => format!("ckpt:disk:{checkpoint}"),
             None => format!("img:{}", self.image),
         };
-        let (credentials, logins) = self.guest_credentials(record, record.github).await?;
+        let (credentials, logins, relay_host) =
+            self.guest_credentials(record, record.github).await?;
         record.logins = logins;
+        // The created sandbox's rules are the fresh credentials'; mark
+        // the relay host they carry, so a later wake pushes only when
+        // the relay changes.
+        record.pause_rule_host = relay_host;
         let mut labels = vec![
             BOT_LABEL.to_string(),
             bot_label(&record.bot_id),
@@ -947,24 +1018,33 @@ impl BotManager {
             check_exit("install prime-agent in the bot", &output)?;
         }
         record.version = local.to_string();
+        // The relay self-pause settings ride the same blocking read as
+        // the factory gate.
         let agent_dir = self.agent_dir.clone();
         // A record rebuilt from labels carries no git author: fall back to
         // the owner's (`bots.gitIdentity`, else this machine's git author)
         // so a cold boot still commits as the owner.
         let missing_identity = record.git_identity.is_none();
-        let (factory_enabled, identity) = tokio::task::spawn_blocking(move || {
+        let (factory_enabled, identity, self_pause) = tokio::task::spawn_blocking(move || {
             let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
             let identity = missing_identity
                 .then(|| super::github::git_identity(&agent_dir))
                 .flatten();
-            (settings.get_factory_enabled(), identity)
+            (
+                settings.get_factory_enabled(),
+                identity,
+                SelfPauseSettings::read(&agent_dir),
+            )
         })
         .await
         .context("the factory settings read failed")?;
         if record.git_identity.is_none() {
             record.git_identity = identity;
         }
-        let mut env = bootstrap_env(record);
+        // The relay must know the bot's pause token before the guest can
+        // ask for its pause; a failure is retried at the next wake.
+        self.register_pause_token(&self_pause, record).await;
+        let mut env = bootstrap_env(record, &self_pause);
         env.insert(
             "BOT_FACTORY_ENABLED".to_string(),
             factory_enabled.to_string(),
@@ -991,7 +1071,7 @@ impl BotManager {
                 .guest_credentials(record, false)
                 .await
                 .ok()
-                .map(|(credentials, _)| credentials),
+                .map(|(credentials, _, _)| credentials),
         };
         if let Some(auth) = guest.as_ref().and_then(|guest| guest.auth_json.as_ref()) {
             env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
@@ -1015,25 +1095,98 @@ impl BotManager {
         Ok(())
     }
 
+    /// The relay self-pause settings, off the runtime thread.
+    async fn relay_settings(&self) -> SelfPauseSettings {
+        let agent_dir = self.agent_dir.clone();
+        tokio::task::spawn_blocking(move || SelfPauseSettings::read(&agent_dir))
+            .await
+            .unwrap_or_else(|error| {
+                eprintln!("pa-daemon: bots: the relay settings read failed: {error}");
+                SelfPauseSettings::default()
+            })
+    }
+
+    /// Introduce `record`'s pause token to the relay, with the sandbox id
+    /// the guest will name. Best effort: a failure is retried at the next
+    /// wake and never blocks the spawn.
+    async fn register_pause_token(&self, settings: &SelfPauseSettings, record: &BotRecord) {
+        let (Some(endpoint), Some(token), Some(sandbox_id)) = (
+            settings.register_endpoint(&record.bot_id),
+            record.pause_token.as_deref(),
+            record.sandbox_id.as_deref(),
+        ) else {
+            return;
+        };
+        let body = match serde_json::to_vec(&json!({
+            "sandboxId": sandbox_id,
+            "pauseToken": token,
+        })) {
+            Ok(body) => body,
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: bots: {}: the relay registration body failed: {error}",
+                    record.name
+                );
+                return;
+            }
+        };
+        let client = match pa_ai::utils::tls::http_client_builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(REGISTRATION_TIMEOUT)
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: bots: {}: the relay registration client failed: {error}",
+                    record.name
+                );
+                return;
+            }
+        };
+        let mut request = client
+            .put(&endpoint)
+            .header("Content-Type", "application/json")
+            .body(body);
+        if let Some(owner) = settings.token.as_deref() {
+            request = request.header("Authorization", format!("Bearer {owner}"));
+        }
+        match request.send().await {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => eprintln!(
+                "pa-daemon: bots: {}: the relay registration answered {}; retrying at the next wake",
+                record.name,
+                response.status()
+            ),
+            Err(error) => eprintln!(
+                "pa-daemon: bots: {}: the relay registration failed: {error}; retrying at the next wake",
+                record.name
+            ),
+        }
+    }
+
     /// The header rules and guest auth for a new sandbox of `record`: its
     /// API keys, its GitHub access, and the owner's logins. Also returns
-    /// the logins it carries.
+    /// the logins and the relay host the rules carry.
     async fn guest_credentials(
         &self,
         record: &BotRecord,
         github: bool,
-    ) -> Result<(GuestCredentials, Vec<String>)> {
-        self.credentials_for(Some(guest_provider(record)), github)
+    ) -> Result<(GuestCredentials, Vec<String>, Option<String>)> {
+        self.credentials_for(record, Some(guest_provider(record)), github)
             .await
     }
 
     /// The header rules and guest auth for a bot that needs `provider`'s
-    /// key or login (`None`: whatever the plan gives, with no required one).
+    /// key or login (`None`: whatever the plan gives, with no required
+    /// one). Returns the rules, the logins they carry, and the relay
+    /// host they carry (`None`: no relay rule).
     async fn credentials_for(
         &self,
+        record: &BotRecord,
         provider: Option<&str>,
         github: bool,
-    ) -> Result<(GuestCredentials, Vec<String>)> {
+    ) -> Result<(GuestCredentials, Vec<String>, Option<String>)> {
         let logins = self.logins.prepare(provider.unwrap_or_default()).await?;
         let key_provider =
             provider.filter(|provider| !logins.providers.iter().any(|login| login == provider));
@@ -1043,6 +1196,48 @@ impl BotManager {
         })
         .await?;
         credentials.network_rules.extend(logins.rules);
+        let mut relay_rule_host = None;
+        // The relay pause rule: the relay's host only, carrying the bot's
+        // per-bot token. The Prime API key never gets a rule; the relay
+        // holds it, not the bot.
+        let relay = self.relay_settings().await;
+        if let (Some(host), Some(token)) = (relay.rule_host(), record.pause_token.as_deref()) {
+            let name = pause_secret_name(&record.bot_id);
+            match retry(|| {
+                self.platform
+                    .put_secret(&name, token, "Prime Agent bot relay pause token")
+            })
+            .await
+            {
+                Ok(()) => {
+                    // Another rule on the relay's host would win the pause
+                    // request's Authorization header, so the guest's pause
+                    // would authenticate as that rule's secret and fail.
+                    // Refuse the misconfiguration instead of arming a bot
+                    // whose self-pause cannot work.
+                    if credentials.network_rules.contains_key(&host) {
+                        bail!(
+                            "the relay host {host} already carries another bot rule \
+                             (a key, a login, or a custom secret); give the relay its own host"
+                        );
+                    }
+                    credentials.network_rules.insert(
+                        host.clone(),
+                        pa_sandbox::HeaderRule {
+                            headers: BTreeMap::from([(
+                                "Authorization".to_string(),
+                                format!("Bearer ${{prime.secrets.{name}}}"),
+                            )]),
+                        },
+                    );
+                    relay_rule_host = Some(host);
+                }
+                Err(error) => eprintln!(
+                    "pa-daemon: bots: {}: the relay pause token could not be stored: {error}",
+                    record.name
+                ),
+            }
+        }
         let mut providers = logins.providers;
         let mut guest = logins.guest;
         // MCP hosts come last; past the platform's host limit they stay home.
@@ -1093,7 +1288,7 @@ impl BotManager {
             }
             credentials.auth_json = Some(Value::Object(auth));
         }
-        Ok((credentials, providers))
+        Ok((credentials, providers, relay_rule_host))
     }
 
     /// Run a guest command once the sandbox gateway answers: retries
@@ -1230,7 +1425,60 @@ fn guest_provider(record: &BotRecord) -> &str {
         .map_or(PRIME_INFERENCE_PROVIDER_ID, |(provider, _)| provider)
 }
 
-fn bootstrap_env(record: &BotRecord) -> BTreeMap<String, String> {
+/// The relay self-pause settings: `bots.relay.url` (the relay; unset
+/// turns the guest-side self-pause off), `bots.relay.token` (the
+/// registration credential), and `bots.selfPauseMinutes` (the idle
+/// window; `0` disables it).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SelfPauseSettings {
+    pub url: String,
+    pub token: Option<String>,
+    pub minutes: u64,
+}
+
+impl SelfPauseSettings {
+    /// Read from the global settings of `agent_dir`.
+    fn read(agent_dir: &Path) -> Self {
+        let settings = pa_core::settings::SettingsManager::create(agent_dir, agent_dir);
+        Self {
+            url: settings.get_bots_relay_url().unwrap_or_default(),
+            token: settings.get_bots_relay_token(),
+            minutes: settings
+                .get_bots_self_pause_minutes()
+                .unwrap_or(super::self_pause::DEFAULT_IDLE_MINUTES),
+        }
+    }
+
+    /// The relay's rule host: the exact DNS host of its URL, the tightest
+    /// scope a header rule allows.
+    fn rule_host(&self) -> Option<String> {
+        super::credentials::base_url_host(&self.url)
+    }
+
+    /// The pause endpoint of one bot: the only relay path the guest calls.
+    fn pause_endpoint(&self, bot_id: &str) -> Option<String> {
+        let base = self.url.trim_end_matches('/');
+        (!base.is_empty()).then(|| format!("{base}/api/bots/{bot_id}/pause"))
+    }
+
+    /// The registration endpoint of one bot: where the daemon introduces
+    /// its pause token.
+    fn register_endpoint(&self, bot_id: &str) -> Option<String> {
+        let base = self.url.trim_end_matches('/');
+        (!base.is_empty()).then(|| format!("{base}/api/bots/{bot_id}"))
+    }
+}
+
+/// The platform secret holding `bot`'s relay pause token: one per bot,
+/// stable across wakes (a rotation updates the value).
+fn pause_secret_name(bot_id: &str) -> String {
+    format!(
+        "PRIME_AGENT_BOT_PAUSE_{}",
+        super::credentials::key_fingerprint(bot_id)
+    )
+}
+
+fn bootstrap_env(record: &BotRecord, self_pause: &SelfPauseSettings) -> BTreeMap<String, String> {
     let mut config = json!({ "cwd": "/root" });
     if let Some(model) = &record.model {
         match model.split_once('/') {
@@ -1268,6 +1516,26 @@ fn bootstrap_env(record: &BotRecord) -> BTreeMap<String, String> {
     ]);
     if let Some(file) = &record.guest_session_file {
         env.insert("BOT_SESSION_FILE".to_string(), file.clone());
+    }
+    // The guest daemon's idle self-pause: the file the bootstrap writes
+    // from these arms it, and every wake rewrites the file.
+    if let Some(sandbox_id) = &record.sandbox_id {
+        env.insert("PRIME_AGENT_BOT_ID".to_string(), record.bot_id.clone());
+        env.insert("PRIME_AGENT_BOT_SANDBOX_ID".to_string(), sandbox_id.clone());
+        env.insert(
+            super::self_pause::SELF_PAUSE_ENV.to_string(),
+            super::GUEST_SELF_PAUSE_FILE.to_string(),
+        );
+        env.insert(
+            "BOT_SELF_PAUSE_URL".to_string(),
+            self_pause
+                .pause_endpoint(&record.bot_id)
+                .unwrap_or_default(),
+        );
+        env.insert(
+            "BOT_SELF_PAUSE_MINUTES".to_string(),
+            self_pause.minutes.to_string(),
+        );
     }
     super::github::guest_env(record.github, record.git_identity.as_ref(), &mut env);
     env
@@ -1338,6 +1606,9 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
             .filter_map(|label| label.strip_prefix(LOGIN_LABEL_PREFIX))
             .map(str::to_string)
             .collect(),
+        // A rebuilt record gets a fresh one at its next wake.
+        pause_token: None,
+        pause_rule_host: None,
     }
 }
 

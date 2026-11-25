@@ -137,9 +137,14 @@ pub trait BotPlatform: Send + Sync {
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>>;
     /// The Prime account's fingerprint, which names its login secrets.
     fn owner(&self) -> &str;
-    /// Make the platform secret `name` hold `value` (create or update).
-    fn put_secret<'a>(&'a self, name: &'a str, value: &'a str)
-        -> BoxFuture<'a, PlatformResult<()>>;
+    /// Make the platform secret `name` hold `value` (create or update),
+    /// described by `description`.
+    fn put_secret<'a>(
+        &'a self,
+        name: &'a str,
+        value: &'a str,
+        description: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<()>>;
     /// Replace a running or paused sandbox's header rules (a paused one
     /// gets them on resume).
     fn set_network_rules<'a>(
@@ -622,9 +627,10 @@ impl BotPlatform for PrimePlatform {
         &'a self,
         name: &'a str,
         value: &'a str,
+        description: &'a str,
     ) -> BoxFuture<'a, PlatformResult<()>> {
         async move {
-            credentials::ensure_secret(&self.client, name, value, "Prime Agent bot login")
+            credentials::ensure_secret(&self.client, name, value, description)
                 .await
                 .map_err(|error| credential_error(&error))
         }
