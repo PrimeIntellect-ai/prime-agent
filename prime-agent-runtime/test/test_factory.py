@@ -2758,6 +2758,7 @@ class FakeHost:
         self.on_message: Callable[[dict[str, Any]], None] | None = None
         self.check_errors: dict[str, str] = {}
         self.factory_task_busy_until_collect: dict[str, int] = {}
+        self.deleted: dict[str, dict[str, Any]] = {}
         # factory.limits answers the Rust max_transitions bound unless a
         # test scripts its error.
         self.limits_error: str | None = None
@@ -2889,8 +2890,21 @@ class FakeHost:
             results = []
             for target in payload["targets"]:
                 child = self.children.get(target)
+                if target in self.deleted:
+                    # The real host answers a deleted factory child with a
+                    # settled cancelled envelope that owns no background jobs.
+                    results.append(
+                        self._entry(
+                            child_id=target,
+                            name=self.deleted[target]["name"],
+                            status="cancelled",
+                            settled=True,
+                            error="deleted",
+                        )
+                    )
+                    continue
                 if child is None:
-                    continue  # deleted children vanish from collect results
+                    continue
                 outcome = (
                     self.child_outcomes.get(target)
                     or self.outcomes.get(child["node"])
@@ -2939,6 +2953,8 @@ class FakeHost:
         if request_type == "rlm.delete_subagent":
             target = payload["target"]
             child = self.children.pop(target, None)
+            if child is not None:
+                self.deleted[target] = child
             # The real host's delete receipt reports the row as cancelled
             # (a live child's delete settles it cancelled), so the kernel's
             # payload validation sees the same shape it sees in production.
@@ -2983,6 +2999,24 @@ class DeleteFailsHost(FakeHost):
             self.calls.append((request_type, payload or {}))
             raise RuntimeError("delete_subagent: child already gone")
         return await super().__call__(request_type, payload)
+
+
+class StaleCollectHost(FakeHost):
+    """FakeHost whose ``stale_collect``-th collect computes its results, then
+    suspends until ``release`` is set: the caller reads them stale."""
+
+    def __init__(self, clock: "FakeClock | None" = None, *, stale_collect: int):
+        super().__init__(clock=clock)
+        self.stale_collect = stale_collect
+        self.computed = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = await super().__call__(request_type, payload)
+        if request_type == "rlm.collect" and self.collects == self.stale_collect:
+            self.computed.set()
+            await self.release.wait()
+        return result
 
 
 class LateAnswerHost(FakeHost):
@@ -7609,6 +7643,114 @@ class FactoryEmitTest(_ExecutorTestCase):
         final = await rlm_module.rlm.factory.status(started["run_id"])
         self.assertEqual(final["state"], "done")
         self.assertEqual(len(self.host.spawn_calls("build")), 1)
+
+    @async_test
+    async def test_a_background_work_hold_tells_the_parent_once_and_ends_with_the_work(self) -> None:
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = True
+        owner_poll = self.host.gate("rlm.collect", 3)
+        started = await self.start()
+        await self.host.gate_entered("rlm.collect", 3).wait()
+
+        held = [notice for notice in self.host.notices if notice["kind"] == factory_module.TASK_WORK_HELD]
+        self.assertEqual(len(held), 1)
+        [design] = self.executor._runs[started["run_id"]].states["design"].entries[0].instances
+        self.assertIn(design.child_name, held[0]["detail"])
+        self.assertEqual(self.host.spawn_calls("build"), [])
+
+        self.host.outcomes["design"]["factory_task_busy"] = False
+        owner_poll.set()
+        status = await self.settle(started)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("build")), 1)
+
+    @async_test
+    async def test_each_settled_childs_background_work_hold_is_announced(self) -> None:
+        self.store_machine(
+            {
+                "states": [state("a", entry=True), state("b", entry=True), state("c")],
+                "transitions": [{"from": ["a", "b"], "to": "c"}],
+            },
+            spec_id="holds",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "a", "factory_task_busy": True}
+        self.host.outcomes["b"] = {"status": "done", "answer": "b", "factory_task_busy": True}
+        owner_poll = self.host.gate("rlm.collect", 3)
+        started = await self.start("holds")
+        await self.host.gate_entered("rlm.collect", 3).wait()
+        held = [notice for notice in self.host.notices if notice["kind"] == factory_module.TASK_WORK_HELD]
+        self.assertEqual(len(held), 2, held)
+
+        self.host.outcomes["a"]["factory_task_busy"] = False
+        self.host.outcomes["b"]["factory_task_busy"] = False
+        owner_poll.set()
+        status = await self.settle(started)
+        self.assertEqual(status["state"], "done")
+
+    @async_test
+    async def test_a_repaired_child_that_keeps_background_work_is_announced(self) -> None:
+        self.host.emitted["design"] = {"design": "the design"}
+        self.host.outcomes["design"] = {"status": "done", "factory_task_busy": False}
+
+        def repair(payload: dict[str, Any]) -> None:
+            (self.host.session_root / "child-1" / FACTORY_OUTPUTS_FILE).write_text(
+                json.dumps({"design": "the design", "risk": "high"}), encoding="utf-8"
+            )
+            self.host.outcomes["design"]["factory_task_busy"] = True  # a job outlives the repair
+
+        self.host.on_message = repair
+        later_poll = self.host.gate("rlm.collect", 4)
+        started = await self.start()
+        await self.host.gate_entered("rlm.collect", 4).wait()
+
+        held = [notice for notice in self.host.notices if notice["kind"] == factory_module.TASK_WORK_HELD]
+        self.assertEqual(len(held), 1, self.host.notices)
+        self.assertEqual(self.host.spawn_calls("build"), [])
+        self.host.outcomes["design"]["factory_task_busy"] = False
+        later_poll.set()
+        status = await self.settle(started)
+        self.assertEqual(status["state"], "done")
+
+    @async_test
+    async def test_deleting_the_held_child_starts_the_next_state(self) -> None:
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = True
+        owner_poll = self.host.gate("rlm.collect", 2)
+        started = await self.start()
+        await self.host.gate_entered("rlm.collect", 2).wait()
+
+        await rlm_module.rlm.delete_subagent("child-1")
+        owner_poll.set()
+        status = await self.settle(started)
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("build")), 1)
+
+    @async_test
+    async def test_a_stale_owner_poll_cannot_reopen_a_stopped_run(self) -> None:
+        # stop() lands while an owner poll's busy result is in flight.
+        stale = StaleCollectHost(clock=self.clock, stale_collect=3)
+        stale.session_root = self.host.session_root
+        stale.outcomes = self.host.outcomes
+        self.host = stale
+        repatch = patch.object(rlm_module, "host_request", self.host)
+        repatch.start()
+        self.addCleanup(repatch.stop)
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = True
+        started = await self.start()
+        run = self.executor._runs[started["run_id"]]
+        await self.host.computed.wait()
+
+        await rlm_module.rlm.factory.stop(started["run_id"])
+        self.host.release.set()
+        await run.task
+
+        [design] = run.states["design"].entries[0].instances
+        self.assertEqual(
+            (run.state, design.status, design.factory_task_activity),
+            ("stopped", "cancelled", "idle"),
+        )
 
     @async_test
     async def test_valid_emit_with_unverified_activity_is_stored_but_holds_successor(self) -> None:
