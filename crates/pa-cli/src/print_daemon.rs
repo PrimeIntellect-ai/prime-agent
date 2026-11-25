@@ -68,6 +68,10 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
         // atomically (TS `assertWorkerCreateOwner`).
         let summary = match created {
             Ok(summary) => summary,
+            Err(_) if signal.is_some() => {
+                client.close();
+                return Ok(signal);
+            }
             Err(error) => {
                 let refusal = describe_live_session_refusal(&client, &error, session_path).await;
                 client.close();

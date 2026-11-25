@@ -441,8 +441,7 @@ fn wait_until_unhosted(client: &mut Client, session_file: &Path, within: Duratio
     while !live_rows_for(client, "l-unhosted", session_file).is_empty() {
         assert!(
             Instant::now() < deadline,
-            "a worker still serves {} after {within:?}",
-            session_file.display()
+            "a worker still serves the session after {within:?}"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
