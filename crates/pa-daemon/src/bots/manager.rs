@@ -1351,7 +1351,9 @@ impl BotManager {
     /// ends the recorded head may be stale, and a restore from it would
     /// roll the bot back. A failed or empty query leaves the record
     /// alone, and so does a head that is still uploading and newer than
-    /// the winner: the recorded checkpoints stay the fallback.
+    /// the winner: the recorded checkpoints stay the fallback. The winner
+    /// is recorded without pruning, so a failed restore keeps the older
+    /// ones to fall back to; the next pause prunes them.
     async fn prefer_platform_checkpoint(&self, record: &mut BotRecord) {
         let label = bot_label(&record.bot_id);
         let listed = match retry(|| self.platform.list_checkpoints(&label)).await {
@@ -1398,9 +1400,15 @@ impl BotManager {
             return;
         }
         // The winner may already sit in the older list (the recorded head
-        // never became durable): it must exist once, as the head.
+        // never became durable): it must exist once, as the head. The
+        // winner is recorded without pruning: the restore may still fail
+        // and fall back to the older ones, so they must outlive it. The
+        // next pause prunes what the winner supersedes.
         record.older_checkpoint_ids.retain(|id| id != &newest.id);
-        if let Err(error) = self.replace_checkpoint(record, newest.id.clone()).await {
+        if let Some(old) = record.checkpoint_id.replace(newest.id.clone()) {
+            record.older_checkpoint_ids.push(old);
+        }
+        if let Err(error) = self.save(record.clone()) {
             eprintln!(
                 "pa-daemon: bot {}: could not record the newest platform checkpoint: {error:#}",
                 record.bot_id
