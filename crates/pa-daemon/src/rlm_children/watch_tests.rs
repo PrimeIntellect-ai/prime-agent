@@ -658,14 +658,15 @@ async fn factory_task_activity_is_written_inside_the_direct_observation() {
         .expect("spawn must succeed against the fake supervisor");
     let record = Arc::clone(&sessions.inner.children.lock().await[0]);
     let direct_observation = Arc::clone(&record.lock().await.direct_observation);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !record.lock().await.run.prompt_admitted() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the spawned task prompt must be admitted"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    assert!(
+        super::host::wait_for_prompt_state(
+            &record,
+            super::host::PromptWait::Admission,
+            Some(Instant::now() + Duration::from_secs(10)),
+        )
+        .await,
+        "the spawned task prompt must be admitted"
+    );
     record.lock().await.factory_task_busy = Some(true);
 
     gate.armed.store(true, Ordering::SeqCst);
