@@ -41,6 +41,21 @@ const REFINE_ANSWER_BOUND_MS: u64 = 2_000;
 /// store.
 const PROPOSAL: &str = r#"{"summary":"tactic","rationale":"the seed turn repeats a tactic","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
 
+/// The lookup child's proposal: one memory whose content runs past the
+/// registry's capped answer text, so only the whole final message parses.
+fn long_proposal() -> String {
+    json!({
+        "summary": "tactic",
+        "rationale": "the child checked the parent's history and store",
+        "expectedOutcome": "recall",
+        "edits": [{
+            "action": "create", "kind": "memory", "id": "m1", "title": "Tactic",
+            "content": "a".repeat(pa_daemon::rlm_child_model::ANSWER_TEXT_MAX_CHARS),
+        }],
+    })
+    .to_string()
+}
+
 /// What the mock answers the refinement planning call with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanMode {
@@ -53,8 +68,8 @@ enum PlanMode {
     /// fails with the cut-off reason).
     Length,
     /// A `python_repl` lookup cell first (the parent's transcript and
-    /// harness store, and both harness write scopes), then the proposal once
-    /// the cell's result is back.
+    /// harness store, and both harness write scopes), then the long proposal
+    /// once the cell's result is back.
     Lookup,
 }
 
@@ -416,11 +431,12 @@ fn serve(
             return write_sse_tool_call(&mut stream, &lookup_cell(&child_task(&body)));
         }
         let (reply, reason) = match mode {
-            PlanMode::Proposal | PlanMode::Lookup => (PROPOSAL, "stop"),
-            PlanMode::Garbage => ("not a plan", "stop"),
-            PlanMode::Length => ("{\"summary\":\"cut", "length"),
+            PlanMode::Proposal => (PROPOSAL.to_string(), "stop"),
+            PlanMode::Lookup => (long_proposal(), "stop"),
+            PlanMode::Garbage => ("not a plan".to_string(), "stop"),
+            PlanMode::Length => ("{\"summary\":\"cut".to_string(), "length"),
         };
-        return write_sse(&mut stream, reply, reason, &small_usage());
+        return write_sse(&mut stream, &reply, reason, &small_usage());
     }
     let mut state = hold.state.lock().expect("mock lock");
     if state.holding {
@@ -1615,7 +1631,13 @@ fn a_refine_child_looks_things_up_with_its_tools_before_it_proposes() {
     // entry and the proposal, and no store anywhere holds a child write.
     let state = local_harness_state(&session_dir);
     assert_eq!(state["entries"]["memory"]["seeded"]["title"], "Seeded");
-    assert_eq!(state["entries"]["memory"]["m1"]["title"], "Tactic");
+    assert_eq!(
+        state["entries"]["memory"]["m1"]["content"]
+            .as_str()
+            .map(str::len),
+        Some(pa_daemon::rlm_child_model::ANSWER_TEXT_MAX_CHARS),
+        "the whole final message committed, past the capped answer text"
+    );
     let mut pending = vec![agent_dir];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).expect("read dir").flatten() {

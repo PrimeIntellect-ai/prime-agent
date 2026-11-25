@@ -927,22 +927,32 @@ impl SupervisorChildSessionsInner {
     }
 
     /// Hand a refinement child's terminal outcome to the engine's refine
-    /// terminal hook: a finished run's final message is its proposal, any
-    /// other end fails the refinement with the run's reason. `false` for
-    /// any other child.
+    /// terminal hook: a finished run's final message is its proposal, read
+    /// whole (the record's answer text is capped for the roster and
+    /// collect), and any other end fails the refinement with the run's
+    /// reason. `false` for any other child.
     pub(super) async fn deliver_refine_outcome(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
-        let (active_session_id, outcome) = {
+        let (active_session_id, session_file, finished, error) = {
             let record = record.lock().await;
             if !record.refine_child {
                 return false;
             }
-            let outcome = match (record.run.verdict(), &record.answer_text) {
-                (Some(RunVerdict::Done), Some(answer)) => {
-                    RefineChildOutcome::Answered(answer.clone())
-                }
-                _ => RefineChildOutcome::Failed(record.run.error().map(str::to_string)),
-            };
-            (record.active_session_id.clone(), outcome)
+            (
+                record.active_session_id.clone(),
+                record.session_file.clone(),
+                matches!(record.run.verdict(), Some(RunVerdict::Done)),
+                record.run.error().map(str::to_string),
+            )
+        };
+        let outcome = if finished {
+            self.last_assistant_text(&active_session_id, session_file)
+                .await
+                .map_or(
+                    RefineChildOutcome::Failed(None),
+                    RefineChildOutcome::Answered,
+                )
+        } else {
+            RefineChildOutcome::Failed(error)
         };
         let hook = self
             .refine_terminal_hook
