@@ -147,9 +147,12 @@ impl WakeupSync {
             if let Err(error) = self.sync(false).await {
                 eprintln!("pa-daemon: bots: the relay wake-up sync failed: {error:#}");
             }
+            // Keep one poll deadline across the 1s file checks: a file tick
+            // must not restart the poll, so a failed PUT still retries.
+            let poll_deadline = tokio::time::Instant::now() + poll;
             loop {
                 tokio::select! {
-                    () = tokio::time::sleep(poll) => break,
+                    () = tokio::time::sleep_until(poll_deadline) => break,
                     () = WAKEUP_SYNC_NOTIFY.notified() => break,
                     () = tokio::time::sleep(FILE_POLL) => {
                         let current = request_path
@@ -198,6 +201,7 @@ pub(crate) fn wakeup_set(agent_dir: &Path) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use pa_core::cron::store::{
         AgentCronJobStore, CreateAgentCronJobInput, RlmHeartbeatStatusUpdate, RlmHeartbeatUpdate,
@@ -345,6 +349,35 @@ mod tests {
         (address, server)
     }
 
+    /// A relay that fails the first PUT and accepts the rest, counting
+    /// requests so a test can see the poll retry.
+    async fn flaky_relay() -> (
+        std::net::SocketAddr,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&requests);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let _ = read_request(&mut socket).await;
+                let number = count.fetch_add(1, Ordering::SeqCst) + 1;
+                let response = if number == 1 {
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (address, requests, task)
+    }
+
     fn write_config(
         dir: &Path,
         address: std::net::SocketAddr,
@@ -455,5 +488,47 @@ mod tests {
         let request = server.await.unwrap();
         assert!(!request.is_empty());
         assert!(!sync.sync(false).await.unwrap(), "unchanged set skipped");
+    }
+
+    /// A failed PUT must retry on the poll deadline. The 1s file checks
+    /// must not restart that deadline.
+    #[tokio::test]
+    async fn a_failed_put_retries_on_the_poll_deadline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let now = crate::util::now_ms();
+        let store = AgentCronJobStore::for_session_artifacts();
+        let main = artifact(root, "main");
+        std::fs::create_dir_all(&main).unwrap();
+        store.register_session_artifact("main", &main);
+        add_rlm(&store, "live-main", "main", now, "every 10m");
+
+        let (address, requests, relay) = flaky_relay().await;
+        let config = write_config(root, address, "bot-1", "sbx-1");
+        let sync = Arc::new(WakeupSync::new(config, root.to_path_buf()).unwrap());
+        // The poll is longer than the 1s file check, so the file check
+        // must not restart it.
+        let loop_task = tokio::spawn(
+            Arc::clone(&sync).run_loop(Duration::from_millis(10), Duration::from_millis(1200)),
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while requests.load(Ordering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 1, "the boot PUT");
+        // A file tick must not restart the poll.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 1, "no early retry");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while requests.load(Ordering::SeqCst) < 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "the poll deadline retried the failed PUT"
+        );
+        loop_task.abort();
+        relay.abort();
     }
 }
