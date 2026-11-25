@@ -58,10 +58,10 @@ impl TurnRunner {
                 .as_ref()
                 .and_then(std::sync::Weak::upgrade);
             let inbox = agent_engine.as_ref().and_then(|engine| engine.inbox());
-            let same_cell_work = agent_engine.as_ref().is_some_and(|engine| {
-                let cells = creating_cells(&self.inbox_arrivals.lock().unwrap());
-                engine.has_background_bash_handle_from(&cells)
-            });
+            let queried_cells = creating_cells(&self.inbox_arrivals.lock().unwrap());
+            let same_cell_work = agent_engine
+                .as_ref()
+                .is_some_and(|engine| engine.has_background_bash_handle_from(&queried_cells));
             let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
@@ -74,7 +74,7 @@ impl TurnRunner {
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.
                 if core.queued_input_parked(&self.input_pauses)
-                    || (same_cell_work && self.inbox_row_held(&core))
+                    || self.inbox_row_held(&core, &queried_cells, same_cell_work)
                 {
                     core.busy = false;
                     None
@@ -188,13 +188,24 @@ impl TurnRunner {
     }
 
     /// Whether the queued inbox arrival row waits while handles from its
-    /// cells still run (the caller checks the handles): it covers only
-    /// successful bash completions. Each handle's settle wakes the runner
+    /// cells still run: it covers only successful bash completions, and
+    /// `same_cell_work` answers for `queried_cells` (read before the core
+    /// lock). An arrival from another cell that joined the batch since then
+    /// holds this pass too: its admission wakes the runner, and the next
+    /// pass queries its cell. Each handle's settle wakes the runner
     /// (`on_background_work_settled`), and any other queued work takes the
     /// row with it. A held row parks like idle: the live handles already
     /// keep the kernel and the worker resident.
-    fn inbox_row_held(&self, core: &SessionCore) -> bool {
-        core.inbox_row_holdable() && only_successes(&self.inbox_arrivals.lock().unwrap())
+    fn inbox_row_held(
+        &self,
+        core: &SessionCore,
+        queried_cells: &std::collections::BTreeSet<String>,
+        same_cell_work: bool,
+    ) -> bool {
+        let batch = self.inbox_arrivals.lock().unwrap();
+        core.inbox_row_holdable()
+            && only_successes(&batch)
+            && (same_cell_work || !creating_cells(&batch).is_subset(queried_cells))
     }
 
     /// Take the next delivery from `lane` and mark the session busy with
