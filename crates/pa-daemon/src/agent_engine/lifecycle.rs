@@ -127,7 +127,7 @@ impl AgentSessionEngine {
         // Queue delivery modes arrive at create, so the engine starts
         // unseeded (None keeps the TS default "one-at-a-time").
         let queue_modes = std::sync::Mutex::new((None, None));
-        Ok(Self {
+        let engine = Self {
             runtime,
             config,
             mcp,
@@ -166,6 +166,7 @@ impl AgentSessionEngine {
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             request_auth_oauth: std::sync::Arc::new(pa_core::auth::ProviderOAuth::new()),
             request_auth_registry: std::sync::Mutex::new(None),
+            selection_api_key_provider: std::sync::RwLock::new(None),
             image_route: std::sync::Mutex::new(None),
             reload_lock: std::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -204,7 +205,11 @@ impl AgentSessionEngine {
             progress_note_emit: std::sync::Mutex::new(None),
             model_refusal_telemetry,
             semantic_identity: std::sync::Mutex::new(None),
-        })
+        };
+        if engine.current_selection().api_key.is_some() {
+            engine.bind_selection_api_key();
+        }
+        Ok(engine)
     }
 
     /// Install the worker's queue-backed cell wake (the pending predicate
