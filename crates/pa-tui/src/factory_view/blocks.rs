@@ -452,8 +452,18 @@ pub(crate) fn block_diagram(
             }
         })
         .collect();
+    // A self-looping box keeps room for its `↺ label` on its right, so a
+    // sibling box on the same layer starts past it.
+    let slot = |item: usize| -> usize {
+        width[item]
+            + if item < n && !self_loops[item].is_empty() {
+                self_loops[item].join(", ").chars().count() + 3
+            } else {
+                0
+            }
+    };
     let row_width = |row: &Vec<usize>| -> usize {
-        row.iter().map(|&item| width[item]).sum::<usize>() + GAP * row.len().saturating_sub(1)
+        row.iter().map(|&item| slot(item)).sum::<usize>() + GAP * row.len().saturating_sub(1)
     };
     let widest = layers.iter().map(row_width).max().unwrap_or(0);
     let mut x = vec![0usize; items];
@@ -461,7 +471,7 @@ pub(crate) fn block_diagram(
         let mut at = MARGIN + (widest - row_width(row)) / 2;
         for &item in row {
             x[item] = at;
-            at += width[item] + GAP;
+            at += slot(item) + GAP;
         }
     }
     let center = |item: usize| x[item] + width[item] / 2;
@@ -662,6 +672,18 @@ pub(crate) fn block_diagram(
         }
     }
 
+    // A box's border role, for the tees edges punch into it: the
+    // selection's accent, else the live status color, else the plain frame.
+    let border_role = |item: usize| {
+        if selected == Some(item) {
+            Role::Selected
+        } else if let Some(node) = overlay.and_then(|overlay| overlay.nodes.get(&states[item].id)) {
+            Role::LiveBorder(node.color)
+        } else {
+            Role::Border
+        }
+    };
+
     // Forward segments, band by band.
     for b in 1..depth {
         let band = &bands[b];
@@ -678,11 +700,7 @@ pub(crate) fn block_diagram(
             let mut line_start = start;
             if from < n {
                 let tee = if selected == Some(from) { '┳' } else { '┬' };
-                let role = if selected == Some(from) {
-                    Role::Selected
-                } else {
-                    Role::Border
-                };
+                let role = border_role(from);
                 // The tee rides the box's own bottom border (the layer's
                 // trailing child rows sit below it); the line then drops
                 // through them to the band.
@@ -782,11 +800,7 @@ pub(crate) fn block_diagram(
         } else {
             '┬'
         };
-        let role = if selected == Some(back.from) {
-            Role::Selected
-        } else {
-            Role::Border
-        };
+        let role = border_role(back.from);
         canvas.put(center(back.from), bottom, &tee.to_string(), role);
         canvas.vertical(center(back.from), bottom, departure);
         canvas.horizontal(departure, center(back.from), column);
