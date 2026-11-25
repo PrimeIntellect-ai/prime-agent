@@ -49,13 +49,15 @@ pub(super) struct KnownSessions {
 
 impl Supervisor {
     /// Gather the catalog's inputs for `catalog_dir` (the default sessions
-    /// directory unless a command names another). `roster_roots` adds the
-    /// roster-known top-level sessions of other folders (the overview).
+    /// directory unless a command names another). `other_folders` adds the
+    /// roster-known top-level sessions of other folders and the ledgers of
+    /// every root's folder (the overview); without it only the catalog's and
+    /// the default ledger are read (`list --all`).
     pub(super) async fn known_session_roots(
         self: &Arc<Self>,
         catalog_dir: PathBuf,
         residents: Vec<ResidentFile>,
-        roster_roots: bool,
+        other_folders: bool,
     ) -> Result<KnownSessionRoots> {
         let default_dir = paths::sessions_dir(&self.options.agent_dir)?;
         let resident_files: HashSet<PathBuf> = residents
@@ -63,7 +65,7 @@ impl Supervisor {
             .map(|resident| canonical_session_path(&resident.session_file))
             .collect();
         let mut roster_files = Vec::new();
-        if roster_roots {
+        if other_folders {
             let roster = self.roster.lock().unwrap();
             let mut seen = HashSet::new();
             for entry in roster.entries() {
@@ -93,17 +95,18 @@ impl Supervisor {
         // Production admission writes every spawn edge to the default
         // ledger whatever `sessionDir` the create carried, while a custom
         // directory's own ledger holds older edges: the walk reads the
-        // default ledger and the ledger of every directory a root lives in.
+        // default ledger, the catalog's, and (with `other_folders`) the
+        // ledger of every directory a root lives in.
         let mut ledgers = BTreeMap::new();
         ledgers.insert(default_dir.clone(), self.rlm_spawn_ledger_for(None).await?);
+        let root_dirs = residents
+            .iter()
+            .map(|resident| resident.session_file.clone())
+            .chain(roster_files.iter().cloned())
+            .filter_map(|file| file.parent().map(PathBuf::from))
+            .filter(|_| other_folders);
         let mut dirs: Vec<PathBuf> = std::iter::once(catalog_dir.clone())
-            .chain(
-                residents
-                    .iter()
-                    .map(|resident| resident.session_file.clone())
-                    .chain(roster_files.iter().cloned())
-                    .filter_map(|file| file.parent().map(PathBuf::from)),
-            )
+            .chain(root_dirs)
             .collect();
         dirs.sort();
         dirs.dedup();
