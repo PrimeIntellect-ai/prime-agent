@@ -1388,6 +1388,42 @@ async fn a_pending_head_survives_a_promotion_of_an_older_durable_checkpoint() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_promotion_keeps_the_older_checkpoints_until_the_next_pause() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a newer durable checkpoint.
+    let external = platform.external_checkpoint(&sandbox_id, true);
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str())
+    );
+    // The restore may still fail and fall back to the older ones: the
+    // promotion must not prune them before it succeeds.
+    assert!(
+        platform.state().checkpoints.contains_key(&durable),
+        "the older durable checkpoint stays as the restore fallback"
+    );
+    let record = manager.get("bot-a").unwrap();
+    assert_eq!(record.checkpoint_id.as_deref(), Some(external.as_str()));
+    assert!(
+        record.older_checkpoint_ids.contains(&durable),
+        "the record keeps the fallback chain"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_failed_install_fails_spawn_and_cleans_up() {
     for exit_code in [version::UNPUBLISHED_EXIT_CODE, version::NO_GUEST_EXIT_CODE] {
         let (_dir, platform, manager) = setup();
