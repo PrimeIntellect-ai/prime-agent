@@ -1397,7 +1397,10 @@ async fn the_bootstrap_settings_write_waits_for_the_guest_lock() {
         )
         .spawn()
         .expect("python3");
-    // While the script waits, the daemon writes new settings.
+    // While the script waits, the daemon writes new settings. The sleep is
+    // only the opportunistic mid-check: the merge assertions below are the
+    // deterministic contract, and they hold whichever side of the sleep the
+    // script started on.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert!(
         !std::fs::read_to_string(&settings)
@@ -1411,7 +1414,14 @@ async fn the_bootstrap_settings_write_waits_for_the_guest_lock() {
     )
     .unwrap();
     std::fs::remove_dir(&lock).unwrap();
-    assert!(script.wait().expect("python3 exits").success());
+    let exited = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || script.wait()),
+    )
+    .await
+    .expect("python3 exits within the timeout")
+    .expect("the wait task joins");
+    assert!(exited.expect("python3 exits").success());
     let merged: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     assert_eq!(merged["writer"], "guest-daemon");

@@ -19,7 +19,7 @@ use pa_core::auth::{
     PRIME_INFERENCE_PROVIDER_ID,
 };
 use pa_core::models::PRIME_INFERENCE_DEFAULT_MODEL_ID;
-use pa_sandbox::transport::{ReqwestSandboxTransport, SandboxTransport};
+use pa_sandbox::transport::SandboxTransport;
 use pa_sandbox::{HeaderRule, PrimeSandboxClient};
 use sha2::Sha256;
 
@@ -369,8 +369,8 @@ fn pass_another_model() -> String {
 /// in the client's team, the scope its sandboxes bill to, which a header
 /// rule's secret must share. `reserved_hosts` rule hosts are left for the
 /// bot's logins.
-pub async fn provision(
-    client: &PrimeSandboxClient<ReqwestSandboxTransport>,
+pub async fn provision<T: SandboxTransport>(
+    client: &PrimeSandboxClient<T>,
     agent_dir: &Path,
     owner: &str,
     provider: Option<&str>,
@@ -440,15 +440,21 @@ pub async fn provision(
     if let (Some(lock), Some(planned_token)) = (github_lock, planned_github_token) {
         let recheck =
             super::github::recheck_provisioned_token(client, &agent_dir, &planned_token).await;
+        // A stale-reclaimed lock means a clear may have run while this
+        // provisioning wrote: a wedged holder must not outlive its lock
+        // silently. Treat the takeover like a failed recheck.
+        let stolen = !lock.owns();
         drop(lock);
-        if let Err(error) = recheck {
-            // The secrets still hold a token the machine no longer resolves,
-            // and they could not be removed: this bot runs without the rules
-            // that would send it, never with the stale token.
-            eprintln!(
-                "bot credentials: GitHub is left out of this bot: the stale secrets could \
-                 not be removed: {error:#}"
-            );
+        let failure = recheck.err().or_else(|| {
+            stolen
+                .then(|| anyhow::anyhow!("the bots github lock was taken over while provisioning"))
+        });
+        if let Some(error) = failure {
+            // The secrets may still hold a token the machine no longer
+            // resolves, and the cleanup could not prove otherwise: this bot
+            // runs without the rules that would send it, never with a token
+            // the machine no longer resolves.
+            eprintln!("bot credentials: GitHub is left out of this bot: {error:#}");
             provisioned
                 .rules
                 .retain(|host, _| !planned_github_hosts.contains(host));
@@ -475,8 +481,8 @@ fn effective_prime_team(auth: &AuthStorage) -> Option<PrimeTeamCredential> {
     }
 }
 
-async fn provision_planned(
-    client: &PrimeSandboxClient<ReqwestSandboxTransport>,
+async fn provision_planned<T: SandboxTransport>(
+    client: &PrimeSandboxClient<T>,
     planned: Vec<Planned>,
 ) -> Provisioned {
     let mut confirmed = CONFIRMED.lock().await;
@@ -539,8 +545,8 @@ async fn provision_planned(
 /// Confirm one fingerprinted secret on the platform: listed (one list
 /// serves every candidate), else created. A refused create lists again:
 /// another process may have created it meanwhile.
-async fn confirm_secret(
-    client: &PrimeSandboxClient<ReqwestSandboxTransport>,
+async fn confirm_secret<T: SandboxTransport>(
+    client: &PrimeSandboxClient<T>,
     secret: &str,
     value: &str,
     description: &str,
@@ -563,8 +569,8 @@ async fn confirm_secret(
     Ok(())
 }
 
-async fn secret_names(
-    client: &PrimeSandboxClient<ReqwestSandboxTransport>,
+async fn secret_names<T: SandboxTransport>(
+    client: &PrimeSandboxClient<T>,
 ) -> anyhow::Result<BTreeSet<String>> {
     Ok(client
         .list_secrets()
@@ -634,9 +640,16 @@ fn guest_auth_json(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use pa_core::auth::NoOAuth;
+    use pa_sandbox::transport::{
+        ResponseChunks, StreamedResponse, TransportRequest, TransportResponse,
+    };
+    use pa_sandbox::{ClientOptions, SandboxError};
     use serde_json::json;
 
     use super::*;
@@ -836,5 +849,107 @@ mod tests {
             json!({ "type": "api_key", "key": GUEST_API_KEY_PLACEHOLDER })
         );
         assert!(guest_auth_json(&[], Some(&team)).is_none());
+    }
+
+    /// Answers from a queue (the last answer repeats), records requests,
+    /// can fail the next DELETE, and clears the stored GitHub token after
+    /// N creates: a token changing mid-provision, as a concurrent clear
+    /// does.
+    #[derive(Default)]
+    struct Platform {
+        answers: Mutex<VecDeque<serde_json::Value>>,
+        requests: Mutex<Vec<TransportRequest>>,
+        fail_next_delete: AtomicBool,
+        clear_token_after_creates: AtomicUsize,
+        agent_dir: Mutex<Option<std::path::PathBuf>>,
+        creates: AtomicUsize,
+    }
+
+    impl SandboxTransport for &Platform {
+        fn execute(
+            &self,
+            request: TransportRequest,
+        ) -> impl Future<Output = Result<TransportResponse, SandboxError>> + Send {
+            if request.method.as_str() == "POST"
+                && self.clear_token_after_creates.load(Ordering::SeqCst)
+                    == self.creates.fetch_add(1, Ordering::SeqCst) + 1
+            {
+                if let Some(dir) = self.agent_dir.lock().unwrap().clone() {
+                    let _ = super::super::github::clear_token(&dir);
+                }
+            }
+            self.requests.lock().unwrap().push(request.clone());
+            let mut answers = self.answers.lock().unwrap();
+            let body = if answers.len() > 1 {
+                answers.pop_front()
+            } else {
+                answers.front().cloned()
+            };
+            let refused = request.method.as_str() == "DELETE"
+                && self.fail_next_delete.swap(false, Ordering::SeqCst);
+            std::future::ready(Ok(TransportResponse {
+                status: if refused { 500 } else { 200 },
+                body: body.unwrap_or_default().to_string().into_bytes(),
+            }))
+        }
+
+        fn execute_streaming(
+            &self,
+            _request: TransportRequest,
+        ) -> impl Future<Output = Result<StreamedResponse, SandboxError>> + Send {
+            std::future::ready(Ok(StreamedResponse {
+                status: 500,
+                headers: Vec::new(),
+                body: ResponseChunks::Queued(VecDeque::new()),
+            }))
+        }
+    }
+
+    /// The provisioning wiring behind the recheck: when the token changes
+    /// mid-provision and the stale-secret removal fails, the bot's rules
+    /// lose the GitHub hosts (reverting the retain keeps this red).
+    #[tokio::test]
+    async fn a_failed_stale_removal_drops_the_github_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::github::store_token(dir.path(), "ghp_first").unwrap();
+        let platform = Platform::default();
+        // ensure_secret lists and creates both secrets; the recheck then
+        // lists them and refuses the first delete.
+        platform.answers.lock().unwrap().extend([
+            json!({ "data": [] }),
+            json!({}),
+            json!({ "data": [] }),
+            json!({}),
+            json!({ "data": [
+                { "id": "id-1", "name": "PRIME_AGENT_GITHUB_OWNER" },
+                { "id": "id-2", "name": "PRIME_AGENT_GITHUB_OWNER_BASIC" },
+            ] }),
+            json!({}),
+        ]);
+        platform
+            .clear_token_after_creates
+            .store(2, Ordering::SeqCst);
+        platform.fail_next_delete.store(true, Ordering::SeqCst);
+        *platform.agent_dir.lock().unwrap() = Some(dir.path().to_path_buf());
+        let client = PrimeSandboxClient::with_transport(
+            &platform,
+            "prime-key",
+            ClientOptions {
+                base_url: "https://api.test".to_string(),
+                team_id: None,
+                request_timeout: None,
+                allow_insecure_localhost: false,
+            },
+        )
+        .unwrap();
+
+        let provisioned = provision(&client, dir.path(), "OWNER", None, true, 0).await;
+        let rules = provisioned.rules();
+
+        assert!(
+            !rules.contains_key("api.github.com") && !rules.contains_key("github.com"),
+            "the GitHub hosts are dropped: {rules:?}"
+        );
+        assert!(rules.is_empty(), "GitHub was the only candidate");
     }
 }
