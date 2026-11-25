@@ -1,0 +1,1 @@
+- `prime-agent shutdown --force` no longer reports a worker record whose pid was reused by another process as a failed stop: the stale worker's socket, descriptor and recovery journal are pruned, and the pid's new owner is never signalled.
