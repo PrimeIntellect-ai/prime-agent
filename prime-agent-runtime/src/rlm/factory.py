@@ -5149,12 +5149,8 @@ class FactoryExecutor:
                 check_error = None
             except RuntimeError as error:
                 check_error = str(error)
-            if entry.status != "running":
-                # A stop claimed the entry during the check; the instance it
-                # could not reach (its process was already claimed) settles too.
-                instance.status = "cancelled"
-                self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index)
-                return
+            if instance.status != "running":
+                return  # a stop or fail-fast pass cancelled it during the check
             if check_error is not None:
                 await self._apply_instance_failure(
                     run, state, entry, instance, f"python state output: {check_error}", retry=True
@@ -6102,37 +6098,40 @@ class FactoryExecutor:
                 for instance in entry.instances:
                     if (
                         instance.status != "running"
-                        or instance.process is None
+                        or "python" not in state.spec
                         or instance.ownership_change_in_progress
                     ):
                         continue
                     process = instance.process
-                    instance.ownership_change_in_progress = True
-                    try:
-                        await process.stop()
-                    except Exception as exc:
-                        instance.ownership_change_in_progress = False
-                        self._event(
-                            run,
-                            "cancel_failed",
-                            node=state_id,
-                            entry=entry.index,
-                            instance=instance.index,
-                            error=str(exc),
-                        )
-                    else:
+                    if process is not None:
+                        instance.ownership_change_in_progress = True
+                        try:
+                            await process.stop()
+                        except Exception as exc:
+                            instance.ownership_change_in_progress = False
+                            self._event(
+                                run,
+                                "cancel_failed",
+                                node=state_id,
+                                entry=entry.index,
+                                instance=instance.index,
+                                error=str(exc),
+                            )
+                            continue
                         instance.ownership_change_in_progress = False
                         instance.process = None
-                        instance.status = "cancelled"
-                        if entry.status == "running" and all(
-                            other.status not in ("pending", "running", "error")
-                            and other.process is None
-                            and other.child_id is None
-                            and not other.ownership_change_in_progress
-                            for other in entry.instances
-                        ):
-                            entry.status = "cancelled"
-                        self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index)
+                    # A call whose exit is being settled (its output check in
+                    # flight) has no process left; it is claimed here too.
+                    instance.status = "cancelled"
+                    if entry.status == "running" and all(
+                        other.status not in ("pending", "running", "error")
+                        and other.process is None
+                        and other.child_id is None
+                        and not other.ownership_change_in_progress
+                        for other in entry.instances
+                    ):
+                        entry.status = "cancelled"
+                    self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index)
 
     async def _cancel_running(self, run: FactoryRun) -> None:
         from . import delete_subagent
