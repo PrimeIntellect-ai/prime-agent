@@ -197,7 +197,7 @@ impl Supervisor {
                 })
             })
             .collect();
-        let roots = match self.known_session_roots(sessions_dir, resident_files).await {
+        let roots = match self.known_session_roots(sessions_dir, resident_files, true).await {
             Ok(roots) => roots,
             Err(error) => {
                 return response_failure(Some(command_id), type_name, &error.to_string(), None)

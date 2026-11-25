@@ -469,7 +469,7 @@ impl Supervisor {
                 }
             }
             let mut resident_summaries = self.worker_summaries(&residents).await;
-            let roots = match self.known_session_roots(dir, resident_files).await {
+            let roots = match self.known_session_roots(dir, resident_files, false).await {
                 Ok(roots) => roots,
                 Err(error) => {
                     return response_failure(
@@ -1036,70 +1036,6 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(ROUTE_TIMEOUT_MS),
             "one wedged resident held the list for {elapsed:?}"
-        );
-    }
-
-    /// `list` with `all` reads the shared session catalog: a passivated
-    /// session opened from a custom `sessionDir`, which only the roster
-    /// still knows, lists beside the default directory's saved sessions.
-    #[allow(clippy::await_holding_lock)] // the env guard must span the async list
-    #[tokio::test]
-    async fn list_all_includes_a_roster_known_session_of_a_custom_directory() {
-        let _env = crate::test_support::KernelEnvOverride::apply(&[(paths::SESSION_DIR_ENV, None)]);
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let supervisor = Arc::new(supervisor(dir.path()));
-        let custom = dir.path().join("custom");
-        std::fs::create_dir_all(&custom).expect("custom dir");
-        let file = custom.join("custom-owner.jsonl");
-        std::fs::write(
-            &file,
-            "{\"type\":\"session\",\"version\":1,\"id\":\"custom-owner\",\"timestamp\":\"2026-11-06T00:00:00Z\",\"cwd\":\"/tmp\"}\n",
-        )
-        .expect("session file");
-        supervisor.roster.lock().unwrap().write_seeded(
-            json!({
-                "id": "custom-owner",
-                "sessionId": "custom-owner",
-                "runtimeKind": "top-level",
-                "activity": "idle",
-                "isSessionActive": false,
-                "sessionFile": file.to_string_lossy(),
-            }),
-            false,
-        );
-        let response = supervisor
-            .handle_list("l1".to_string(), "list".to_string(), Some(true), None, None)
-            .await;
-        assert!(response.success, "{response:?}");
-        let rows = response.data.expect("sessions data")["sessions"].clone();
-        assert!(
-            rows.as_array()
-                .expect("session rows")
-                .iter()
-                .any(|row| row["id"] == "custom-owner"),
-            "{rows:#}"
-        );
-        // A listing of another named folder lists that folder only.
-        let other = dir.path().join("other");
-        std::fs::create_dir_all(&other).expect("other dir");
-        let response = supervisor
-            .handle_list(
-                "l2".to_string(),
-                "list".to_string(),
-                Some(true),
-                None,
-                Some(other.to_string_lossy().to_string()),
-            )
-            .await;
-        assert!(response.success, "{response:?}");
-        let rows = response.data.expect("sessions data")["sessions"].clone();
-        assert!(
-            !rows
-                .as_array()
-                .expect("session rows")
-                .iter()
-                .any(|row| row["id"] == "custom-owner"),
-            "{rows:#}"
         );
     }
 
