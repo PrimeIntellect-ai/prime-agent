@@ -311,6 +311,17 @@ without its project Python code.",
         "--cwd <dir>  Resolve for this working directory (default: current)",
         "--json       Print the skills as JSON",
     ]),
+    CommandSpec::new(
+        &["bots"],
+        "bots github <set|clear|status>",
+        "Manage the GitHub token bots use",
+    )
+    .description(
+        "Bots reach GitHub through Prime header rules; the token never enters a bot. \
+`set` reads a token from stdin and stores it on this machine. Without one, bots use the gh CLI login. \
+`clear` removes the stored token and its Prime secrets. `status` shows the token source, \
+the bots.github setting, and the git author.",
+    ),
 ];
 
 /// Command names that once existed and now print removal guidance.
@@ -641,7 +652,7 @@ mod tests {
     #[test]
     fn help_command_request() {
         assert!(is_help_command_request(&["schedule", "bogus"]));
-        assert!(!is_help_command_request(&["bogus"]));
+        assert!(!is_help_command_request(&["xyzzy"]));
         assert!(is_help_command_request(&[]));
         assert!(is_help_command_request(&["daemon"]));
     }

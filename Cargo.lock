@@ -1630,6 +1630,7 @@ name = "pa-daemon"
 version = "0.10.5"
 dependencies = [
  "anyhow",
+ "base64",
  "filetime",
  "futures",
  "globset",

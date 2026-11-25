@@ -19,7 +19,7 @@ use pa_core::auth::{
     PRIME_INFERENCE_PROVIDER_ID,
 };
 use pa_core::models::PRIME_INFERENCE_DEFAULT_MODEL_ID;
-use pa_sandbox::transport::ReqwestSandboxTransport;
+use pa_sandbox::transport::{ReqwestSandboxTransport, SandboxTransport};
 use pa_sandbox::{HeaderRule, PrimeSandboxClient};
 use sha2::Sha256;
 
@@ -71,7 +71,7 @@ fn secret_name(provider: &str) -> String {
 
 /// A short id of `key` for its secret name: a rotated key gets a new
 /// secret. The key is the MAC key over a fixed label, never hashed data.
-fn key_fingerprint(key: &str) -> String {
+pub(super) fn key_fingerprint(key: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC takes any key length");
     mac.update(b"prime-agent bot credential");
@@ -82,6 +82,35 @@ fn key_fingerprint(key: &str) -> String {
             write!(hex, "{byte:02X}").expect("write to String");
             hex
         })
+}
+
+/// Make the platform secret `name` hold `value`: update it when it
+/// exists, else create it. A refused create lists again, because another
+/// process may have created it meanwhile.
+///
+/// # Errors
+/// Returns an error when the list, the create, or the update fails.
+pub async fn ensure_secret<T: SandboxTransport>(
+    client: &PrimeSandboxClient<T>,
+    name: &str,
+    value: &str,
+    description: &str,
+) -> anyhow::Result<()> {
+    let find = |secrets: Vec<pa_sandbox::PlatformSecret>| {
+        secrets
+            .into_iter()
+            .find(|secret| secret.name == name)
+            .map(|secret| secret.id)
+    };
+    let id = match find(client.list_secrets().await?) {
+        Some(id) => id,
+        None => match client.create_secret(name, value, Some(description)).await {
+            Ok(_) => return Ok(()),
+            Err(error) => find(client.list_secrets().await?).ok_or(error)?,
+        },
+    };
+    client.update_secret(&id, value).await?;
+    Ok(())
 }
 
 /// The auth header pa-ai's request builder sets for `provider` over
@@ -138,9 +167,10 @@ fn provider_rules(provider: &str, secret: &str) -> BTreeMap<String, HeaderRule> 
 /// for `required`), `required` first, then prime-inference. OAuth logins are left out. A
 /// host an earlier provider holds (the platform never combines rules), or
 /// one past the platform's host limit, is left out.
-fn injections(auth: &mut AuthStorage, required: &str) -> Vec<Injection> {
+fn injections(auth: &mut AuthStorage, required: &str, max_hosts: usize) -> Vec<Injection> {
     let stored = auth.get_all();
     let mut providers = auth.list();
+    providers.retain(|provider| provider != super::github::GITHUB_AUTH_ID);
     if !providers.iter().any(|provider| provider == required) {
         providers.push(required.to_string());
     }
@@ -160,7 +190,7 @@ fn injections(auth: &mut AuthStorage, required: &str) -> Vec<Injection> {
         let fingerprint = key_fingerprint(&key);
         let secret = format!("{}_{fingerprint}", secret_name(&provider));
         let mut rules = provider_rules(&provider, &secret);
-        rules.retain(|host, _| hosts.len() < MAX_RULE_HOSTS && hosts.insert(host.clone()));
+        rules.retain(|host, _| hosts.len() < max_hosts && hosts.insert(host.clone()));
         if rules.is_empty() {
             eprintln!("bot credentials: no injectable API host for {provider}; its key stays home");
             continue;
@@ -272,20 +302,22 @@ fn pass_another_model() -> String {
 }
 
 /// Make sure the platform holds a secret for each stored provider key it
-/// can inject: list first, create the missing, once per process. The
+/// can inject: list first, create the missing, once per process.
+/// `reserved_hosts` rule hosts are left for other rules. The
 /// secrets live in the client's team, the scope its sandboxes bill to,
 /// which a header rule's secret must share.
 pub async fn provision(
     client: &PrimeSandboxClient<ReqwestSandboxTransport>,
     agent_dir: &Path,
     provider: &str,
+    reserved_hosts: usize,
 ) -> Provisioned {
     // Reading the auth storage may run a `!command` key: keep it off the runtime.
     let (agent_dir, required) = (agent_dir.to_path_buf(), provider.to_string());
     let (injections, prime_team) = match tokio::task::spawn_blocking(move || {
         let mut auth = AuthStorage::create(&agent_dir);
         (
-            injections(&mut auth, &required),
+            injections(&mut auth, &required, MAX_RULE_HOSTS - reserved_hosts),
             effective_prime_team(&auth),
         )
     })
@@ -437,6 +469,7 @@ mod tests {
             },
             "google": { "type": "api_key", "key": "sk-google" },
             "serper": { "type": "api_key", "key": "sk-serper" },
+            "prime-agent-bots-github": { "type": "api_key", "key": "ghp-bots" },
             "anthropic": { "type": "oauth", "access": "a", "refresh": "r", "expires": 1 },
             "openai-codex": {
                 "type": "oauth", "access": "a", "refresh": "r", "expires": 1, "accountId": "acct",
@@ -507,7 +540,11 @@ mod tests {
     /// host (serper) are not.
     #[test]
     fn only_stored_api_keys_with_an_api_host_are_injected() {
-        let injected = injections(&mut auth(&home_auth()), PRIME_INFERENCE_PROVIDER_ID);
+        let injected = injections(
+            &mut auth(&home_auth()),
+            PRIME_INFERENCE_PROVIDER_ID,
+            MAX_RULE_HOSTS,
+        );
         let summary: Vec<(&str, &str)> = injected
             .iter()
             .map(|injection| (injection.provider.as_str(), injection.key.as_str()))
@@ -521,6 +558,7 @@ mod tests {
         let rotated = injections(
             &mut auth(&json!({ "google": { "type": "api_key", "key": "sk-google-2" } })),
             "google",
+            MAX_RULE_HOSTS,
         );
         assert_ne!(rotated[0].secret, injected[1].secret);
 
@@ -532,6 +570,7 @@ mod tests {
                 "prime-inference": { "type": "api_key", "key": "" },
             })),
             PRIME_INFERENCE_PROVIDER_ID,
+            MAX_RULE_HOSTS,
         );
         let providers: Vec<&str> = keyed
             .iter()

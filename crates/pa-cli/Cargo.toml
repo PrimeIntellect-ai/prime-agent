@@ -18,6 +18,8 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `bots github set` reads the token without echo.
+crossterm = "0.28"
 
 [[bin]]
 name = "prime-agent"
@@ -39,7 +41,6 @@ sha2 = "0.11"
 hex = "0.4"
 libc = "0.2"
 futures = { workspace = true }
-crossterm = "0.28"
 nix = { version = "0.29", features = ["term", "signal", "fs"] }
 url = "2"
 # `test-util` (tokio time pause) is test-only: the goal backoff-wake tests

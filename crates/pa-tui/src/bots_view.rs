@@ -34,6 +34,8 @@ pub struct BotRow {
     pub has_turn: bool,
     /// A TUI holds a live attach on the bot.
     pub attached: bool,
+    /// The bot reaches GitHub with the owner's token.
+    pub github: bool,
 }
 
 impl BotRow {
@@ -95,6 +97,10 @@ impl BotRow {
             (
                 "model".into(),
                 self.model.clone().unwrap_or_else(|| "—".into()),
+            ),
+            (
+                "github".into(),
+                if self.github { "on" } else { "off" }.into(),
             ),
             ("created".into(), self.created_at.clone()),
             ("activity".into(), self.last_activity_at.clone()),
@@ -178,6 +184,7 @@ pub fn parse_bots(value: &Value) -> Result<BotsCatalog, String> {
                     .get("attached")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                github: row.get("github").and_then(Value::as_bool).unwrap_or(false),
             })
         })
         .collect();

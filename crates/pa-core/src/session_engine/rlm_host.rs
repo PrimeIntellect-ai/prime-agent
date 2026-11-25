@@ -181,6 +181,9 @@ pub struct RlmSpawnRequest {
     /// placement contract). `Local` when the kwarg is omitted; a
     /// `Sandbox` target routes to the daemon's bot manager.
     pub target: RlmSpawnTarget,
+    /// A bot's GitHub access (`github` kwarg, sandbox targets only):
+    /// `None` follows the `bots.github` setting.
+    pub github: Option<bool>,
 }
 
 /// The factory executor's run tag on a spawned child (`rlm.spawn`'s
@@ -717,7 +720,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         &kwargs,
         OPERATION,
         &[
-            "name", "model", "thinking", "cwd", "factory", "kind", "target",
+            "name", "model", "thinking", "cwd", "factory", "kind", "target", "github",
         ],
     )?;
     let kind = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
@@ -736,6 +739,14 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         anyhow::bail!(
             "The decision child runs locally; rlm.spawn kind=\"decision\" takes no sandbox target."
         );
+    }
+    let github = match kwargs.get("github") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(github)) => Some(*github),
+        Some(_) => anyhow::bail!("{OPERATION} github must be a bool"),
+    };
+    if github.is_some() && target != RlmSpawnTarget::Sandbox {
+        anyhow::bail!("{OPERATION} github applies only to target=\"sandbox\" (a bot).");
     }
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
@@ -772,6 +783,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         thinking,
         kind,
         cwd,
+        github,
         spawned_by_request_id: None,
         factory,
         target,

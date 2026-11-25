@@ -631,6 +631,9 @@ pub enum DaemonCommand {
         /// The RLM depth the bot's own subtree may use: the owner's max
         /// depth minus the bot's depth.
         rlm_max_depth: u64,
+        /// The bot's GitHub access; `None` follows the `bots.github` setting.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        github: Option<bool>,
         #[serde(flatten)]
         rest: JsonMap,
     },

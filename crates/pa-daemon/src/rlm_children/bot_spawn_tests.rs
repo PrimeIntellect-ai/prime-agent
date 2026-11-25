@@ -92,6 +92,7 @@ async fn fake_supervisor(
 fn request(name: &str, target: RlmSpawnTarget) -> RlmSpawnRequest {
     RlmSpawnRequest {
         target,
+        github: None,
         prompt: "scout the repo".to_string(),
         name: Some(name.to_string()),
         model: None,

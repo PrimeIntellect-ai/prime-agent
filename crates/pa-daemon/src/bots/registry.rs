@@ -87,6 +87,13 @@ pub struct BotRecord {
     /// How many sandboxes this bot lost; part of the create idempotency key.
     #[serde(default)]
     pub generation: u32,
+    /// GitHub access through the platform's header rules. Every new
+    /// sandbox of the bot gets the same rules.
+    #[serde(default)]
+    pub github: bool,
+    /// The git author the bot commits as.
+    #[serde(default)]
+    pub git_identity: Option<pa_core::settings::BotGitIdentity>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

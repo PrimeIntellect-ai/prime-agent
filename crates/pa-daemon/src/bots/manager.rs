@@ -22,6 +22,7 @@ use super::registry::{BotRecord, BotRegistry, BotStatus};
 use super::version::{self, Install, ReleaseSource};
 use super::{
     bot_label, owner_label, sha256_hex, BotSpec, BOT_IMAGE_ENV, BOT_LABEL, DEFAULT_BOT_IMAGE,
+    GITHUB_LABEL,
 };
 
 /// The budget for one wake, create, or pause.
@@ -34,6 +35,9 @@ const RETRY_ATTEMPTS: u32 = 10;
 /// guest daemon when it is not up, then opens the bot session. It
 /// reopens `BOT_SESSION_FILE`, or the file a marker on the guest disk names, so
 /// a registry rebuilt from labels still finds the session. Prints the session ids as JSON.
+/// It also sets the git author, and with GitHub access (`GH_TOKEN` holds the
+/// placeholder) a git credential that sends the placeholder, which the
+/// platform replaces, and a CA bundle that adds the platform root.
 const BOOTSTRAP_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
@@ -54,6 +58,22 @@ os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as file:
     json.dump(settings, file)
 PY
+if [ -n "${BOT_GIT_NAME:-}" ]; then
+  git config --global user.name "$BOT_GIT_NAME"
+  git config --global user.email "$BOT_GIT_EMAIL"
+fi
+if [ -n "${GH_TOKEN:-}" ]; then
+  helper="$HOME/.prime-agent-git-credential"
+  printf '#!/bin/sh\ntest "$1" = get || exit 0\necho username=x-access-token\necho password=%s\n' \
+    "$GH_TOKEN" >"$helper"
+  chmod 755 "$helper"
+  git config --global --replace-all credential.https://github.com.helper "$helper"
+  if [ -f "$PLATFORM_CA" ]; then
+    cat /etc/ssl/certs/ca-certificates.crt "$PLATFORM_CA" >"$HOME/.prime-agent-ca.pem"
+    git config --global http.sslCAInfo "$HOME/.prime-agent-ca.pem"
+    export SSL_CERT_FILE="$HOME/.prime-agent-ca.pem"
+  fi
+fi
 if ! python3 -c "$BOT_CLIENT" probe; then
   # `uv pip install <pkg>` in the bot's shell installs into its kernel venv.
   export VIRTUAL_ENV="$HOME/.prime/agent/kernel-venv"
@@ -241,6 +261,8 @@ impl BotManager {
             guest_session_id: String::new(),
             guest_session_file: None,
             generation: 0,
+            github: spec.github,
+            git_identity: spec.git_identity.clone(),
         })?;
         match self.ensure_running_locked(&spec.bot_id).await {
             Ok(record) => Ok(record),
@@ -621,15 +643,19 @@ impl BotManager {
             None => format!("img:{}", self.image),
         };
         let provider = guest_provider(record);
-        let credentials = retry(|| self.platform.credentials(provider)).await?;
+        let credentials = retry(|| self.platform.credentials(provider, record.github)).await?;
+        let mut labels = vec![
+            BOT_LABEL.to_string(),
+            bot_label(&record.bot_id),
+            owner_label(&record.owner_session_id),
+        ];
+        if record.github {
+            labels.push(GITHUB_LABEL.to_string());
+        }
         let request = BotCreate {
             name: record.name.clone(),
             image: self.image.clone(),
-            labels: vec![
-                BOT_LABEL.to_string(),
-                bot_label(&record.bot_id),
-                owner_label(&record.owner_session_id),
-            ],
+            labels,
             idempotency_key: idempotency_key(&record.bot_id, record.generation, &source),
             checkpoint_id: checkpoint_id.map(str::to_string),
             network_rules: credentials.network_rules,
@@ -714,7 +740,7 @@ impl BotManager {
             // Best effort: the sandbox's rules are already set.
             None => self
                 .platform
-                .credentials(guest_provider(record))
+                .credentials(guest_provider(record), false)
                 .await
                 .ok()
                 .and_then(|credentials| credentials.auth_json),
@@ -909,6 +935,7 @@ fn bootstrap_env(record: &BotRecord) -> BTreeMap<String, String> {
     if let Some(file) = &record.guest_session_file {
         env.insert("BOT_SESSION_FILE".to_string(), file.clone());
     }
+    super::github::guest_env(record.github, record.git_identity.as_ref(), &mut env);
     env
 }
 
@@ -968,6 +995,9 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         // The lost record's generation is unknown; a time-based one is past
         // every generation the bot used, so no old idempotency key repeats.
         generation: u32::try_from(now_ms() / 1000).unwrap_or(u32::MAX),
+        github: sandbox.labels.iter().any(|label| label == GITHUB_LABEL),
+        // The guest's git config already holds it.
+        git_identity: None,
     }
 }
 

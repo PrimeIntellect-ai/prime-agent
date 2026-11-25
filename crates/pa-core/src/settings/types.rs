@@ -278,11 +278,24 @@ pub struct FactorySettings {
 /// `bots` (the hosted-sandbox spawn opt-in): `bots.enabled` is
 /// unset/false by default, and the `/bots on` client command persists
 /// it. The daemon's sandbox-admission gate reads the same shared
-/// settings key before any provisioning.
+/// settings key before any provisioning. `bots.github` (default on)
+/// gives new bots GitHub access, and `bots.gitIdentity` overrides the
+/// git author the bots commit as.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotsSettings {
     pub enabled: Option<bool>,
+    pub github: Option<bool>,
+    /// A [`BotGitIdentity`]; kept raw so a malformed value never fails
+    /// the whole settings file.
+    pub git_identity: Option<serde_json::Value>,
+}
+
+/// `bots.gitIdentity`: the git author name and email of every bot.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotGitIdentity {
+    pub name: String,
+    pub email: String,
 }
 
 /// `agentInbox` (the machine-notification inbox): enabled by default;

@@ -1110,6 +1110,7 @@ async fn spawn_bot(
                 "model": model,
                 "thinking": thinking,
                 "prompt": request.prompt,
+                "github": request.github,
                 // The bot is a root in its own daemon: its subtree gets
                 // only the depth left below it.
                 "rlmMaxDepth": identity.rlm_max_depth.saturating_sub(identity.rlm_depth + 1),

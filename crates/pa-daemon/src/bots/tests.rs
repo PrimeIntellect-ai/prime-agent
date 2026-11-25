@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 
+use pa_core::settings::BotGitIdentity;
 use pa_sandbox::CommandSpec;
 use tokio::io::AsyncWriteExt;
 
@@ -46,6 +47,8 @@ pub(crate) struct FakeState {
     pub guest_app_version: Option<String>,
     /// The guest ends of open links: (its stdout, its stdin).
     pub links: Vec<(tokio::io::DuplexStream, tokio::io::DuplexStream)>,
+    /// Every guest command: its script and environment.
+    pub execs: Vec<(String, BTreeMap<String, String>)>,
 }
 
 /// An in-memory Prime account: sandboxes are running as soon as they exist.
@@ -247,6 +250,7 @@ impl BotPlatform for FakePlatform {
             if state.sandbox(sandbox_id)?.status != BotStatus::Running {
                 return Err(PlatformError::Transient("gateway not ready".into()));
             }
+            state.execs.push((script.to_string(), env.clone()));
             let mut output = ExecOutput::default();
             if script == GUEST_VERSION_SCRIPT {
                 output.stdout = state
@@ -317,12 +321,29 @@ impl BotPlatform for FakePlatform {
     fn credentials<'a>(
         &'a self,
         _provider: &'a str,
+        github: bool,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
         async move {
-            if std::mem::take(&mut self.state().fail_next_credentials) {
+            let mut state = self.state();
+            if std::mem::take(&mut state.fail_next_credentials) {
                 return Err(PlatformError::Transient("connection reset".into()));
             }
-            Ok(GuestCredentials::default())
+            let mut network_rules = BTreeMap::new();
+            if github {
+                network_rules.insert(
+                    "api.github.com".to_string(),
+                    pa_sandbox::HeaderRule {
+                        headers: BTreeMap::from([(
+                            "Authorization".to_string(),
+                            "Bearer ${prime.secrets.PRIME_AGENT_GITHUB_OWNER}".to_string(),
+                        )]),
+                    },
+                );
+            }
+            Ok(GuestCredentials {
+                network_rules,
+                auth_json: None,
+            })
         }
         .boxed()
     }
@@ -344,6 +365,8 @@ pub(crate) fn spec(bot_id: &str) -> BotSpec {
         model: Some("prime-inference/model-a".to_string()),
         thinking: None,
         prompt: "hello".to_string(),
+        github: false,
+        git_identity: None,
     }
 }
 
@@ -396,6 +419,67 @@ async fn spawn_pause_resume_delete() {
     assert!(reloaded.list().is_empty());
     // Deleting again is a no-op.
     manager.delete("bot-a").await.unwrap();
+}
+
+/// A GitHub bot gets the header rules, the label, and a placeholder token
+/// on every new sandbox. The stored token reaches no guest command, no
+/// create request, and no registry record.
+#[tokio::test(start_paused = true)]
+async fn a_github_bot_gets_rules_and_a_placeholder_only() {
+    let (dir, platform, manager) = setup();
+    let token = "ghp_never_in_the_guest";
+    super::github::store_token(dir.path(), token).unwrap();
+    let github = BotSpec {
+        github: true,
+        git_identity: Some(BotGitIdentity {
+            name: "Ada".to_string(),
+            email: "ada@example.com".to_string(),
+        }),
+        ..spec("bot-gh")
+    };
+    let spawned = manager.spawn(&github).await.unwrap();
+    assert!(spawned.github);
+    manager.spawn(&spec("bot-plain")).await.unwrap();
+    // The sandbox is lost: the new one gets the same rules.
+    platform
+        .delete(spawned.sandbox_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    manager.ensure_running("bot-gh").await.unwrap();
+
+    let state = platform.state();
+    let github_label = super::GITHUB_LABEL.to_string();
+    let creates: Vec<(bool, bool)> = state
+        .creates
+        .iter()
+        .map(|create| {
+            (
+                create.labels.contains(&github_label),
+                create.network_rules.contains_key("api.github.com"),
+            )
+        })
+        .collect();
+    assert_eq!(creates, [(true, true), (false, false), (true, true)]);
+    let bootstraps: Vec<&BTreeMap<String, String>> = state
+        .execs
+        .iter()
+        .filter(|(_, env)| env.contains_key("BOT_CLIENT"))
+        .map(|(_, env)| env)
+        .collect();
+    let gh_token: Vec<Option<&str>> = bootstraps
+        .iter()
+        .map(|env| env.get("GH_TOKEN").map(String::as_str))
+        .collect();
+    let placeholder = Some(super::credentials::GUEST_API_KEY_PLACEHOLDER);
+    assert_eq!(gh_token, [placeholder, None, placeholder]);
+    assert_eq!(bootstraps[0]["BOT_GIT_NAME"], "Ada");
+    assert_eq!(bootstraps[0]["BOT_GIT_EMAIL"], "ada@example.com");
+    let guest_inputs = format!("{:?} {:?}", state.execs, state.creates);
+    assert!(!guest_inputs.contains(token));
+    let registry =
+        std::fs::read_to_string(super::registry::BotRegistry::path_in(dir.path())).unwrap();
+    assert!(registry.contains("\"github\": true") || registry.contains("\"github\":true"));
+    assert!(!registry.contains(token));
 }
 
 #[tokio::test(start_paused = true)]
@@ -621,6 +705,101 @@ async fn live_ask(
     Ok(reply)
 }
 
+/// Live: a GitHub bot on this build clones a private repository, commits
+/// as the owner, pushes a branch, opens and closes a draft PR, and deletes
+/// the branch; the token is nowhere in the guest. Needs what the live test
+/// above needs, plus `PRIME_AGENT_LIVE_GITHUB_TOKEN` (a token that can push
+/// to the repository) and `PRIME_AGENT_LIVE_GITHUB_REPO` (`owner/name`):
+/// `cargo test -p pa-daemon --lib bots::tests::github_live -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "creates a real Prime sandbox and a GitHub branch"]
+async fn github_live_push_and_draft_pr() {
+    let token = std::env::var("PRIME_AGENT_LIVE_GITHUB_TOKEN").expect("a GitHub token");
+    let repo = std::env::var("PRIME_AGENT_LIVE_GITHUB_REPO").expect("owner/name");
+    let api_key = std::env::var("PRIME_API_KEY").expect("PRIME_API_KEY");
+    let new_client = || {
+        pa_sandbox::PrimeSandboxClient::new(
+            &api_key,
+            pa_sandbox::ClientOptions {
+                base_url: pa_sandbox::DEFAULT_BASE_URL.to_string(),
+                team_id: std::env::var("PRIME_TEAM_ID").ok(),
+                request_timeout: None,
+                allow_insecure_localhost: false,
+            },
+        )
+        .unwrap()
+    };
+    let client = new_client();
+    let dir = tempfile::tempdir().unwrap();
+    super::github::store_token(dir.path(), &token).unwrap();
+    let owner = super::github::owner_fingerprint(&api_key);
+    let platform = Arc::new(super::platform::PrimePlatform::new(
+        client,
+        dir.path(),
+        owner.clone(),
+    ));
+    let manager =
+        BotManager::new(dir.path(), Arc::clone(&platform) as Arc<dyn BotPlatform>).unwrap();
+    let bot_id = format!("live-gh-{}", uuid::Uuid::new_v4());
+    let spec = BotSpec {
+        model: Some("prime-inference/anthropic/claude-haiku-4.5".to_string()),
+        github: true,
+        git_identity: Some(BotGitIdentity {
+            name: "Prime Agent Live".to_string(),
+            email: "live@example.com".to_string(),
+        }),
+        ..spec(&bot_id)
+    };
+    let branch = format!("bot-live-{}", &bot_id[8..16]);
+    let script = r#"set -euo pipefail
+cd "$(mktemp -d)"
+[ -f "$HOME/.prime-agent-ca.pem" ] && export SSL_CERT_FILE="$HOME/.prime-agent-ca.pem"
+git clone -q "https://github.com/$REPO" repo && cd repo
+git checkout -q -b "$BRANCH"
+git commit -q --allow-empty -m "bot live test"
+git log -1 --format='AUTHOR=%an <%ae>'
+git push -q origin "$BRANCH"
+url="$(gh pr create -R "$REPO" --draft --head "$BRANCH" --title "bot live test" --body "Closed by the test.")"
+echo "PR=$url"
+gh pr close -R "$REPO" "$url" --delete-branch
+echo CLOSED
+cat "$HOME/.gitconfig" "$HOME/.prime-agent-git-credential"
+"#;
+    let run = async {
+        let bot = manager.spawn(&spec).await?;
+        let env = BTreeMap::from([
+            ("REPO".to_string(), repo.clone()),
+            ("BRANCH".to_string(), branch.clone()),
+            (
+                "GH_TOKEN".to_string(),
+                super::credentials::GUEST_API_KEY_PLACEHOLDER.to_string(),
+            ),
+        ]);
+        let output = platform
+            .exec(bot.sandbox_id.as_deref().unwrap(), script, &env, None)
+            .await?;
+        anyhow::Ok((bot, output))
+    }
+    .await;
+    manager.delete(&bot_id).await.unwrap();
+    super::github::delete_secrets(&new_client(), &owner)
+        .await
+        .unwrap();
+    let (bot, output) = run.unwrap();
+    eprintln!(
+        "live github: exit={} stdout={}\nstderr={}",
+        output.exit_code, output.stdout, output.stderr
+    );
+    assert!(bot.github);
+    assert_eq!(output.exit_code, 0);
+    assert!(output
+        .stdout
+        .contains("AUTHOR=Prime Agent Live <live@example.com>"));
+    assert!(output.stdout.contains("PR=https://github.com/"));
+    assert!(output.stdout.contains("CLOSED"));
+    assert!(!output.stdout.contains(&token) && !output.stderr.contains(&token));
+}
+
 /// Live: one real bot on this build through spawn, a task and its reply,
 /// pause, a second task that resumes it in the same session, a third that
 /// runs node, npm, and `uv pip install` in its shell, and delete.
@@ -650,7 +829,11 @@ async fn live_spawn_reply_pause_resume_delete() {
         version::TARBALL_OVERRIDE_ENV
     );
     let dir = tempfile::tempdir().unwrap();
-    let platform = Arc::new(super::platform::PrimePlatform::new(client, dir.path()));
+    let platform = Arc::new(super::platform::PrimePlatform::new(
+        client,
+        dir.path(),
+        "LIVE".to_string(),
+    ));
     let manager =
         BotManager::new(dir.path(), Arc::clone(&platform) as Arc<dyn BotPlatform>).unwrap();
     let bot_id = format!("live-{}", uuid::Uuid::new_v4());

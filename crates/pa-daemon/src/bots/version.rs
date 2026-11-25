@@ -124,7 +124,7 @@ command -v prime-agent >/dev/null 2>&1 && prime-agent relay --probe >/dev/null 2
 /// --archive`. That installer writes the managed layout the self-update reads,
 /// installs uv, and stops a daemon that runs another version. The install
 /// fails when the build has no bot guest side. Its `guest_tool` step installs
-/// the pinned tools the bot image lacks (Node.js with npm).
+/// the pinned tools the bot image lacks (Node.js with npm, and the GitHub CLI).
 pub const INSTALL_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
@@ -176,4 +176,6 @@ guest_tool() { # guest_tool COMMAND URL SHA256
 }
 guest_tool node https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-x64.tar.gz \
   c54118104acc524633b5abe106bbf44a53126ec8b4e5fa105cb92b5d7de8a1a1
+guest_tool gh https://github.com/cli/cli/releases/download/v2.105.0/gh_2.105.0_linux_amd64.tar.gz \
+  79e7ab5db738c48777b696e374f8b428f0647debfb424f44d2f426370407fe2f
 "#;

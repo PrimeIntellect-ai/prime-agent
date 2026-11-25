@@ -229,6 +229,7 @@ fn children(socket: &Path, agent_dir: &Path, script: &Path) -> SupervisorChildSe
 fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
     RlmSpawnRequest {
         target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
+        github: None,
         prompt: prompt.to_string(),
         name: Some(name.to_string()),
         model: None,
