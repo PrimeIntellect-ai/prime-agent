@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Hosted actual factory page navigation with raw PTY evidence: Right and
-Enter on a run header are inert, the stop key only arms, Left closes. Enter
-on a state opens its child session without ending the app, and Left in the
-child returns to the page with the same run and state selected.
+"""Hosted actual factory navigation with raw PTY evidence: the dock's
+machines group opens the machines page, and Enter on the session's run opens
+its run page. There, Right and Enter on the run header are inert, the stop
+key only arms, and Left returns to the machines page, whose Esc closes it.
+Right on a state opens its child session without ending the app, and Left in
+the child returns to the run page with the same run and state selected.
 
-A protocol fixture supplies one real-shaped run; actual input parsing, view
-rendering and fallback keys execute unchanged.
+A protocol fixture supplies one real-shaped run and its machine; actual input
+parsing, view rendering and fallback keys execute unchanged.
 """
 import argparse
 import copy
@@ -34,7 +36,14 @@ GRAPH = {'runs': [{'run_id': RUN, 'spec_id': 'navigation-fixture', 'name': RUN,
 ROSTER = [{'agentId': 'work-agent', 'summary': {'runtimeKind': 'subagent',
     'rlmChildId': 'work-1', 'parentActiveSessionId': 's1', 'activeSessionId': CHILD,
     'rlmDepth': 1}}]
-STATE_SELECTED = '\u25b8 \u25cf work'
+LIBRARY = {'machines': [{'name': 'navigation-fixture', 'description': 'Navigation fixture.',
+    'source': 'repo', 'kind': 'directory'}], 'warnings': []}
+OVERVIEW = {'runs': [dict(GRAPH['runs'][0], ownerId='s1', ownerName='Fixture', saved=False,
+    armed=None)], 'warnings': []}
+MACHINES_PAGE = 'machines \u00b7'
+RUN_PAGE = 'run: ' + RUN
+RUN_ROW_SELECTED = '\u25b8 \u21b3 ' + RUN
+STATE_SELECTED = '\u2503 work'
 
 
 class FactorySupervisor(Supervisor):
@@ -49,8 +58,16 @@ class FactorySupervisor(Supervisor):
             data['serverCapabilities'] = ['session_input_admission', 'factory_activity']
         if data.get('type') == 'response' and data.get('command') == 'factory_activity':
             # The base fixture already recognizes this lane with an empty
-            # legacy response. Supply its graph shape without mutating errors.
-            data['data'] = copy.deepcopy(GRAPH)
+            # legacy response. Supply each action's shape without mutating
+            # errors: the machines page's list, the all-session overview
+            # (this session owns the run), and the run graph.
+            action = self.last_factory_action()
+            if action == 'library':
+                data['data'] = copy.deepcopy(LIBRARY)
+            elif action == 'overview':
+                data['data'] = copy.deepcopy(OVERVIEW)
+            else:
+                data['data'] = copy.deepcopy(GRAPH)
         if data.get('type') == 'response' and data.get('command') == 'roster_subscribe':
             data['data'] = {'roster': copy.deepcopy(ROSTER)}
         if data.get('type') == 'response' and data.get('command') == 'attach' \
@@ -62,6 +79,14 @@ class FactorySupervisor(Supervisor):
             snapshot['summary']['id'] = snapshot['state']['activeSessionId'] = CHILD
             snapshot['state'].update(sessionId='fixture-child', sessionName='Child fixture')
         super().send(sock, data)
+
+    def last_factory_action(self):
+        # The base loop records each command just before it sends the
+        # command's response, so the newest factory_activity command is the
+        # one this response answers.
+        with self.lock:
+            actions = [c for c in self.commands if c.get('type') == 'factory_activity']
+        return actions[-1].get('action') if actions else None
 
     def attach_target(self):
         with self.lock:
@@ -87,12 +112,12 @@ def hello(binary, root, env, observed):
     return observed['hello']
 
 
-def factory_click(screen):
+def dock_click(screen):
     for row_index, row in enumerate(screen.cells):
         text = ''.join(row)
-        if 'factory' in text:
-            return '\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % ((text.index('factory') + 2, row_index + 1) * 2)
-    raise AssertionError('factory dock click target absent')
+        if 'machine' in text:
+            return '\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % ((text.index('machine') + 2, row_index + 1) * 2)
+    raise AssertionError('machines dock click target absent')
 
 
 def observe(binary, root, observed):
@@ -110,37 +135,56 @@ def observe(binary, root, observed):
         terminal.screen = DockScreen()
         scope.register(terminal.process, command)
         def snap(label, predicate):
-            terminal.wait(label, lambda: predicate(terminal.screen.text()), server)
+            try:
+                terminal.wait(label, lambda: predicate(terminal.screen.text()), server)
+            except TimeoutError:
+                observed['timeout_screen'] = terminal.screen.text()
+                raise
             observed['frames'][label] = {'text': terminal.screen.text(),
                 'styles': copy.deepcopy(terminal.screen.styles)}
-        snap('dock', lambda text: server.attaches > 0 and 'factory' in text
+        def open_run_page(label):
+            # The dock's machines group opens the machines page; the session's
+            # run nests under its machine, one row below the anchored machine.
+            terminal.send(dock_click(terminal.screen))
+            snap(label + '_machines_page', lambda text: MACHINES_PAGE in text and RUN in text)
+            terminal.send('\x1b[B')
+            snap(label + '_run_row_selected', lambda text: RUN_ROW_SELECTED in text)
+            terminal.send('\r')
+            snap(label, lambda text: RUN_PAGE in text and '\u2190 back' in text
+                 and 'Ctrl+X stop' in text)
+        snap('dock', lambda text: server.attaches > 0 and 'machine' in text
              and any(c.get('type') == 'factory_activity' for c in server.commands))
-        terminal.send(factory_click(terminal.screen))
-        snap('page', lambda text: RUN in text and '\u2190 back' in text and 'Ctrl+X stop' in text)
+        open_run_page('page')
         # Right and Enter on the selected run header are inert; the stop
         # key's armed prompt is the barrier proving they were handled.
         terminal.send('\x1b[C\x1b[C\r\r')
         terminal.send('\x18')
-        snap('right_enter_inert_then_stop_armed', lambda text: RUN in text
+        snap('right_enter_inert_then_stop_armed', lambda text: RUN_PAGE in text
              and 'again to confirm' in text)
         terminal.send('\x1b[C')
-        snap('other_key_disarms', lambda text: RUN in text and 'again to confirm' not in text)
+        snap('other_key_disarms', lambda text: RUN_PAGE in text and 'again to confirm' not in text)
+        # Left returns to the machines page; its Esc closes it to the chat.
         terminal.send('\x1b[D')
+        snap('left_returns_to_machines_page', lambda text: MACHINES_PAGE in text
+             and RUN_PAGE not in text)
+        # A lone Esc: bytes right behind it would parse as an Alt chord.
+        terminal.send('\x1b')
+        snap('esc_closes_machines_page', lambda text: MACHINES_PAGE not in text)
         terminal.send('FACTORY_CLOSED_INPUT_BARRIER')
-        snap('left_closes_page', lambda text: 'FACTORY_CLOSED_INPUT_BARRIER' in text and RUN not in text)
-        # Reopen the page, select the state, and open its child: the app must
-        # stay up and attach the child, which shows its depth label.
-        terminal.send(factory_click(terminal.screen))
-        snap('page_reopened', lambda text: RUN in text and '\u2190 back' in text)
+        snap('closed_page_takes_input', lambda text: 'FACTORY_CLOSED_INPUT_BARRIER' in text)
+        # Reopen the run page, select the state, and open its child: the app
+        # must stay up and attach the child, which shows its depth label.
+        terminal.send('\x15')
+        open_run_page('page_reopened')
         terminal.send('\x1b[B')
         snap('state_selected', lambda text: STATE_SELECTED in text)
-        terminal.send('\r')
+        terminal.send('\x1b[C')
         snap('child_opened', lambda text: 'depth 1' in text and server.attach_target() == CHILD)
-        # Left on the child's empty editor leaves it: the page is back on the
-        # same run and state, and its Left closes to the chat as before.
+        # Left on the child's empty editor leaves it: the run page is back on
+        # the same run and state.
         terminal.send('\x1b[D')
         snap('page_returned_on_the_state', lambda text: server.attach_target() == 's1'
-             and RUN in text and STATE_SELECTED in text and '\u25b8 factory: ' not in text)
+             and RUN_PAGE in text and STATE_SELECTED in text)
         # A confirmed child stop must leave navigation and paint responsive
         # even while the daemon never replies. The returned page above is
         # already on the child row; no dock-readiness assumption is needed.
@@ -150,18 +194,21 @@ def observe(binary, root, observed):
         terminal.wait('child stop reached hanging sink', lambda: any(
             c.get('type') == 'cancel_rlm_child' for c in server.commands), server)
         started = time.monotonic()
-        terminal.send('\x1b[DSTOP_PENDING_INPUT_BARRIER')
+        terminal.send('\x1b[D')
+        snap('stop_pending_left_returns_to_machines_page', lambda text: MACHINES_PAGE in text
+             and RUN_PAGE not in text)
+        terminal.send('\x1b')
+        snap('stop_pending_esc_closes_machines_page', lambda text: MACHINES_PAGE not in text)
+        terminal.send('STOP_PENDING_INPUT_BARRIER')
         snap('child_stop_does_not_block_navigation', lambda text:
-             'STOP_PENDING_INPUT_BARRIER' in text and RUN not in text)
+             'STOP_PENDING_INPUT_BARRIER' in text)
         observed['stop_navigation_seconds'] = time.monotonic() - started
         assert observed['stop_navigation_seconds'] < 3, 'child stop blocked the UI until its timeout'
-        snap('returned_page_closes', lambda text: 'FACTORY_CLOSED_INPUT_BARRIER' in text
-             and RUN not in text)
         snap('child_stop_timeout_survives_page_close', lambda text:
              'timed out waiting for the Prime Agent daemon response' in text
-             and RUN not in text)
+             and RUN_PAGE not in text)
         assert not server.prompts, 'navigation submitted a prompt'
-        assert all(c.get('action') in ('graph', 'watch') for c in server.commands
+        assert all(c.get('action') in ('graph', 'watch', 'library', 'overview') for c in server.commands
                    if c.get('type') == 'factory_activity'), server.commands
         assert not terminal.screen.unsupported_sgr and not terminal.screen.unsupported_terminal
         observed['behavior_verified'] = True
