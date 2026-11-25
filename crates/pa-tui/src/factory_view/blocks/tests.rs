@@ -102,3 +102,30 @@ fn a_join_fans_in_and_a_long_edge_runs_through_the_skipped_layers() {
     };
     assert_eq!(row_of("b"), row_of("c"));
 }
+
+#[test]
+fn a_self_loop_label_leaves_room_for_the_next_box() {
+    let states = vec![state("a", true), state("b", false), state("c", false)];
+    let transitions = vec![
+        transition(&["a"], "b", None),
+        transition(&["a"], "c", None),
+        transition(&["b"], "b", None),
+    ];
+    let diagram = block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+        None,
+        None,
+    );
+    let text = plain(&diagram);
+    let row = text
+        .lines()
+        .find(|row| row.contains("↺ again"))
+        .unwrap_or_else(|| panic!("the self-loop label renders:\n{text}"));
+    assert_eq!(
+        row.matches("│ agent").count(),
+        2,
+        "the sibling box's detail row stays whole beside the label:\n{text}"
+    );
+}
