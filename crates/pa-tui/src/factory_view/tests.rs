@@ -801,6 +801,29 @@ fn only_the_fired_self_loop_lights_among_siblings() {
     );
 }
 
+/// An unguarded self-loop stays unlit when only its guarded sibling fired.
+#[test]
+fn an_unguarded_self_loop_stays_unlit_when_a_guarded_sibling_fired() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["machine"]["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(json!({ "from": "reviewing", "to": "reviewing", "on": "settled" }));
+    snapshot["lastFired"] = json!([
+        { "from": "reviewing", "to": "reviewing", "seq": 9,
+          "when": { "output": "verdict", "op": "exists" } }
+    ]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 60);
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    let again = spans
+        .iter()
+        .flatten()
+        .find(|span| span.content.contains("again"))
+        .expect("the unguarded loop's label renders");
+    assert_ne!(again.style, success, "the unguarded loop stays unlit");
+}
+
 /// The empty state and the key hint.
 #[test]
 fn the_empty_state_names_the_surface() {
