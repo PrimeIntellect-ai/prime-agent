@@ -130,7 +130,7 @@ pub enum StreamName {
 /// Callback receiving streamed output chunks as they arrive.
 pub type StreamCallback = Arc<dyn Fn(&str, StreamName) + Send + Sync>;
 
-/// Fires when the kernel's last live background `bash()` handle settles, so owed continuations can
+/// Fires when a live background `bash()` handle settles, so owed continuations and held wakes can
 /// resume.
 pub type BackgroundWorkSettledCallback = Arc<dyn Fn() + Send + Sync>;
 
@@ -469,8 +469,8 @@ pub struct KernelManagerOptions {
     pub session_id: Option<String>,
     pub host_handlers: HostRequestHandlers,
     pub python_skills: Vec<KernelPythonSkill>,
-    /// Fires when the last live background `bash()` handle settles (its activity
-    /// track empties or the kernel tears down), so owed continuations can resume.
+    /// Fires when a live background `bash()` handle settles (its activity
+    /// track releases it or the kernel tears down), so owed continuations can resume.
     pub on_background_work_settled: Option<BackgroundWorkSettledCallback>,
     /// The session-scoped count of detached cells awaiting their terminal
     /// admission (the residency gates' live-work term): shared with every

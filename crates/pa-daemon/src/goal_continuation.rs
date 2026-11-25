@@ -227,13 +227,31 @@ impl AgentSessionEngine {
     /// terminal admission plus live `bash()` handles in the kernel
     /// registry. The one answer to "is background work running": the goal
     /// and autonomous continuation gates, the fallback wake's arming, the
-    /// inbox wake row's hold, the passivation gates, the supervisor-lost gate, and ACP's
+    /// passivation gates, the supervisor-lost gate, and ACP's
     /// `outstandingBackgroundJobs` read it. The probe reads the session
     /// provisioner without the session mutex (the consult can run inside a
     /// compaction turn, which holds it). An unbuilt session answers `0`.
     pub(crate) fn background_work_count(&self) -> usize {
         self.live_handles()
             .map_or(0, |live| (live.background_work_probe)())
+    }
+
+    /// Whether a live background `bash()` handle was created by one of
+    /// these cells: the inbox wake row's hold (`TurnRunner::inbox_row_held`).
+    /// An unbuilt session answers `false`.
+    pub(crate) fn has_background_bash_handle_from(
+        &self,
+        cells: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        self.kernel_manager()
+            .is_some_and(|manager| manager.has_background_bash_handle_from(cells))
+    }
+
+    /// The cell that created the live background `bash()` handle with this
+    /// pid, stamped onto its completion's inbox message at admission.
+    pub(crate) fn background_bash_handle_cell(&self, pid: i64) -> Option<String> {
+        self.kernel_manager()
+            .and_then(|manager| manager.background_bash_handle_cell(pid))
     }
 
     /// The built session's kernel manager, when a session is built and its

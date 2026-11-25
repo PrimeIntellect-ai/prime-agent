@@ -1088,8 +1088,8 @@ impl AgentSessionEngine {
             .lock()
             .expect("progress note emit lock")
             .clone();
-        // The kernel's last live background `bash()` handle settling
-        // (or a mid-run teardown) retries the owed continuations and wakes
+        // A live background `bash()` handle settling (or a mid-run
+        // teardown) retries the owed continuations and wakes
         // the worker's turn runner for a held wake row. No registered arc
         // wires nothing.
         let settled_sink = self

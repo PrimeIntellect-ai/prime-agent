@@ -1,8 +1,7 @@
 //! The inbox wake rules wired through the queue admission and the
-//! runner's pickup: a row of only successes waits while other background
-//! work runs and delivers when that work settles, anything else wakes at
-//! once, other queued work takes a waiting row along, and a delivery
-//! consumes the items it shows.
+//! runner's pickup: only a row of successes may wait (the real daemon e2e
+//! `agent_inbox_e2e` covers the same-cell hold), other queued work takes a
+//! waiting row along, and a delivery consumes the items it shows.
 use super::inbox_queue_tests::{routing_state, steering_rows};
 use super::inbox_router::only_successes;
 use super::*;
@@ -67,131 +66,6 @@ fn deliver(
     let delivered = pick_up(worker, arrivals, inbox);
     consume_shown_inbox_items_locked(&mut worker.core.lock().unwrap(), arrivals, inbox);
     delivered
-}
-
-/// Wake the runner and wait until it parks again: it re-read the queue
-/// after every earlier admission. The bound is only the failure bound.
-async fn after_runner_pass(worker: &Worker) {
-    let parked = worker.idle_notify.notified();
-    tokio::pin!(parked);
-    parked.as_mut().enable();
-    worker.work_notify.notify_one();
-    tokio::time::timeout(Duration::from_secs(10), parked)
-        .await
-        .expect("the runner parks");
-}
-
-/// Wait until the runner took every queued row and parked idle.
-async fn until_delivered(worker: &Worker) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let parked = worker.idle_notify.notified();
-            tokio::pin!(parked);
-            parked.as_mut().enable();
-            {
-                let core = worker.core.lock().unwrap();
-                if !core.busy && core.steering.is_empty() {
-                    return;
-                }
-            }
-            parked.await;
-        }
-    })
-    .await
-    .expect("the runner delivers the row");
-}
-
-/// The real runner over the faux engine: with background work running, a
-/// success-only row waits through every success; the work's settle
-/// delivers it in one turn. A failure wakes at once while work still runs.
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global for this worker flow
-#[tokio::test]
-async fn a_success_only_row_waits_for_background_work_and_a_failure_wakes_at_once() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir = std::env::temp_dir().join(format!("pa-inbox-wake-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let worker = Arc::new(Worker::new(
-        WorkerConfig {
-            socket_path: dir.join("worker.sock"),
-            supervisor_socket_path: std::path::PathBuf::new(),
-            token: "token".to_string(),
-            worker_instance_id: String::new(),
-            active_session_id: "wake-session".to_string(),
-            agent_dir: dir.join("agent"),
-            recovery_journal_path: dir.join("recovery.jsonl"),
-            telemetry_disabled: None,
-            script: Some(json!({ "engine": "faux", "responses": ["ack", "ack"] })),
-        },
-        None,
-    ));
-    let created = worker
-        .dispatch(
-            "create",
-            &json!({
-                "cwd": dir.to_string_lossy(),
-                "sessionDir": dir.join("sessions").to_string_lossy(),
-            }),
-        )
-        .await;
-    assert!(created.success, "create failed: {created:?}");
-    let engine = worker.agent_engine.clone().expect("the faux engine");
-    engine
-        .ensure_core_session_async(&engine.resolve_model().expect("faux model"))
-        .await
-        .expect("session build");
-    let background_work = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let probe = Arc::clone(&background_work);
-    engine.set_test_probes(
-        Some(Arc::new(move || {
-            probe.load(std::sync::atomic::Ordering::SeqCst)
-        })),
-        None,
-    );
-    let set_work = |count| background_work.store(count, std::sync::atomic::Ordering::SeqCst);
-    let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
-    engine.register_kernel_notice_host_handlers(&mut handlers);
-    let completion = handlers
-        .get(pa_core::kernel::shared::BASH_COMPLETED_REQUEST_TYPE)
-        .expect("the bash completion handler")
-        .clone();
-    let complete = |pid: u32, exit_code: i64| {
-        completion(pa_core::kernel::shared::HostRequestPayload {
-            data: json!({ "pid": pid, "command": "job", "exitCode": exit_code }),
-        })
-    };
-    let inbox = engine.inbox().expect("the built session's inbox");
-
-    // Two jobs run. Each success lands while other work still counts.
-    set_work(2);
-    complete(4001, 0).await.expect("the notice admits");
-    after_runner_pass(&worker).await;
-    set_work(1);
-    complete(4002, 0).await.expect("the notice admits");
-    after_runner_pass(&worker).await;
-    let rows = steering_rows(&worker);
-    assert_eq!(rows.len(), 1, "one waiting row: {rows:?}");
-    assert!(rows[0].0.contains("2 new"), "{rows:?}");
-
-    // The last job settles: the kernel's settle wakes the runner.
-    set_work(0);
-    let settled = engine
-        .background_work_settled_sink
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("the worker wires the settle seam");
-    settled();
-    until_delivered(&worker).await;
-    assert_eq!(inbox.count().0, 0, "the delivery consumed both successes");
-
-    // A failure wakes at once, while work still runs.
-    set_work(1);
-    complete(4003, 1).await.expect("the notice admits");
-    until_delivered(&worker).await;
-    assert_eq!(inbox.count().0, 0, "the delivery consumed the failure");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
