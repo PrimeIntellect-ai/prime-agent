@@ -592,7 +592,9 @@ mod tests {
             json!({}),
         ]);
         let client = client(&platform);
-        recheck_provisioned_token(&client, dir.path(), "ghp_first").await;
+        recheck_provisioned_token(&client, dir.path(), "ghp_first")
+            .await
+            .expect("a matching token keeps the recheck green");
         assert!(platform
             .requests
             .lock()
