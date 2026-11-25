@@ -12,7 +12,10 @@ use tokio::sync::{Mutex, Notify};
 
 use super::store::{AgentCronDispatch, AgentCronJobStore, DispatchResultOptions};
 
-const MAX_TIMEOUT_MS: u64 = 2_147_483_647;
+/// The longest a timer sleeps before re-reading the wall clock. A guest VM
+/// can freeze while a timer sleeps; the monotonic clock may not advance, so
+/// an overdue run must be noticed by a periodic wall-clock recheck.
+const TIMER_RECHECK_MS: u64 = 30_000;
 
 const FAILURE_BACKOFF_BASE_MS: u64 = 120_000;
 
@@ -317,7 +320,7 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
                 };
                 let now = core.hooks.now();
                 let delay = tokio::time::Duration::from_millis(
-                    next.saturating_sub(now).clamp(1, MAX_TIMEOUT_MS),
+                    next.saturating_sub(now).clamp(1, TIMER_RECHECK_MS),
                 );
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {}
@@ -326,7 +329,13 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
                 if core.stopped.load(Ordering::SeqCst) {
                     return;
                 }
-                core.run_due_at(core.hooks.now()).await.ok();
+                // The sleep may have ended at the recheck cap before the
+                // next run. Re-read the wall clock: a VM resume can move it
+                // far past `next`, and a cap wake must not run anything early.
+                let now = core.hooks.now();
+                if now >= next {
+                    core.run_due_at(now).await.ok();
+                }
             }
         });
         timer.replace(handle);
@@ -753,5 +762,83 @@ mod tests {
         fn now(&self) -> u64 {
             *self.now.lock().unwrap()
         }
+    }
+
+    /// A VM resume can move the wall clock far past a sleeping timer while
+    /// the monotonic clock advances only by the recheck cap. The overdue
+    /// job must fire on the first recheck after the clock jump, once.
+    #[tokio::test(start_paused = true)]
+    async fn a_wall_clock_jump_fires_an_overdue_job_on_the_next_recheck() {
+        struct ClockHooks {
+            runs: Arc<AtomicUsize>,
+            clock: Arc<std::sync::Mutex<u64>>,
+        }
+        impl AgentCronSchedulerHooks for ClockHooks {
+            fn run_job(
+                &self,
+                _job: &AgentCronJob,
+            ) -> impl std::future::Future<Output = anyhow::Result<Option<&'static str>>>
+            {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(None))
+            }
+            fn now(&self) -> u64 {
+                *self.clock.lock().unwrap()
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json")));
+        let start = 1_700_000_000_000;
+        let clock = Arc::new(std::sync::Mutex::new(start));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let job = store
+            .create(&input("tick", "every 1h", start))
+            .expect("job");
+        let job_id = job.id.clone();
+        let scheduler = AgentCronScheduler::new(
+            store.clone(),
+            Arc::new(ClockHooks {
+                runs: Arc::clone(&runs),
+                clock: Arc::clone(&clock),
+            }),
+        );
+        scheduler.start().await;
+        // The timer arms at the recheck cap, not the full hour.
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "no early fire");
+        // The VM was frozen: two hours passed on the wall clock while
+        // tokio's monotonic clock advanced one more recheck cap.
+        *clock.lock().unwrap() = start + 2 * 60 * 60 * 1000;
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        for _ in 0..100 {
+            if runs.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the overdue job fired once");
+        let mut current = store
+            .list()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("job kept");
+        for _ in 0..100 {
+            if current.run_count == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            current = store
+                .list()
+                .into_iter()
+                .find(|job| job.id == job_id)
+                .expect("job kept");
+        }
+        assert_eq!(current.run_count, 1);
+        assert_eq!(
+            crate::cron::parse_iso_millis(current.next_run_at.as_deref().unwrap()),
+            Some(start + 3 * 60 * 60 * 1000)
+        );
+        scheduler.stop().await;
     }
 }

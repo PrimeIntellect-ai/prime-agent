@@ -209,8 +209,8 @@ enum RoutedFire {
     Skipped,
 }
 
-impl AgentCronSchedulerHooks for QueueHooks {
-    async fn run_job(&self, job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
+impl QueueHooks {
+    async fn run_job_inner(&self, job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
         // A persisted job whose target is no longer live (killed — `archived` — or deleted)
         // cancels the session's jobs and skips: a fire can never revive a stopped session.
         if Self::persisted_target_gone(job) {
@@ -344,6 +344,23 @@ impl AgentCronSchedulerHooks for QueueHooks {
     }
 }
 
+impl AgentCronSchedulerHooks for QueueHooks {
+    async fn run_job(&self, job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
+        // A heartbeat fire advances next_run_at before the turn runs: mirror
+        // the new set at the fire and after it settles, so a later pause (or
+        // a crash mid-turn) cannot leave the relay stale.
+        let heartbeat = is_heartbeat_cron_job(job);
+        if heartbeat {
+            crate::bots::wakeup_sync::notify();
+        }
+        let result = self.run_job_inner(job).await;
+        if heartbeat {
+            crate::bots::wakeup_sync::notify();
+        }
+        result
+    }
+}
+
 /// The worker's schedule catalog: the shared artifact store plus the scheduler (started when the
 /// first session binds).
 pub(crate) struct ScheduledJobs {
@@ -367,6 +384,9 @@ impl ScheduledJobs {
         store.on_heartbeat_change(Box::new(move || {
             heartbeat_events.send(crate::worker::OutboundFrame::heartbeats_changed());
         }));
+        // A bot guest mirrors every heartbeat mutation to its relay so a
+        // paused sandbox wakes on schedule. Outside a bot this is a no-op.
+        store.on_heartbeat_change(Box::new(crate::bots::wakeup_sync::notify));
         let store = Arc::new(store);
         ScheduledJobs {
             hooks: Arc::new(QueueHooks {

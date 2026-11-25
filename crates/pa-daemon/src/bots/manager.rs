@@ -132,6 +132,7 @@ with open(path, "w") as file:
     json.dump({
         "botId": os.environ["PRIME_AGENT_BOT_ID"],
         "sandboxId": os.environ["PRIME_AGENT_BOT_SANDBOX_ID"],
+        "relayUrl": os.environ.get("BOT_RELAY_URL", ""),
         "pauseUrl": os.environ.get("BOT_SELF_PAUSE_URL", ""),
         "idleMinutes": int(os.environ.get("BOT_SELF_PAUSE_MINUTES", "10")),
     }, file)
@@ -1165,6 +1166,43 @@ impl BotManager {
         }
     }
 
+    /// Drop `bot_id`'s relay registration and wake-up schedules. Best
+    /// effort: a missing relay or a failed call never blocks the local
+    /// delete, and the relay also drops schedules when a wake answers 404.
+    async fn delete_relay_bot(&self, bot_id: &str) {
+        let settings = self.relay_settings().await;
+        let Some(endpoint) = settings.delete_endpoint(bot_id) else {
+            return;
+        };
+        let client = match pa_ai::utils::tls::http_client_builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(REGISTRATION_TIMEOUT)
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("pa-daemon: bots: {bot_id}: the relay delete client failed: {error}");
+                return;
+            }
+        };
+        let mut request = client.delete(&endpoint);
+        if let Some(token) = settings.token.as_deref() {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        match request.send().await {
+            Ok(response)
+                if response.status().is_success()
+                    || response.status() == reqwest::StatusCode::NOT_FOUND => {}
+            Ok(response) => eprintln!(
+                "pa-daemon: bots: {bot_id}: the relay delete answered {}",
+                response.status()
+            ),
+            Err(error) => {
+                eprintln!("pa-daemon: bots: {bot_id}: the relay delete failed: {error}");
+            }
+        }
+    }
+
     /// The header rules and guest auth for a new sandbox of `record`: its
     /// API keys, its GitHub access, and the owner's logins. Also returns
     /// the logins and the relay host the rules carry.
@@ -1371,6 +1409,8 @@ impl BotManager {
     }
 
     async fn delete_locked(&self, bot_id: &str) -> Result<()> {
+        // Stop future relay wakes before the sandboxes and checkpoints go.
+        self.delete_relay_bot(bot_id).await;
         let record = self.get(bot_id);
         let label = bot_label(bot_id);
         // An errored sandbox still exists on the account, so it is deleted too.
@@ -1467,6 +1507,12 @@ impl SelfPauseSettings {
         let base = self.url.trim_end_matches('/');
         (!base.is_empty()).then(|| format!("{base}/api/bots/{bot_id}"))
     }
+
+    /// The delete endpoint of one bot: where the daemon drops its relay
+    /// registration and wake-up schedules.
+    fn delete_endpoint(&self, bot_id: &str) -> Option<String> {
+        self.register_endpoint(bot_id)
+    }
 }
 
 /// The platform secret holding `bot`'s relay pause token: one per bot,
@@ -1526,6 +1572,7 @@ fn bootstrap_env(record: &BotRecord, self_pause: &SelfPauseSettings) -> BTreeMap
             super::self_pause::SELF_PAUSE_ENV.to_string(),
             super::GUEST_SELF_PAUSE_FILE.to_string(),
         );
+        env.insert("BOT_RELAY_URL".to_string(), self_pause.url.clone());
         env.insert(
             "BOT_SELF_PAUSE_URL".to_string(),
             self_pause

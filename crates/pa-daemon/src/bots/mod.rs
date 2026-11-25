@@ -25,6 +25,7 @@ pub mod secrets;
 pub mod self_pause;
 pub mod send;
 pub mod version;
+pub mod wakeup_sync;
 
 #[cfg(all(test, unix))]
 mod send_tests;
