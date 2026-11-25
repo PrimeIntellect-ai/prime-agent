@@ -3,7 +3,7 @@ name = "pa-sandbox"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Prime Sandboxes lifecycle client: create, list, pause, resume, delete, and checkpoints."
+description = "Prime Sandboxes client: lifecycle (create, list, pause, resume, delete, checkpoints) and VM process exec."
 
 [dependencies]
 pa-ai = { workspace = true }
