@@ -232,17 +232,20 @@ def emit(data: dict[str, Any]) -> None:
 async def end_turn() -> dict[str, Any]:
     """End the turn: the sanctioned terminal programmatic call.
 
-    The host marks the cell executing when the request arrives (a detached
-    task's call attributes to that cell, not the task), the cell's tool
-    result confirms the turn ended, and no further assistant response is
-    streamed for the run. Other tool calls in the same message still
-    execute first; the turn ends when the batch's end-turn call finishes
-    Ok (one is enough). The turn returns to the user while background work
-    keeps running: the remaining jobs keep running and their completion
-    notices collect the results. Raises where the host does not support
-    the call (a foreign harness): it never silently no-ops.
+    The host marks the calling cell (a task the cell started counts as that
+    cell, also when another cell runs beside it), the cell's tool result
+    confirms the turn ended, and no further assistant response is streamed
+    for the run. A call from a backgrounded cell, or after the calling cell
+    finished, raises: its turn already returned. Other tool calls in the
+    same message still execute first; the turn ends when the batch's
+    end-turn call finishes Ok (one is enough). The turn returns to the user
+    while background work keeps running: the remaining jobs keep running
+    and their completion notices collect the results. Raises where the host
+    does not support the call (a foreign harness): it never silently no-ops.
     """
-    return await host_request("rlm.end_turn", {})
+    from . import repl
+
+    return await host_request("rlm.end_turn", {"cell": repl.current_cell_id()})
 
 
 async def spawn(

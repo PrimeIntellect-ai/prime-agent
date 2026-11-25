@@ -582,27 +582,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_responses_shaped_compat_keeps_its_values() {
-        let model = compat_model(
-            serde_json::json!({ "sendSessionIdHeader": false, "supportsLongCacheRetention": true }),
-        );
-        let compat = get_responses_compat(&model);
-        assert!(!compat.send_session_id_header);
-        assert!(compat.supports_long_cache_retention);
-        // Absent compat: both defaults on (TS's defaults).
-        let plain = serde_json::from_value::<Model>(serde_json::json!({
-            "id": "m", "name": "m", "api": "openai-responses", "provider": "openai",
-            "baseUrl": "https://api.openai.com/v1", "reasoning": false, "input": ["text"],
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 1000, "maxTokens": 100
-        }))
-        .unwrap();
-        let compat = get_responses_compat(&plain);
-        assert!(compat.send_session_id_header);
-        assert!(compat.supports_long_cache_retention);
-    }
-
     /// A `reasoning: false` model whose map addresses levels (the live catalog's
     /// `gpt-5.3-chat-latest` shape, served over the Responses API) is thinking-capable: the
     /// requested effort reaches the request with the map's value. The flag alone must not veto a

@@ -441,7 +441,19 @@ fn a_bounded_bash_await_degrades_and_the_notice_wakes_the_session() {
     );
     assert!(
         after_turn.contains("still running after"),
-        "the budgeted degrade hint never reached the tool result: {after_turn}"
+        "the degrade note never reached the tool result: {after_turn}"
+    );
+    // T-0011: the note is a directive, not just the fact of degrading. The
+    // model must read that the command is backgrounded, that this turn ends
+    // instead of re-awaiting, and that the completion notice delivers the
+    // result; a still-running await that reads as a successful empty call is
+    // what invites the repeat-await loop.
+    assert!(
+        after_turn.contains("The command runs in the background")
+            && after_turn.contains("do not await it again this turn")
+            && after_turn
+                .contains("end the turn and collect the final result on the completion notice"),
+        "the tool result lacks the background directive: {after_turn}"
     );
 
     // Event ORDER, part 2 — the command finishes past the turn, and its

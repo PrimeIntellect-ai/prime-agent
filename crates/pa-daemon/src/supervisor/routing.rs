@@ -607,6 +607,29 @@ impl Supervisor {
                 }
             }
         }
+        // The scoped idle cancel must reach a worker that reads the
+        // scope: an older worker answers EVERY abort with the full
+        // queue-suspending abort, so forwarding would mutate true-idle
+        // queues. Refuse at the routing boundary — the serving worker's
+        // own `worker_auth` advertisement is the only gate that matters
+        // (the supervisor's own hello is not evidence about the adopted
+        // worker's binary); never fall back to the plain abort.
+        if let DaemonCommand::Abort { scope: Some(_), .. } = command {
+            if !resident
+                .background_cell_abort_capable
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return (
+                    vec![response_line(&response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        "this session's worker does not support scoped aborts",
+                        None,
+                    ))],
+                    false,
+                );
+            }
+        }
         if let DaemonCommand::Attach {
             telemetry_disabled: Some(true),
             ..
