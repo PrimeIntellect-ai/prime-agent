@@ -691,10 +691,10 @@ fn a_late_unscoped_abort_stops_a_parked_backgrounded_cell() {
 /// The faux script for the lost-supervisor round: turn one calls a kernel
 /// cell that records its kernel and worker pids, outlives its 2s wait
 /// budget (it auto-backgrounds), catches the stop's interrupt, and keeps
-/// running. Every later turn (the stopped cell's notice) only answers.
+/// running. Any later turn answers with the woken marker.
 fn faux_lost_supervisor_script(dir: &Path) -> PathBuf {
     let path = dir.join("faux-lost-supervisor.json");
-    let answer = json!({"content": [{"type": "text", "text": "Noted."}]});
+    let woken = json!({"content": [{"type": "text", "text": "WOKEN AFTER THE STOP"}]});
     std::fs::write(
         &path,
         json!({
@@ -712,7 +712,8 @@ fn faux_lost_supervisor_script(dir: &Path) -> PathBuf {
                         "import os, time\nopen('bg-pids', 'w').write(f'{os.getpid()} {os.getppid()}')\ntry:\n    time.sleep(600)\nexcept KeyboardInterrupt:\n    open('bg-caught', 'w').write('1')\n    while True:\n        time.sleep(0.05)",
                         "timeout": 2}}
                 ]},
-                answer, answer, answer, answer
+                {"content": [{"type": "text", "text": "The cell runs in the background."}]},
+                woken.clone(), woken
             ]
         })
         .to_string(),
@@ -739,7 +740,8 @@ fn process_alive(pid: u32) -> bool {
 /// (no client is left to see or stop it), a cell that ignores the
 /// interrupt has its kernel retired, and the worker then exits. The stop
 /// lands inside the second window, so the cell never runs a whole extra
-/// window unwatched.
+/// window unwatched. The stopped cell's notice starts no model turn: it
+/// waits in the session's durable inbox for the next open.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn a_lost_supervisor_stops_a_parked_backgrounded_cell() {
@@ -773,6 +775,11 @@ fn a_lost_supervisor_stops_a_parked_backgrounded_cell() {
         .or_else(|| created["data"]["sessionId"].as_str())
         .expect("session id")
         .to_string();
+    let session_file = PathBuf::from(
+        created["data"]["sessionFile"]
+            .as_str()
+            .expect("the created session file"),
+    );
     let attached = client.send(
         "a1",
         &json!({ "type": "attach", "activeSessionId": session_id }),
@@ -841,4 +848,23 @@ fn a_lost_supervisor_stops_a_parked_backgrounded_cell() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+
+    // No model turn ran after the stop: the session holds no woken answer.
+    let transcript = std::fs::read_to_string(&session_file).expect("read the session file");
+    assert!(
+        !transcript.contains("WOKEN AFTER THE STOP"),
+        "the stopped cell's notice started a model turn on the orphaned worker"
+    );
+
+    // The notice waits in the durable inbox a reopened session replays.
+    let inbox_dir =
+        pa_core::session_engine::harness_digest::session_artifact_dir_for_log(&session_file)
+            .expect("the session's artifact dir");
+    let (_, _, classes) =
+        pa_core::session_engine::inbox::SessionInbox::open(Some(&inbox_dir)).count();
+    assert_eq!(
+        classes.get(pa_types::inbox_notice::INBOX_CLASS_CELL_DONE),
+        Some(&1),
+        "the stopped cell's notice waits in the inbox: {classes:?}"
+    );
 }

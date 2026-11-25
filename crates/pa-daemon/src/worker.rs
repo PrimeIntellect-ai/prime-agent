@@ -317,6 +317,7 @@ impl Worker {
             turn_completed: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
+            supervisor_lost: false,
             last_activity_ms: 0,
             compacting: false,
             auto_compaction_enabled: true,
@@ -718,6 +719,19 @@ impl Worker {
                     };
                     if engine.session_is_closed() {
                         return;
+                    }
+                    // An orphaned worker runs no turn nobody watches: the
+                    // notice waits in the durable inbox for the next open.
+                    if notice_core.lock().unwrap().supervisor_lost {
+                        if let (Some(inbox), Some(fields)) = (
+                            engine.inbox(),
+                            pa_core::session_engine::inbox::inbox_notice_fields(&notice),
+                        ) {
+                            let now = pa_core::autonomous::now_millis();
+                            if engine.push_to_live_inbox(&inbox, fields, now).is_some() {
+                                return;
+                            }
+                        }
                     }
                     // Revalidated inside the admission's lock section: the
                     // close paths mark the session BEFORE clearing the lanes.
