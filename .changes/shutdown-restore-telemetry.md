@@ -1,0 +1,1 @@
+- Fixed windows started with telemetry disabled (for example `DO_NOT_TRACK=1`) failing to reattach with "Cannot attach to this active agent while telemetry is disabled" after a daemon shutdown or an idle session's worker exit.
