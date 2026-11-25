@@ -2,7 +2,7 @@
 //! host seam, and handler registration for `rlm.spawn` (`rlm.run`),
 //! `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`,
 //! `rlm.collect`, `rlm.progress.note`, `rlm.delete_subagent`,
-//! `rlm.rename`, and `rlm.session.messages`.
+//! `rlm.rename`, `rlm.session.messages`, and `rlm.pull_bot_files`.
 //!
 //! Wire contract: the Python side (`rlm/__init__.py`) sends typed requests and
 //! parses strict `snake_case` replies. Pure normalization lives in
@@ -234,6 +234,16 @@ pub trait RlmSubagentHost: Send + Sync {
         _roles: Vec<String>,
     ) -> RlmHostFuture<Value> {
         Box::pin(async { anyhow::bail!("rlm.session.messages requires a daemon-backed session") })
+    }
+    /// Copy `path` out of the owned bot `bot` into the local directory
+    /// `dest` (`rlm.pull_bot_files`); answers the written file paths.
+    fn pull_bot_files(
+        &self,
+        _bot: String,
+        _path: String,
+        _dest: String,
+    ) -> RlmHostFuture<Vec<String>> {
+        Box::pin(async { anyhow::bail!("rlm.pull_bot_files requires a daemon-backed session") })
     }
 }
 
@@ -568,6 +578,7 @@ pub fn register_rlm_host_handlers(handlers: &mut HostRequestHandlers, bridge: &A
     register_create_session(handlers, bridge);
     register_list_subagents(handlers, bridge);
     register_delete_subagent(handlers, bridge);
+    register_pull_bot_files(handlers, bridge);
     register_collect(handlers, bridge);
     register_rename(handlers, bridge);
     register_session_messages(handlers, bridge);
@@ -847,6 +858,38 @@ fn register_delete_subagent(handlers: &mut HostRequestHandlers, bridge: &Arc<Rlm
                 };
                 let result = host.delete_subagent(target.to_string()).await?;
                 serde_json::to_value(&result).map_err(anyhow::Error::new)
+            })
+        }),
+    );
+}
+
+fn register_pull_bot_files(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
+    let host = Arc::clone(&bridge.host);
+    handlers.register(
+        "rlm.pull_bot_files",
+        host_handler(move |payload| {
+            let host = Arc::clone(&host);
+            Box::pin(async move {
+                let field = |name: &str| {
+                    payload
+                        .data
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("rlm.pull_bot_files {name} must be a non-empty string")
+                        })
+                };
+                // Paths keep their exact text; only the bot selector is trimmed.
+                let files = host
+                    .pull_bot_files(
+                        field("bot")?.trim().to_string(),
+                        field("path")?,
+                        field("dest")?,
+                    )
+                    .await?;
+                Ok(json!({ "files": files }))
             })
         }),
     );

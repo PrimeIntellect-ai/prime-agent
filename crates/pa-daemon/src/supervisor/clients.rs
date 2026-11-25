@@ -784,6 +784,12 @@ impl Supervisor {
                 )],
                 false,
             ),
+            DaemonCommand::PullBotFiles { .. } => (
+                vec![response_line(
+                    &self.handle_pull_bot_files(&command_id, command).await,
+                )],
+                false,
+            ),
             DaemonCommand::ListBots { .. } => (
                 vec![response_line(&self.handle_list_bots(&command_id, command))],
                 false,

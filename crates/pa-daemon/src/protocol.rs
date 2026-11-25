@@ -174,6 +174,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "search_session_content",
     "spawn_bot",
     "delete_bot",
+    "pull_bot_files",
     "list_bots",
 ];
 
@@ -940,6 +941,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::SendMessage { .. }
         | DaemonCommand::SpawnBot { .. }
         | DaemonCommand::DeleteBot { .. }
+        | DaemonCommand::PullBotFiles { .. }
         | DaemonCommand::ListBots { .. }
         | DaemonCommand::AckResult { .. }
         | DaemonCommand::PrepareUpdateRestart { .. }
@@ -1008,6 +1010,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::FactoryActivity { .. } => "factory_activity",
         DaemonCommand::SpawnBot { .. } => "spawn_bot",
         DaemonCommand::DeleteBot { .. } => "delete_bot",
+        DaemonCommand::PullBotFiles { .. } => "pull_bot_files",
         DaemonCommand::ListBots { .. } => "list_bots",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",
         DaemonCommand::WaitForIdle { .. } => "wait_for_idle",

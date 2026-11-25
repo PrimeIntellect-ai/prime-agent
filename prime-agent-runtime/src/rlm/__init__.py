@@ -723,6 +723,21 @@ async def delete_subagent(target: str | RLMSubagent | RLMSpawnHandle) -> RLMSuba
     return _subagent_from_payload(payload.get("subagent"), "rlm.delete_subagent")
 
 
+async def pull_bot_files(
+    bot: str | RLMSubagent | RLMSpawnHandle, path: str, dest: str = "."
+) -> list[str]:
+    """Copy one file or directory out of a bot into ``dest``.
+
+    ``path`` is in the bot (relative paths start in its home directory).
+    ``dest`` is a directory inside this session's working directory. Returns
+    the written file paths. A path over 256 MiB fails; it is never cut.
+    """
+    if isinstance(bot, (RLMSpawnHandle, RLMSubagent)):
+        bot = bot.rlm_child_id
+    payload = await host_request("rlm.pull_bot_files", {"bot": bot, "path": path, "dest": dest})
+    return list(payload.get("files") or [])
+
+
 async def rename(new_name: str, *, session_id: str | RLMSpawnHandle | RLMSubagent | None = None) -> str:
     """Rename this session or one of its direct children.
 
@@ -1017,6 +1032,11 @@ class _RLMNamespace:
     async def delete_subagent(self, target: str | RLMSubagent | RLMSpawnHandle) -> RLMSubagent:
         return await delete_subagent(target)
 
+    async def pull_bot_files(
+        self, bot: str | RLMSubagent | RLMSpawnHandle, path: str, dest: str = "."
+    ) -> list[str]:
+        return await pull_bot_files(bot, path, dest)
+
     async def rename(
         self,
         new_name: str,
@@ -1089,6 +1109,7 @@ __all__ = [
     "list_subagents",
     "persistent_shells",
     "progress_note",
+    "pull_bot_files",
     "rename",
     "rlm",
     "spawn",

@@ -23,6 +23,8 @@ Agents make bots. An agent calls `rlm.spawn(prompt, name=..., target="sandbox")`
 
 The `prime sandbox` CLI is the human and admin path only. A bot sandbox has the bot's name. It carries the labels `prime-agent-bot`, `prime-agent-bot:<id>`, and `prime-agent-bot-owner:<owner id>`, so an admin can find it with the CLI. Delete a bot through its owning agent (`rlm.delete_subagent`), so the daemon also removes its checkpoints.
 
+A bot has no shared path with this machine. Its owner copies files out with `await rlm.pull_bot_files(bot, path, dest=".")`: the daemon streams a tar archive of `path` from the bot and unpacks it under `dest`, inside the owner's working directory. A paused bot is resumed for the pull. An archive over 256 MiB fails; nothing is cut. Only files and directories are copied, and an existing file is never replaced.
+
 ## What it shows
 
 Each row shows a status dot, the bot's name and model, its version, and its last turn. Rows are grouped into `Running`, `Idle`, and `Inactive`, with the most recent activity first. `d` opens a detail pane with the bot id, sandbox id, checkpoint id, version, model, and timestamps.

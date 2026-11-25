@@ -984,6 +984,15 @@ impl RlmSubagentHost for SupervisorChildSessions {
             this.command(&command, STATE_TIMEOUT_MS).await
         })
     }
+    fn pull_bot_files(
+        &self,
+        bot: String,
+        path: String,
+        dest: String,
+    ) -> RlmHostFuture<Vec<String>> {
+        let this = Arc::clone(&self.inner);
+        Box::pin(async move { pull_bot_files(&this, &bot, &path, &dest).await })
+    }
 }
 
 /// Whether the child's durable session file already carries the spawn
@@ -1204,6 +1213,74 @@ async fn delete_bot(
         subagent,
         outcome: Some("deleted"),
     })
+}
+
+/// `rlm.pull_bot_files`: the supervisor copies `path` out of the owned bot
+/// into `dest`, which resolves against this session's directory and must
+/// stay inside it.
+async fn pull_bot_files(
+    this: &SupervisorChildSessionsInner,
+    selector: &str,
+    path: &str,
+    dest: &str,
+) -> Result<Vec<String>> {
+    let identity = this.identity.lock().expect("identity lock").clone();
+    let Some(bot) = owned_bot(this, selector).await else {
+        bail!("No bot matches \"{selector}\" in the current parent session");
+    };
+    let cwd = identity
+        .cwd
+        .as_deref()
+        .context("rlm.pull_bot_files needs a session directory")?;
+    let dest = pull_destination(Path::new(cwd), dest)?;
+    let reply = this
+        .link
+        .request_success(
+            json!({
+                "type": "pull_bot_files",
+                "botId": bot_str(&bot, "botId"),
+                "ownerSessionId": identity.session_id.unwrap_or_default(),
+                "path": path,
+                "dest": dest.to_string_lossy(),
+            }),
+            BOT_COMMAND_TIMEOUT,
+        )
+        .await?;
+    Ok(reply["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect())
+}
+
+/// `dest` against `cwd`, with `.` and `..` folded; refused outside `cwd`,
+/// also through a symlink in an existing part of it.
+fn pull_destination(cwd: &Path, dest: &str) -> Result<std::path::PathBuf> {
+    let mut resolved = std::path::PathBuf::new();
+    for component in cwd.join(dest).components() {
+        match component {
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => resolved.push(other),
+        }
+    }
+    let existing = resolved
+        .ancestors()
+        .find(|path| path.exists())
+        .unwrap_or(cwd);
+    let inside =
+        resolved.starts_with(cwd) && existing.canonicalize()?.starts_with(cwd.canonicalize()?);
+    if !inside {
+        bail!(
+            "the pull destination {dest} is outside the session directory {}",
+            cwd.display()
+        );
+    }
+    Ok(resolved)
 }
 
 fn bot_str(bot: &Value, field: &str) -> String {
