@@ -1,0 +1,1 @@
+feat: the daemon can open a link to a bot (not yet user-facing): a hidden `prime-agent relay` command pipes the sandbox exec stream to the guest daemon socket, the link refuses a guest on another prime-agent version with an upgrade message, and provider API keys reach the guest only as platform secrets in header rules

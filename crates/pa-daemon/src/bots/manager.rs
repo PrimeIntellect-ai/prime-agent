@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
+use pa_core::auth::PRIME_INFERENCE_PROVIDER_ID;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
@@ -36,6 +37,9 @@ export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 cd "$HOME"
 mkdir -p "$(dirname "$PRIME_AGENT_DAEMON_SOCKET")"
+if [ -n "${BOT_AUTH_JSON:-}" ] && { [ -n "${BOT_AUTH_OVERWRITE:-}" ] || [ ! -s "$HOME/.prime/agent/auth.json" ]; }; then
+  (umask 077; printf '%s' "$BOT_AUTH_JSON" >"$HOME/.prime/agent/auth.json")
+fi
 if ! python3 -c "$BOT_CLIENT" probe; then
   nohup setsid prime-agent --mode daemon --daemon-socket "$PRIME_AGENT_DAEMON_SOCKET" \
     </dev/null >>"$HOME/.prime-agent-bot.log" 2>&1 &
@@ -108,10 +112,13 @@ impl Drop for AttachGuard {
 
 /// The bot lifecycle for one Prime account. Lives in the supervisor process.
 pub struct BotManager {
-    platform: Arc<dyn BotPlatform>,
+    pub(super) platform: Arc<dyn BotPlatform>,
     registry: Mutex<BotRegistry>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     attached: Arc<Mutex<HashMap<String, usize>>>,
+    /// The guest auth for a sandbox created with matching header rules,
+    /// until its bootstrap writes it. Keyed by sandbox id.
+    guest_auth: Mutex<HashMap<String, Value>>,
     image: String,
     release: ReleaseSource,
 }
@@ -127,6 +134,7 @@ impl BotManager {
             registry: Mutex::new(BotRegistry::load(agent_dir)?),
             locks: Mutex::new(HashMap::new()),
             attached: Arc::new(Mutex::new(HashMap::new())),
+            guest_auth: Mutex::new(HashMap::new()),
             image: std::env::var(BOT_IMAGE_ENV)
                 .ok()
                 .filter(|image| !image.is_empty())
@@ -593,6 +601,8 @@ impl BotManager {
             Some(checkpoint) => format!("ckpt:disk:{checkpoint}"),
             None => format!("img:{}", self.image),
         };
+        let provider = guest_provider(record);
+        let credentials = retry(|| self.platform.credentials(provider)).await?;
         let request = BotCreate {
             name: record.name.clone(),
             image: self.image.clone(),
@@ -603,8 +613,12 @@ impl BotManager {
             ],
             idempotency_key: idempotency_key(&record.bot_id, record.generation, &source),
             checkpoint_id: checkpoint_id.map(str::to_string),
+            network_rules: credentials.network_rules,
         };
         let created = retry(|| self.platform.create(&request)).await?;
+        if let Some(auth) = credentials.auth_json {
+            lock(&self.guest_auth).insert(created.id.clone(), auth);
+        }
         record.sandbox_id = Some(created.id.clone());
         record.status = created.status;
         self.save(record.clone())?;
@@ -658,16 +672,32 @@ impl BotManager {
             check_exit("install prime-agent in the bot", &output)?;
         }
         record.version = local.to_string();
+        let mut env = bootstrap_env(record);
+        // A sandbox created by this process gets the auth that matches its
+        // header rules. Any other sandbox keeps its auth.json, and gets one
+        // only when it has none (its create ran before a restart).
+        let created_here = lock(&self.guest_auth).get(&sandbox_id).cloned();
+        let auth = match created_here {
+            Some(auth) => {
+                env.insert("BOT_AUTH_OVERWRITE".to_string(), "1".to_string());
+                Some(auth)
+            }
+            // Best effort: the sandbox's rules are already set.
+            None => self
+                .platform
+                .credentials(guest_provider(record))
+                .await
+                .ok()
+                .and_then(|credentials| credentials.auth_json),
+        };
+        if let Some(auth) = auth {
+            env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
+        }
         let output = self
-            .exec_ready(
-                &sandbox_id,
-                BOOTSTRAP_SCRIPT,
-                &bootstrap_env(record),
-                None,
-                deadline,
-            )
+            .exec_ready(&sandbox_id, BOOTSTRAP_SCRIPT, &env, None, deadline)
             .await?;
         check_exit("start the bot daemon", &output)?;
+        lock(&self.guest_auth).remove(&sandbox_id);
         let ids: Value = output
             .stdout
             .lines()
@@ -807,6 +837,15 @@ pub fn idempotency_key(bot_id: &str, generation: u32, source: &str) -> String {
     sha256_hex(format!("{bot_id}:{generation}:{source}").as_bytes())[..32].to_string()
 }
 
+/// The provider the guest's model belongs to.
+fn guest_provider(record: &BotRecord) -> &str {
+    record
+        .model
+        .as_deref()
+        .and_then(|model| model.split_once('/'))
+        .map_or(PRIME_INFERENCE_PROVIDER_ID, |(provider, _)| provider)
+}
+
 fn bootstrap_env(record: &BotRecord) -> BTreeMap<String, String> {
     let mut config = json!({ "cwd": "/root" });
     if let Some(model) = &record.model {
@@ -829,6 +868,10 @@ fn bootstrap_env(record: &BotRecord) -> BTreeMap<String, String> {
         ("BOT_CLIENT".to_string(), BOT_CLIENT.to_string()),
         ("BOT_NAME".to_string(), record.name.clone()),
         ("BOT_CONFIG".to_string(), config.to_string()),
+        (
+            "NODE_EXTRA_CA_CERTS".to_string(),
+            super::credentials::PLATFORM_CA_PATH.to_string(),
+        ),
     ]);
     if let Some(file) = &record.guest_session_file {
         env.insert("BOT_SESSION_FILE".to_string(), file.clone());
