@@ -330,8 +330,10 @@ impl Supervisor {
 }
 
 /// TS `assertWorkerCreateOwner`: only an explicit client-owned create is exclusive. A
-/// client-owned open of another client's worker keeps the `SessionAlreadyActiveError`
-/// rejection — naming the LIVE binding's active id, never the stale lease id.
+/// client-owned open reuses only its own client's worker; any other resident (another
+/// client's, or an unowned one) keeps the `SessionAlreadyActiveError` rejection — naming
+/// the LIVE binding's active id, never the stale lease id. The check runs under the
+/// per-file open single-flight, so it is atomic with the create.
 async fn client_owned_conflict(
     resident: &Arc<ResidentWorker>,
     lifecycle: Option<DaemonSessionLifecycle>,
@@ -348,12 +350,8 @@ async fn client_owned_conflict(
             descriptor.root_active_session_id.clone(),
         )
     };
-    match owner.as_deref() {
-        Some(owner) if owner != client_id => Some(format!(
-            "Session is already active in {live_id}: {session_path}"
-        )),
-        _ => None,
-    }
+    (owner.as_deref() != Some(client_id))
+        .then(|| format!("Session is already active in {live_id}: {session_path}"))
 }
 
 #[cfg(test)]
@@ -430,16 +428,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unowned_worker_is_reusable() {
+    async fn a_client_owned_create_refuses_an_unowned_worker() {
         let resident = resident_with(None, "live-id");
-        assert!(client_owned_conflict(
-            &resident,
-            Some(DaemonSessionLifecycle::ClientOwned),
-            "daemon-tui:2",
-            "/s.jsonl"
-        )
-        .await
-        .is_none());
+        assert_eq!(
+            client_owned_conflict(
+                &resident,
+                Some(DaemonSessionLifecycle::ClientOwned),
+                "daemon-tui:2",
+                "/s.jsonl"
+            )
+            .await,
+            Some("Session is already active in live-id: /s.jsonl".to_string())
+        );
     }
 
     #[tokio::test]
