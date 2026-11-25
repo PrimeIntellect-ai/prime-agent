@@ -1,6 +1,7 @@
 //! The child-lifecycle concern: session creation (create/launch), the
 //! prompt/kill/close routing, settle watching with its notices, and the
 //! spawn-admission outbox types (`CreatedSessionIds`, `CreatedChild`).
+use pa_core::session_engine::rlm_host::RlmSpawnKind;
 use pa_core::session_engine::semantic_edges::ChildCancelledReason;
 
 use super::run_state::{RunEvent, RunVerdict};
@@ -75,7 +76,7 @@ impl SupervisorChildSessionsInner {
         depth: u32,
         model: &str,
         thinking: Option<&str>,
-        decision_child: bool,
+        kind: RlmSpawnKind,
         cwd: &str,
         session_dir: &Path,
         // The parent's in-flight turn request the child anchors to (TS
@@ -93,9 +94,12 @@ impl SupervisorChildSessionsInner {
             "rlmMaxDepth": identity.rlm_max_depth,
         });
         // The create key: descriptor.rs derives the worker's launch env
-        // from it, and the admission projects it onto the ledger edge.
-        if decision_child {
-            config["decisionChild"] = json!(true);
+        // from it, and the admission projects `decisionChild` onto the
+        // ledger edge.
+        match kind {
+            RlmSpawnKind::Subagent => {}
+            RlmSpawnKind::Decision => config["decisionChild"] = json!(true),
+            RlmSpawnKind::Refine => config["refineChild"] = json!(true),
         }
         if let Some((provider, id)) = model.split_once('/') {
             config["provider"] = json!(provider);
@@ -188,7 +192,7 @@ impl SupervisorChildSessionsInner {
                 depth,
                 model,
                 thinking,
-                /*decision_child*/ false,
+                RlmSpawnKind::Subagent,
                 cwd,
                 session_dir,
                 /*spawned_by_request_id*/ None,
@@ -634,6 +638,9 @@ impl SupervisorChildSessionsInner {
                 // refused abort can roll a cancelled run back to running
                 // inside this tail: the live run keeps its watcher.
                 if self.fire_settle_hook(record).await {
+                    // The one-shot refinement child retires at its settle —
+                    // the registry observed it, so it owns the teardown.
+                    self.retire_refine_child_record(record).await;
                     return;
                 }
                 continue;
@@ -858,6 +865,7 @@ impl SupervisorChildSessionsInner {
         self.record_child_return(record).await;
         self.deliver_terminal_notice(record, message).await;
         self.fire_settle_hook(record).await;
+        self.retire_refine_child_record(record).await;
         true
     }
 

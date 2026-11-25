@@ -594,9 +594,17 @@ def finish(scope, client, daemon, observation):
             client.call('shutdown', force=True)
             observation['shutdown_wire'] = client.wire
             client.close()  # The daemon's close waits for raw fixture connections.
-            daemon.wait(timeout=15)
+            # The supervisor's forced shutdown waits on its workers; under a
+            # loaded CI host the exit crossed the old 15s bound and the
+            # fallback found every process already gone (a clean exit read as
+            # a failure). The bound stays finite: a hung daemon still fails.
+            daemon.wait(timeout=30)
             assert daemon.returncode == 0, 'owned goal daemon shutdown failed'
-        scope.wait_gone(5)
+        # The supervisor's workers exit asynchronously after the daemon's
+        # acknowledgement; a five-second bound raced them on a loaded host
+        # (a different case failed each run). The bound stays finite: a
+        # genuinely leaked process still fails the check.
+        scope.wait_gone(20)
         observation['cleanup_verified'] = True
     except Exception as error:
         observation['cleanup_error'] = str(error)
