@@ -181,6 +181,7 @@ pub fn wire_session_runtime(
         rlm.progress_note_emit,
     ));
     register_rlm_host_handlers(&mut handlers, &rlm_bridge);
+    super::factory_host::register_factory_compile_host_handler(&mut handlers, agent_dir);
     if let Some(inbox) = &rlm.inbox {
         super::inbox::register_inbox_host_handlers(inbox, &mut handlers);
     }
