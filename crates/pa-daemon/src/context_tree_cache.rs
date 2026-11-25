@@ -691,6 +691,7 @@ mod tests {
                     name: child_id.to_string(),
                     factory: Some(tag.clone()),
                     decision_child: false,
+                    refine_child: false,
                 })
                 .unwrap();
         }
@@ -710,6 +711,7 @@ mod tests {
                 name: "twin".to_string(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         record_spend(&agent_dir, &live_file);
@@ -781,6 +783,7 @@ mod tests {
                 name: "old".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         record_spend(agent_dir, &child);
@@ -859,6 +862,7 @@ mod tests {
                     name: id.into(),
                     factory: None,
                     decision_child: false,
+                    refine_child: false,
                 })
                 .unwrap();
             ledger

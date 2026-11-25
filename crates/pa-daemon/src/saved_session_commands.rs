@@ -1011,6 +1011,7 @@ mod tombstone_usage_tests {
                 name: "w".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         // The delete goes through a final-component symlink: the capture
@@ -1056,6 +1057,7 @@ mod tombstone_usage_tests {
                 name: "w".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         let capture = capture_saved_session_delete(&fifo.to_string_lossy(), None);

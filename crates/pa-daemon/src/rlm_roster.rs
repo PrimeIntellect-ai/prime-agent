@@ -264,6 +264,7 @@ mod tests {
                 deleted_usage: None,
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             },
             info,
             metadata: RlmChildMetadata::default(),
@@ -287,6 +288,7 @@ mod tests {
                 deleted_usage: None,
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             },
             info: plain_info,
             metadata: RlmChildMetadata::default(),
@@ -333,6 +335,7 @@ mod tests {
                 name: "w1".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         ledger
@@ -344,6 +347,7 @@ mod tests {
                 name: "w2".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         ledger
@@ -355,6 +359,7 @@ mod tests {
                 name: "gone".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         // A deleted child tombstones out of the walk.
@@ -430,6 +435,7 @@ mod tests {
                 name: "worker".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         let walked = walk_passive_rlm_children(

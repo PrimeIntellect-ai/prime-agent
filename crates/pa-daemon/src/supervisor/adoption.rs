@@ -742,9 +742,13 @@ impl Supervisor {
         let Some(metadata) = runtime_metadata else {
             return Ok(());
         };
-        if metadata.get("kind").and_then(Value::as_str) != Some("subagent") {
-            return Ok(());
-        }
+        // A refine child records its edge too: the parent's spend folds its
+        // planning call, while every edge listing skips the flagged edge.
+        let refine_child = match metadata.get("kind").and_then(Value::as_str) {
+            Some("subagent") => false,
+            Some("refine") => true,
+            _ => return Ok(()),
+        };
         let child_id = metadata
             .get("rlmChildId")
             .and_then(Value::as_str)
@@ -797,6 +801,7 @@ impl Supervisor {
                     .and_then(|config| config.get("decisionChild"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                refine_child,
             })
             .inspect_err(|error| {
                 self.log_line(&format!("failed to append RLM ledger spawn: {error:#}"));

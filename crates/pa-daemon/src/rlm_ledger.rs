@@ -105,6 +105,9 @@ pub struct RlmLedgerEdge {
     /// The Decision API child (`rlm.spawn kind="decision"`): the seeded
     /// roster row and the wakes replay it from the edge.
     pub decision_child: bool,
+    /// The one-shot refinement child: only the usage fold reads its edge;
+    /// every edge listing skips it, so it never reseeds, revives, or lists.
+    pub refine_child: bool,
 }
 
 /// A session's durable id: its session file's name stem. Spawn records,
@@ -188,6 +191,7 @@ pub struct RlmSpawnInput {
     pub name: String,
     pub factory: Option<RlmFactoryTag>,
     pub decision_child: bool,
+    pub refine_child: bool,
 }
 
 /// The per-sessions-dir spawn ledger. Reads are guarded by a file stat snapshot; a missing ledger
@@ -220,7 +224,7 @@ fn resolve_live_edges(
 ) -> Result<Vec<RlmLedgerEdge>> {
     let mut edges = Vec::with_capacity(state.edges.len());
     for edge in &state.edges {
-        if edge.deleted.is_some() {
+        if edge.deleted.is_some() || edge.refine_child {
             continue;
         }
         let (Some(child), Some(parent)) = (
@@ -252,6 +256,7 @@ fn fold_records(records: Vec<LedgerRecord>, keep: impl Fn(&str) -> bool) -> Repl
                 name,
                 factory,
                 decision_child,
+                refine_child,
             } if keep(&child_id) => {
                 let key = edge_key(&child_id, &child);
                 let edge = RlmLedgerEdge {
@@ -264,6 +269,7 @@ fn fold_records(records: Vec<LedgerRecord>, keep: impl Fn(&str) -> bool) -> Repl
                     deleted_usage: None,
                     factory,
                     decision_child,
+                    refine_child,
                 };
                 if let Some(at) = state.index.get(&key).copied() {
                     state.edges[at] = edge;
@@ -405,6 +411,9 @@ impl RlmSpawnLedger {
         }
         if input.decision_child {
             record["decisionChild"] = json!(true);
+        }
+        if input.refine_child {
+            record["refineChild"] = json!(true);
         }
         self.append_record(&record)
     }
@@ -589,6 +598,9 @@ impl RlmSpawnLedger {
                 };
                 for &at in indices {
                     let edge = &state.edges[at];
+                    if edge.refine_child {
+                        continue;
+                    }
                     let Some(parent) = resolver.resolve(&edge.parent)? else {
                         continue;
                     };
@@ -627,7 +639,7 @@ impl RlmSpawnLedger {
         Ok(state
             .edges
             .iter()
-            .filter(|edge| include_deleted || edge.deleted.is_none())
+            .filter(|edge| !edge.refine_child && (include_deleted || edge.deleted.is_none()))
             .cloned()
             .collect())
     }

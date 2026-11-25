@@ -20,6 +20,7 @@ pub(super) enum LedgerRecord {
         name: String,
         factory: Option<super::RlmFactoryTag>,
         decision_child: bool,
+        refine_child: bool,
     },
     Rename {
         child_id: String,
@@ -111,6 +112,7 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
                 .get("factory")
                 .and_then(|factory| serde_json::from_value(factory.clone()).ok());
             let decision_child = record.get("decisionChild") == Some(&json!(true));
+            let refine_child = record.get("refineChild") == Some(&json!(true));
             Ok(Some(LedgerRecord::Spawn {
                 child_id,
                 parent,
@@ -119,6 +121,7 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
                 name,
                 factory,
                 decision_child,
+                refine_child,
             }))
         }
         "rename" => {

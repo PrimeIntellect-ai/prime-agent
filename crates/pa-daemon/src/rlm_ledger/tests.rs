@@ -91,6 +91,7 @@ fn spawn_rename_delete_replay_in_order() {
             name: "worker".into(),
             factory: None,
             decision_child: true,
+            refine_child: false,
         })
         .unwrap();
     ledger
@@ -138,6 +139,7 @@ fn edge_is_live_reflects_tombstones_and_files() {
             name: "w".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     assert!(ledger.edge_is_live("sub-1", &child_path));
@@ -164,6 +166,7 @@ fn edge_is_live_reflects_tombstones_and_files() {
             name: "w2".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     ledger
@@ -206,6 +209,7 @@ fn edge_is_live_revalidates_paths_without_a_ledger_append() {
                 name: "child".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
     }
@@ -271,6 +275,7 @@ fn a_respawned_child_id_on_a_new_path_is_live_and_the_old_one_is_not() {
                 name: name.into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
     };
@@ -303,12 +308,45 @@ fn dead_child_or_parent_drops_from_live_edges() {
             name: "w".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     assert_eq!(ledger.live_edges().unwrap().len(), 1);
     fs::remove_file(&child).unwrap();
     assert!(ledger.live_edges().unwrap().is_empty());
     assert_eq!(ledger.edges(false).unwrap().len(), 1);
+}
+
+/// A refine child's edge reaches the spend tree but no edge listing: it
+/// never lists, reseeds, revives, or joins a stop's family walk.
+#[test]
+fn a_refine_edge_folds_into_the_spawn_tree_but_never_lists() {
+    let dir = temp_dir("refine");
+    let ledger = ledger_for(&dir);
+    let parent = dir.join("p.jsonl");
+    let child = dir.join("c.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    fs::write(&child, "{}").unwrap();
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-r".into(),
+            parent: parent.to_string_lossy().into(),
+            child: child.to_string_lossy().into(),
+            depth: 1,
+            name: "refine".into(),
+            factory: None,
+            decision_child: false,
+            refine_child: true,
+        })
+        .unwrap();
+    assert!(ledger.edges(true).unwrap().is_empty());
+    assert!(ledger.live_edges().unwrap().is_empty());
+    assert!(ledger.live_edges_of_parent(&parent).unwrap().is_empty());
+    assert!(ledger.family_edges([parent]).unwrap().is_empty());
+    assert_eq!(
+        ledger.spawn_tree().unwrap().children("p"),
+        ["c".to_string()]
+    );
 }
 
 /// A recorded edge path whose file moved resolves through its durable session id, and the returned
@@ -342,6 +380,7 @@ fn moved_edge_paths_resolve_through_the_session_id() {
             name: "w".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
 
@@ -399,6 +438,7 @@ fn the_artifact_index_updates_after_a_new_partition() {
                 name: "w".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
     };
@@ -460,6 +500,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
             name: "a".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     ledger
@@ -471,6 +512,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
             name: "b".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     let deleted_child = sessions_dir.join("sess-d.jsonl");
@@ -484,6 +526,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
             name: "d".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     ledger
@@ -503,6 +546,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
                 name: format!("f{n}"),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
     }
@@ -565,6 +609,7 @@ fn a_parent_left_in_the_archive_dir_is_a_dead_endpoint_walked_once() {
             name: "w".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     let scans = replay::ARTIFACT_SCANS.with(std::cell::Cell::get);
@@ -598,6 +643,7 @@ fn live_edges_of_parent_follows_a_moved_parent() {
             name: "w".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     let edges = ledger.live_edges_of_parent(&live_parent).unwrap();
@@ -627,6 +673,7 @@ fn live_edges_of_parent_follows_a_moved_parent() {
             name: "w2".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     let edges = ledger.live_edges_of_parent(&elsewhere).unwrap();
@@ -653,6 +700,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
             name: "w".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     let duplicate = ledger.append_spawn(&RlmSpawnInput {
@@ -663,6 +711,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
         name: "w".into(),
         factory: None,
         decision_child: false,
+        refine_child: false,
     });
     assert!(duplicate.is_err());
     let depth_zero = ledger.append_spawn(&RlmSpawnInput {
@@ -673,6 +722,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
         name: "w".into(),
         factory: None,
         decision_child: false,
+        refine_child: false,
     });
     assert!(depth_zero.is_err());
     // A torn tail or bad line costs that record only; later appends still land.
@@ -689,6 +739,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
             name: "w".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     let edges = ledger.edges(false).unwrap();
@@ -840,6 +891,7 @@ fn the_artifact_index_rechecks_deleted_and_relocated_transcripts_without_an_appe
             name: "child".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     let initial = ledger.live_edges().unwrap();
@@ -875,6 +927,7 @@ fn artifact_misses_stay_cached_until_a_directory_changes() {
             name: "child".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     let scans = replay::ARTIFACT_SCANS.with(std::cell::Cell::get);
@@ -893,6 +946,7 @@ fn artifact_misses_stay_cached_until_a_directory_changes() {
         deleted_usage: None,
         factory: None,
         decision_child: false,
+        refine_child: false,
     }];
     assert_eq!(ledger.live_edges().unwrap(), expected);
     assert_eq!(ledger.live_edges().unwrap(), expected);
@@ -919,6 +973,7 @@ fn family_edges_track_restore_and_relocation_without_a_ledger_append() {
             name: "child".into(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     let family_children = || -> Vec<PathBuf> {
@@ -966,6 +1021,7 @@ fn family_edges_recheck_symlink_targets_without_a_ledger_append() {
                 name: child_id.into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
     }

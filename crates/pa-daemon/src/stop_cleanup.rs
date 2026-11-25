@@ -460,6 +460,7 @@ mod tests {
                 name: "lane".to_string(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         ledger
@@ -471,6 +472,7 @@ mod tests {
                 name: "moved".to_string(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
 

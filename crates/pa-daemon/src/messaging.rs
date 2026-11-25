@@ -710,6 +710,7 @@ mod tests {
             deleted_usage: None,
             factory: None,
             decision_child: false,
+            refine_child: false,
         };
         for selector in ["kid", "sub-kid1", "sess-kid"] {
             assert!(ledger_edge_matches(&edge, selector), "{selector}");

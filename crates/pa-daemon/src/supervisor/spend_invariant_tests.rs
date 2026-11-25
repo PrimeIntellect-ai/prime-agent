@@ -71,6 +71,7 @@ fn family() -> Family {
                 name: child_id.to_string(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
     }

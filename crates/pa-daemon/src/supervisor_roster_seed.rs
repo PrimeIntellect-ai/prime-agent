@@ -409,6 +409,7 @@ pub(crate) mod tests {
             deleted_usage: None,
             factory: None,
             decision_child: false,
+            refine_child: false,
         }
     }
 
@@ -589,6 +590,7 @@ pub(crate) mod tests {
                 name: "lane".to_string(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .expect("append spawn");
     }
@@ -895,6 +897,7 @@ pub(crate) mod tests {
                     deleted_usage: None,
                     factory: None,
                     decision_child: false,
+                    refine_child: false,
                 },
             );
             roster.write_seeded(candidate.summary, candidate.seeded_cwd)
