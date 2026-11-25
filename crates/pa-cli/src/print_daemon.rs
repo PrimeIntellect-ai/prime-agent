@@ -43,10 +43,30 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
             DaemonCommand::Create { session_path, .. } => session_path.clone(),
             _ => None,
         };
+        // Ctrl-C or SIGTERM from here on ends the run through the owned-session
+        // teardown below, so the daemon stops the worker at once instead of
+        // after the disconnect grace. A signal during the create still waits
+        // for the create's answer: the teardown needs the spawned session's id.
+        let mut interrupt = std::pin::pin!(interrupted());
+        let mut create = std::pin::pin!(client.request_ok(create));
+        let mut signal = None;
+        let created = tokio::select! {
+            created = &mut create => created,
+            code = &mut interrupt => {
+                signal = Some(code);
+                tokio::select! {
+                    created = create => created,
+                    code = interrupted() => {
+                        client.close();
+                        return Ok(Some(code));
+                    }
+                }
+            }
+        };
         // B-11: the run-owned session never takes over a file a live daemon
         // worker already hosts. The daemon refuses the client-owned create
         // atomically (TS `assertWorkerCreateOwner`).
-        let summary = match client.request_ok(create).await {
+        let summary = match created {
             Ok(summary) => summary,
             Err(error) => {
                 let refusal = describe_live_session_refusal(&client, &error, session_path).await;
@@ -208,18 +228,19 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
             }
             Ok(exit_code)
         };
-        // Ctrl-C or SIGTERM ends the run early: the teardown below still
-        // stops the daemon-side turn instead of leaving it to the
-        // disconnect grace.
-        let exit = tokio::select! {
-            exit = run => exit,
-            code = interrupted() => Ok(code),
+        let exit = if let Some(code) = signal {
+            Ok(code)
+        } else {
+            tokio::select! {
+                exit = run => exit,
+                code = &mut interrupt => Ok(code),
+            }
         };
         // The run's session ends with it. A further signal skips the wait.
         tokio::select! {
             _ = client.request(DaemonCommand::CompleteOwnedSession {
                 id: None,
-                active_session_id,
+                active_session_id: active_session_id.clone(),
                 rest: Map::default(),
             }) => {}
             _ = interrupted() => {}
