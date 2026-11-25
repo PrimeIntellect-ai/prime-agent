@@ -122,6 +122,21 @@ pub struct BotRecord {
     /// Unix milliseconds of the last status change.
     #[serde(default)]
     pub status_since: Option<i64>,
+    /// Milliseconds the bot ran before its current status.
+    #[serde(default)]
+    pub running_ms: i64,
+}
+
+impl BotRecord {
+    /// Milliseconds the bot ran up to `now_ms`, the current running interval included.
+    #[must_use]
+    pub fn running_ms_at(&self, now_ms: i64) -> i64 {
+        let current = match (self.status, self.status_since) {
+            (BotStatus::Running, Some(since)) => (now_ms - since).max(0),
+            _ => 0,
+        };
+        self.running_ms + current
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -154,12 +169,17 @@ impl BotRegistry {
     /// Returns an error when the file exists but cannot be read or parsed.
     pub fn load(agent_dir: &Path) -> Result<Self> {
         let path = Self::path_in(agent_dir);
-        let file = match std::fs::read_to_string(&path) {
+        let mut file = match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str::<RegistryFile>(&text)
                 .with_context(|| format!("parse {}", path.display()))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => RegistryFile::default(),
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
+        // A record from before the status stamp counts its running time from this load.
+        let now = super::manager::now_ms();
+        for record in file.bots.values_mut() {
+            record.status_since.get_or_insert(now);
+        }
         Ok(Self { path, file })
     }
 

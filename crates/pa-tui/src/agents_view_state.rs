@@ -655,16 +655,11 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         .iter()
         .filter(|row| row.kind != crate::agents_view_forest::RowKind::Code)
         .collect();
-    let cost = |row: &crate::agents_view_forest::AgentsViewRow| {
-        if matches!(
-            row.kind,
-            crate::agents_view_forest::RowKind::PersistentShell
-                | crate::agents_view_forest::RowKind::Bot
-        ) {
-            "-".to_string()
-        } else {
-            format!("${:.2}", row.cost)
-        }
+    let cost = |row: &crate::agents_view_forest::AgentsViewRow| match row.kind {
+        crate::agents_view_forest::RowKind::PersistentShell => "-".to_string(),
+        // A bot's cost is its sandbox time at Prime's published rates.
+        crate::agents_view_forest::RowKind::Bot => format!("${:.2} est.", row.cost),
+        _ => format!("${:.2}", row.cost),
     };
     let cost_width = rows
         .iter()

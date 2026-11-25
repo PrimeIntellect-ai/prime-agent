@@ -67,7 +67,7 @@ fn bot_row(bot: &BotRow, now: u64) -> AgentsViewRow {
         title: bot.name.clone(),
         // The model column's bare id, like the session rows.
         model: crate::agents_view_forest::session_model(&json!({ "model": bot.model })),
-        cost: 0.0,
+        cost: bot.cost_usd,
         age: relative_age(Some(bot.last_activity_at.as_str()), now),
         depth: 0,
         descendant_count: 0,

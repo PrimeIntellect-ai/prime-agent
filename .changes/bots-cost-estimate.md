@@ -1,0 +1,1 @@
+- The `/bots` page and the agents page show each bot's estimated sandbox cost: its running time at Prime's published sandbox rates.

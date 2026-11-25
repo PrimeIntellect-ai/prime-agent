@@ -27,7 +27,9 @@ A bot has no shared path with this machine. Its owner copies files out with `awa
 
 ## What it shows
 
-Each row shows a status dot, the bot's name and model, its version, and its last turn. Rows are grouped into `Running`, `Idle`, and `Inactive`, with the most recent activity first. `d` opens a detail pane with the pause timer, the bot id, sandbox id, checkpoint id, version, model, and timestamps. The pause timer reads `pauses in N min` while an idle bot waits out its grace, and `paused since <time>` for a paused bot.
+Each row shows a status dot, the bot's name and model, its version, and its last turn. Rows are grouped into `Running`, `Idle`, and `Inactive`, with the most recent activity first. `d` opens a detail pane with the pause timer, the bot id, sandbox id, checkpoint id, version, model, and timestamps. The pause timer reads `pauses in N min` while an idle bot waits out its grace, and `paused since <time>` for a paused bot. The cost line shows the bot's total running time and its estimated price. The agents page shows the same estimate in its cost column.
+
+The Prime sandbox API does not report a price. The estimate uses Prime's published sandbox rates and the bot's size (2 vCPU, 4 GiB memory, 20 GiB disk): $0.02 per vCPU hour, $0.0125 per GiB memory hour, and $0.0002 per GiB disk hour, so $0.094 per running hour. Only running time counts. Paused time is not counted.
 
 ## Attach
 
