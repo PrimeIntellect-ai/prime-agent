@@ -553,12 +553,27 @@ async fn a_relay_configured_spawn_arms_the_guest_self_pause() {
         Some(super::GUEST_SELF_PAUSE_FILE)
     );
     assert_eq!(
+        bootstrap.get("BOT_RELAY_URL").map(String::as_str),
+        Some(format!("http://{address}").as_str())
+    );
+    assert_eq!(
         bootstrap.get("BOT_SELF_PAUSE_URL").map(String::as_str),
         Some(format!("http://{address}/api/bots/{bot_id}/pause").as_str())
     );
     assert_eq!(
         bootstrap.get("BOT_SELF_PAUSE_MINUTES").map(String::as_str),
         Some("3")
+    );
+    let bootstrap_script = platform
+        .state()
+        .execs
+        .iter()
+        .find(|(script, _)| script.contains("PRIME_AGENT_BOT_SELF_PAUSE"))
+        .map(|(script, _)| script.clone())
+        .expect("the self-pause writer ran");
+    assert!(
+        bootstrap_script.contains("\"relayUrl\""),
+        "the guest configuration carries the relay URL"
     );
 
     // The registration reached the relay with the sandbox id and token.
@@ -578,6 +593,114 @@ async fn a_relay_configured_spawn_arms_the_guest_self_pause() {
     let body: serde_json::Value = serde_json::from_str(body.trim_end()).unwrap();
     assert_eq!(body["sandboxId"], serde_json::json!(sandbox_id));
     assert_eq!(body["pauseToken"], serde_json::json!(token));
+}
+
+/// A relay that records every request and answers 200 until aborted.
+async fn relay_recorder() -> (
+    std::net::SocketAddr,
+    Arc<Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let request = read_request(&mut socket).await;
+            recorded
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&request).to_string());
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        }
+    });
+    (address, requests, task)
+}
+
+async fn read_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = socket.read(&mut chunk).await.unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(header_end) = find_header_end(&buffer) {
+            let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+            let length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or_default();
+            if buffer.len() >= header_end + 4 + length {
+                break;
+            }
+        }
+    }
+    buffer
+}
+
+/// Deleting a bot drops its relay registration and wake-up schedules, so a
+/// paused bot can never fire after the owner deleted it.
+#[tokio::test]
+async fn deleting_a_bot_clears_its_relay_wakeups() {
+    let (dir, _platform, manager) = setup();
+    let (address, requests, relay) = relay_recorder().await;
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({
+            "bots": {
+                "relay": {
+                    "url": format!("http://{address}"),
+                    "token": "relay-owner-token",
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let spawned = manager.spawn(&spec("bot-relay-delete")).await.unwrap();
+    let bot_id = spawned.bot_id.clone();
+
+    // Wait for the wake-time registration.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while requests.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let first = requests
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the registration arrived");
+    assert!(
+        first.starts_with(&format!("PUT /api/bots/{bot_id} ")),
+        "the registration ran first: {first}"
+    );
+
+    manager.delete(&bot_id).await.unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while requests.lock().unwrap().len() < 2 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let rows = requests.lock().unwrap().clone();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows[1].starts_with(&format!("DELETE /api/bots/{bot_id} ")),
+        "the delete path: {}",
+        rows[1]
+    );
+    assert!(rows[1]
+        .to_ascii_lowercase()
+        .contains("authorization: bearer relay-owner-token"));
+    relay.abort();
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
