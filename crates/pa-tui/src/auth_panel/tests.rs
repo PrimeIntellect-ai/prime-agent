@@ -439,6 +439,9 @@ fn a_paste_payload_lands_in_the_mounted_field() {
 /// control characters out of every provider-fed row (the URL is single-line for OSC 8).
 #[test]
 fn provider_text_is_scrubbed_never_a_terminal_sequence() {
+    // Pin the capability off so the frame's only bytes are the scrubbed text;
+    // the enabled side is pinned in the wrap test below.
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
     let mut panel = AuthPanel::new("Login to \u{1b}]8;;https://evil.example\u{7}Evil");
     panel.push_progress("Loading\u{1b}[2J teams...");
     panel.show_auth_url(
@@ -472,18 +475,50 @@ fn provider_text_is_scrubbed_never_a_terminal_sequence() {
     let joined = rows.join("\n");
     assert!(!joined.contains('\u{1b}'), "no escapes render: {joined:?}");
     assert!(joined.contains('A'), "the scrubbed name still renders");
+    crate::hyperlinks::set_hyperlinks_override(None);
 }
 
 #[test]
 fn the_auth_url_link_carries_the_url_as_display_text() {
+    // The capability-off frame (pinned, never the host terminal's env): the URL
+    // rides its row as plain text.
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
     let mut panel = AuthPanel::new("Login to Linear");
     panel.show_auth_url("https://fixture.example/authorize".to_string(), None);
     let rows = frame_text(&mut panel);
-    let linked = rows
+    let url_row = rows
         .iter()
         .find(|row| row.contains("https://fixture.example/authorize"))
         .expect("the URL row");
-    assert!(linked.contains("https://fixture.example/authorize"));
+    assert_eq!(
+        url_row, " https://fixture.example/authorize",
+        "the URL rides its row as plain text: {url_row:?}"
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+/// The capability-on frame (pinned): the app wraps the visible URL in its own OSC 8
+/// region — the URL is the display text — on every host and terminal env.
+#[test]
+fn the_enabled_capability_wraps_the_url_row_in_the_apps_own_osc8() {
+    crate::hyperlinks::set_hyperlinks_override(Some(true));
+    let mut panel = AuthPanel::new("Login to Linear");
+    panel.show_auth_url("https://fixture.example/authorize".to_string(), None);
+    let rows = frame_text(&mut panel);
+    let url_row = rows
+        .iter()
+        .find(|row| row.contains("https://fixture.example/authorize"))
+        .expect("the URL row");
+    assert_eq!(
+        url_row,
+        &format!(
+            " {}https://fixture.example/authorize{}",
+            crate::hyperlinks::osc8_open("https://fixture.example/authorize"),
+            crate::hyperlinks::OSC8_CLOSE
+        ),
+        "the app's own region wraps the visible URL: {url_row:?}"
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
 }
 
 /// The session surface's panel chrome: the rule, the muted one-space title — and NO bottom
@@ -522,6 +557,9 @@ fn the_session_chrome_is_the_ts_inline_panel() {
 
 #[test]
 fn the_onboarding_panel_is_chrome_less() {
+    // The plain URL frames are the capability-off contract; pin the decision so
+    // the test never rides the host terminal's env (the markdown-tests pattern).
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
     let mut panel = AuthPanel::onboarding("Login to Prime Inference");
     let rows = frame_text(&mut panel);
     assert!(
@@ -550,12 +588,16 @@ fn the_onboarding_panel_is_chrome_less() {
         rows[4], " C copy  Esc/Ctrl+C cancel",
         "the TS auth-actions row: {rows:?}"
     );
+    crate::hyperlinks::set_hyperlinks_override(None);
 }
 
 /// With provider instructions the URL renders in the text colour (never the accent), and a
 /// code-carrying line becomes the verification code block.
 #[test]
 fn the_url_block_renders_the_ts_instruction_frames() {
+    // The plain URL frames are the capability-off contract; pin the decision so
+    // the test never rides the host terminal's env (the markdown-tests pattern).
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
     let mut panel = AuthPanel::onboarding("Login to Linear");
     panel.show_auth_url(
         "https://fixture.example/authorize".to_string(),
@@ -575,6 +617,7 @@ fn the_url_block_renders_the_ts_instruction_frames() {
         .expect("the code row");
     assert_eq!(rows[code - 1], " Verification code");
     assert_eq!(rows[code - 2], "", "the blank separates link and code");
+    crate::hyperlinks::set_hyperlinks_override(None);
 }
 
 #[test]

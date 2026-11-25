@@ -1172,6 +1172,55 @@ impl Supervisor {
                 )
                 .await
             }
+            // `factory_activity` with `overview`: the supervisor-owned,
+            // read-only all-session assembly. The normal route below
+            // would forward it to one session's worker, so the command is
+            // intercepted here and `overview` itself never reaches a
+            // kernel; the supervisor's live half reads each owner's
+            // kernel through the non-arming `peek` action instead, and
+            // every other factory action keeps its session-scoped route.
+            DaemonCommand::FactoryActivity {
+                action,
+                run_id,
+                spec_id,
+                ..
+            } if action == "overview" => {
+                // The lane's opt-in gate, on the one factory arm that
+                // never reaches a kernel: the hello advertisement only
+                // hides the capability, so a stale client that connected
+                // while enabled — and a hand-written request — must meet
+                // the same refusal the kernel-side lane raises while
+                // `factory.enabled` is off, before any catalog scan or
+                // live peek read. The settings read stays fresh per
+                // request (the same spawn_blocking posture as the hello
+                // gate) and a failed read refuses.
+                let agent_dir = self.options.agent_dir.clone();
+                let lane_enabled = tokio::task::spawn_blocking(move || {
+                    crate::factory_activity::factory_lane_enabled(&agent_dir)
+                })
+                .await
+                .unwrap_or(false);
+                if !lane_enabled {
+                    let response = response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        pa_core::refinement::FACTORY_DISABLED_MESSAGE,
+                        None,
+                    );
+                    return (vec![response_line(&response)], false);
+                }
+                if run_id.is_some() || spec_id.is_some() {
+                    let response = response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        "factory activity overview takes no runId or specId",
+                        None,
+                    );
+                    return (vec![response_line(&response)], false);
+                }
+                let response = self.factory_overview(&command_id, &type_name).await;
+                (vec![response_line(&response)], false)
+            }
             command => {
                 let client_id = effective_client_id.lock().unwrap().clone();
                 self.route_client_command(

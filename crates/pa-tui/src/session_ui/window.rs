@@ -770,6 +770,7 @@ mod tests {
                 heartbeats: mpsc::unbounded_channel().0,
                 bash: mpsc::unbounded_channel().0,
                 factory: mpsc::unbounded_channel().0,
+                library: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
             },
             page_tx.clone(),

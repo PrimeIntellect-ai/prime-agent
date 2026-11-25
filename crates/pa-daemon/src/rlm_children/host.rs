@@ -2,6 +2,8 @@
 //! (`spawn`, `create_session`, `list_subagents`, `delete_subagent`,
 //! `collect`, `rename`) over the supervisor's child-sessions registry,
 //! with the spawn-admission helpers only this surface uses.
+use pa_core::session_engine::rlm_host::RlmSpawnKind;
+
 use super::retirement::{Retirement, RetirementEvent, RetirementIntent};
 use super::run_state::{RunEvent, RunState};
 use super::{
@@ -145,7 +147,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
         let this = Arc::clone(&self.inner);
         Box::pin(async move {
             let identity = this.identity.lock().expect("identity lock").clone();
-            if identity.rlm_depth >= identity.rlm_max_depth {
+            // The recursion budget bounds subagents only. A refinement
+            // child is a one-shot planning pass owned by its parent, not a
+            // worker of the tree: refusing it at the limit would lock
+            // every depth-2 session (or any session with a lowered max
+            // depth) out of `refine.run()` and the compaction-triggered
+            // refinement, so the `refine_child` spawn never spends the budget.
+            if request.kind != RlmSpawnKind::Refine && identity.rlm_depth >= identity.rlm_max_depth
+            {
                 bail!(rlm_depth_limit_error(
                     identity.rlm_depth,
                     identity.rlm_max_depth
@@ -191,7 +200,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // unresolvable, then resolves through the ordinary
                 // child-model path so the allowlist still gates the selector.
                 let model = match request.kind {
-                    pa_core::session_engine::rlm_host::RlmSpawnKind::Decision => {
+                    RlmSpawnKind::Decision => {
                         // The selector lookup loads settings synchronously
                         // (a lock with bounded retries), so it runs off the
                         // async executor — the same offload the allowlist
@@ -210,7 +219,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         resolve_child_model_allowlisted(&this, Some(&selector), "spawn", "subagent")
                             .await?
                     }
-                    pa_core::session_engine::rlm_host::RlmSpawnKind::Subagent => {
+                    RlmSpawnKind::Subagent | RlmSpawnKind::Refine => {
                         resolve_child_model_allowlisted(
                             &this,
                             request.model.as_deref(),
@@ -228,7 +237,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // flag rides the create command's `decisionChild` key
                 // (the admission projects it onto the ledger edge).
                 let mut runtime_metadata = json!({
-                    "kind": "subagent",
+                    // The refine child: its worker boots the refinement
+                    // protocol instead of the agent engine.
+                    "kind": if request.kind == RlmSpawnKind::Refine { "refine" } else { "subagent" },
                     "rlmChildId": child_id,
                     "parentActiveSessionId": this.parent_active_session_id,
                     "rlmDepth": identity.rlm_depth + 1,
@@ -237,6 +248,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // The admission's ledger spawn record reads the run tag back.
                 if let Some(factory) = &request.factory {
                     runtime_metadata["factory"] = json!(factory);
+                    // The child's create reads its output contract here,
+                    // and a respawn replays it with the rest.
+                    if let Some(contract) = &factory.contract {
+                        runtime_metadata["factoryContract"] = contract.clone();
+                    }
                 }
                 let created = this
                     .create_child(
@@ -246,8 +262,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         identity.rlm_depth + 1,
                         &model,
                         thinking,
-                        /*decision_child*/
-                        request.kind == pa_core::session_engine::rlm_host::RlmSpawnKind::Decision,
+                        request.kind,
                         &cwd.to_string_lossy(),
                         &child_dir,
                         request.spawned_by_request_id.as_deref(),
@@ -271,8 +286,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
                     run: RunState::held(),
-                    decision_child: request.kind
-                        == pa_core::session_engine::rlm_host::RlmSpawnKind::Decision,
+                    decision_child: request.kind == RlmSpawnKind::Decision,
                     answer_preview: None,
                     answer_text: None,
                     answer_captured: false,
@@ -283,6 +297,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     direct_observation: Arc::new(Mutex::new(())),
                     notice_delivered: false,
                     factory: request.factory.is_some(),
+                    factory_task_busy: None,
+                    refine_child: request.kind == RlmSpawnKind::Refine,
                     retirement: Retirement::live(),
                     session_file: created.session_file.clone(),
                     last_emitted_status: None,
@@ -344,13 +360,23 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let child_log_id = child_id.clone();
             // Capture the spawning turn before detaching. A normal mid-turn
             // spawn waits for this boundary, unless a positive collect releases
-            // this child first. An idle parent has no turn to wait for.
-            let spawning_turn = {
+            // this child first. An idle parent has no turn to wait for. The
+            // refinement child never waits on the turn: its one prompt is a
+            // planning pass, never a turn contending with the parent's
+            // provider continuation. Its prompt instead stays held until the
+            // parent records its flight and releases it
+            // (`release_child_prompt`), so its reply always finds the flight.
+            let refine_child = request.kind == RlmSpawnKind::Refine;
+            let spawning_turn = if refine_child {
+                None
+            } else {
                 let turn = *this.parent_turn.borrow();
                 turn.running.then_some(turn.completed)
             };
             tokio::spawn(async move {
-                if let Some(generation) = spawning_turn {
+                if refine_child {
+                    wait_for_prompt_state(&watcher_record, PromptWait::Release, None).await;
+                } else if let Some(generation) = spawning_turn {
                     tokio::select! {
                         () = watcher_this.wait_turn_done(generation) => {}
                         _ = wait_for_prompt_state(

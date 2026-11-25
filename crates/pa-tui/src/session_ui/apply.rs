@@ -2,8 +2,8 @@
 //! rows, compaction aborts, and the telemetry seams.
 use super::{
     assistant_message_parts, event_to_update, pop_superseded_attempt_row, AgentView, ChatEntry,
-    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock,
-    Overlay, Result, RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
+    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock, Result,
+    RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
 };
 use crate::interactive::reconnect::{ConnectionEffect, ConnectionEvent};
 
@@ -298,11 +298,15 @@ impl SessionUi {
                     self.settled = None;
                     self.bash_list_epoch += 1;
                     self.factory_list_epoch += 1;
+                    self.library_overview_epoch += 1;
                     self.bash_activities = serde_json::json!({"activities": []});
                     self.factory_graph = serde_json::json!({"runs": []});
-                    if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
+                    if let Some(factory_view) = view.run_page_mut() {
                         factory_view.apply_runs(Vec::new());
                     }
+                    // The factory page keeps its all-session rows: its
+                    // cache is not the closed session's scoped graph, so
+                    // only the epoch retires an in-flight reply.
                     self.update_subagent_summary(view);
                     match reason.as_str() {
                         "shutdown" => self.error_row(

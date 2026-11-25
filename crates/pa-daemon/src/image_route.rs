@@ -53,7 +53,6 @@ impl AgentSessionEngine {
         // would arm an unauthenticated target. Keyed (provider, id): one
         // provider's authenticated row must not vouch for another
         // provider's same-id model.
-        let pinned_api_key = self.current_selection().api_key.is_some();
         let resolvable_auth: std::collections::HashSet<(String, String)> = available
             .iter()
             .filter(|model| {
@@ -73,7 +72,7 @@ impl AgentSessionEngine {
                 // Keyed (provider, id): one provider's authenticated row must
                 // not vouch for another provider's same-id model.
                 has_configured_auth: &|model| {
-                    pinned_api_key
+                    self.selection_api_key_for(&model.provider).is_some()
                         || resolvable_auth.contains(&(model.provider.clone(), model.id.clone()))
                 },
                 block_images,

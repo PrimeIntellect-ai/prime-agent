@@ -1207,7 +1207,7 @@ fn activity_lines_follow_each_nodes_subagents_block() {
             (
                 RowKind::FactoryRuns,
                 1,
-                "\u{2699} 0 factories \u{b7} 1 running"
+                "\u{2699} 0 machines \u{b7} 1 running"
             ),
         ]
     );
@@ -1240,7 +1240,7 @@ fn activity_lines_without_subagents_and_without_counts() {
         .iter()
         .position(|title| *title == "a name")
         .expect("a row");
-    assert_eq!(titles[a + 1], "\u{2699} 2 factories \u{b7} 0 running");
+    assert_eq!(titles[a + 1], "\u{2699} 2 machines \u{b7} 0 running");
     assert_eq!(
         rows.len(),
         3,
@@ -1371,7 +1371,7 @@ fn an_inactive_node_shows_its_stored_factory_specs() {
         factory_lines,
         vec![(
             "factory:file:/x/gone.jsonl",
-            "\u{2699} 2 factories \u{b7} 0 running"
+            "\u{2699} 2 machines \u{b7} 0 running"
         )]
     );
 }
@@ -1395,11 +1395,11 @@ fn the_factory_line_counts_paused_runs_apart_from_running_ones() {
     };
     assert_eq!(
         line(0, 1),
-        vec!["\u{2699} 0 factories \u{b7} 0 running \u{b7} 1 paused"]
+        vec!["\u{2699} 0 machines \u{b7} 0 running \u{b7} 1 paused"]
     );
     assert_eq!(
         line(2, 1),
-        vec!["\u{2699} 0 factories \u{b7} 2 running \u{b7} 1 paused"]
+        vec!["\u{2699} 0 machines \u{b7} 2 running \u{b7} 1 paused"]
     );
-    assert_eq!(line(1, 0), vec!["\u{2699} 0 factories \u{b7} 1 running"]);
+    assert_eq!(line(1, 0), vec!["\u{2699} 0 machines \u{b7} 1 running"]);
 }

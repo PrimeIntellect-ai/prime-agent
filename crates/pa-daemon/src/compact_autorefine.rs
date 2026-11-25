@@ -1,10 +1,11 @@
 //! The compact-trigger auto-refine scheduling (TS `_scheduleAutoRefineAfterCompaction`, armed
 //! after every successful compaction): the daemon worker services the trigger off each turn's
-//! settle in a background task (the inline-before-`Done` shape held the next prompt behind the
-//! whole review); ACP consumes it at the serialized checkpoint between turns.
+//! settle in a background task — the round is the refinement child's spawn (fire-and-wake;
+//! the child's proposal applies on its reply's arrival). ACP consumes it at the serialized
+//! checkpoint between turns.
 
-use pa_core::refinement::RefinementResult;
 use pa_core::session_engine::auto_refine_trigger::CompactAutoRefineSurface;
+use pa_core::session_engine::refine::RefinementSource;
 
 use crate::agent_engine::AgentSessionEngine;
 
@@ -31,7 +32,7 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Whether a compaction armed the compact-trigger review on the built
+    /// Whether a compaction armed the compact-trigger round on the built
     /// session (TS `_compactAutoRefinePending`).
     pub(crate) fn compact_auto_refine_pending(&self) -> bool {
         let guard = self.session.blocking_lock();
@@ -53,24 +54,16 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Count one settled non-error assistant turn into the review prompt's
-    /// turn line (TS `_assistantTurnsSinceAutoRefine`'s `message_end` increment).
-    pub(crate) fn note_settled_turn_since_auto_refine_review(&self) {
-        let guard = self.session.blocking_lock();
-        if let Some(engine) = guard.as_deref() {
-            self.runtime
-                .block_on(async { engine.session.note_settled_turn_since_auto_refine_review() });
-        }
-    }
-
     /// The shared round body (the `compact` command path and the turn
-    /// settle both run it): the pending pre-check, the TS busy gates, then
-    /// the pa-core consumption. `Ok(None)` is every silent outcome.
-    pub(crate) fn consume_compact_auto_refine_round(
-        &self,
-    ) -> anyhow::Result<Option<RefinementResult>> {
+    /// settle both run it): the pending pre-check, the TS busy gates, the
+    /// pa-core round take, then the refinement child's spawn. The gates
+    /// (enabled, compact, cooldown, the in-flight guard) live on the
+    /// session's trigger state; the review gate is gone — the child's own
+    /// empty-edits judgment is the gate. `Ok(())` is every silent outcome;
+    /// the spawn's errors surface.
+    pub(crate) fn consume_compact_auto_refine_round(&self) -> anyhow::Result<()> {
         if !self.compact_auto_refine_pending() {
-            return Ok(None);
+            return Ok(());
         }
         // TS `_maybeAutoRefine` defers while the agent is active and behind
         // queued work; only the queued-work check remains live here.
@@ -84,32 +77,49 @@ impl AgentSessionEngine {
             }
         };
         if busy {
-            return Ok(None);
+            return Ok(());
         }
-        // The session's live model: the compact-trigger review follows the
-        // session's provider like the compaction that armed it (R8).
-        let Ok(model) = self.session_model() else {
-            // TS `_maybeAutoRefine` keeps the trigger armed when no model
-            // is selected; the next boundary retries.
-            return Ok(None);
-        };
-        let (model, api_key) = self.resolve_request_target(model);
-        // The lock covers the clone only (see `run_compaction`): holding the
-        // session mutex across the review serialized every client read seam
-        // behind it. The cloned engine keeps the round alive across a rebuild.
-        let engine = {
+        let children = self.children.clone();
+        let core = {
             let guard = self.session.blocking_lock();
             guard.clone()
         };
-        let Some(engine) = engine else {
-            return Ok(None);
+        let Some(core) = core else {
+            return Ok(());
         };
-        self.runtime.block_on(async {
-            engine
+        let outcome = self.runtime.block_on(async {
+            // A dead auto child's round releases first, so its in-flight
+            // guard never holds off this take.
+            self.release_dead_refine_child_rounds().await;
+            // The round take: the gates decide and stamp the cadence; the
+            // in-flight guard holds the trigger while the child runs.
+            let Some(options) = core
                 .session
-                .consume_compact_auto_refine(&model, api_key, CompactAutoRefineSurface::Checkpoint)
+                .take_compact_auto_refine_round(CompactAutoRefineSurface::Checkpoint)
+            else {
+                return Ok(());
+            };
+            // Fire: the spawn returns once the child is admitted; the
+            // child's reply applies on arrival (the apply finishes the round
+            // either way). A standalone engine refuses visibly; the taken
+            // round is released below.
+            let Some(children) = children.as_ref() else {
+                anyhow::bail!(
+                    "The refine command requires a daemon-backed session: the refinement child is a spawned session, and this session has no RLM child runtime."
+                );
+            };
+            self.admit_refine_child(children, &options, RefinementSource::Auto)
                 .await
-        })
+                .map(|_| ())
+        });
+        if let Err(error) = outcome {
+            // A failed spawn releases the round here — its error surfaced,
+            // so the next armed trigger is not wedged behind the
+            // in-flight guard.
+            core.session.finish_compact_auto_refine_round();
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -124,9 +134,6 @@ mod tests {
     /// The faux model's per-request output budget (maxTokens `16_384` under the `32_000` cap):
     /// threshold fixtures subtract it from the window alongside the headroom.
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
-
-    /// A declining review reply (the TS `AutoRefineReview` JSON shape).
-    const DECLINE: &str = r#"{"shouldRefine": false, "rationale": "one-off tool output"}"#;
 
     /// One engine whose sessions carry the conversation log the harness dir derives from
     /// (the refine surface), or without one (sessions that never auto-refine).
@@ -192,11 +199,16 @@ mod tests {
         baseline + big_tokens / 2
     }
 
-    /// A settled compaction arms its compact-trigger review but never
+    /// A settled compaction arms its compact-trigger round but never
     /// consumes it on the turn path (TS schedules it in the background
-    /// after the settle); the worker's servicing body consumes the decline.
+    /// after the settle); the worker's servicing body takes the round and
+    /// spawns — the standalone engine refuses the spawn visibly (the
+    /// refinement child needs the daemon).
     #[test]
-    fn threshold_compaction_arms_the_review_off_the_turn_path() {
+    fn threshold_compaction_arms_the_round_off_the_turn_path() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let headroom = crossing_headroom();
         let (engine, _dir) = trigger_engine(
             &json!({
@@ -204,7 +216,6 @@ mod tests {
                     {"text": "seed reply"},
                     {"text": "crossing reply"},
                     {"text": "the summary"},
-                    {"text": DECLINE},
                     {"text": "third reply"},
                 ]
             }),
@@ -227,14 +238,22 @@ mod tests {
         );
         assert!(
             refinement_rows(&events).is_empty(),
-            "the turn path surfaced no review rows"
+            "the turn path surfaced no round rows"
         );
         assert!(
             engine.compact_auto_refine_pending(),
             "the trigger stayed armed off the turn path"
         );
-        let consumed = engine.consume_compact_auto_refine().expect("the round ran");
-        assert!(consumed.is_none(), "the decline surfaced nothing");
+        // The round was taken (the trigger consumed, the cooldown
+        // stamped); the spawn refuses without the daemon and its error
+        // surfaces — never a silent decline.
+        let error = engine
+            .consume_compact_auto_refine()
+            .expect_err("the spawn refused");
+        assert!(
+            error.to_string().contains("daemon-backed"),
+            "the refusal names the gate: {error}"
+        );
         assert!(
             !engine.compact_auto_refine_pending(),
             "the servicing consumed the trigger"
@@ -243,12 +262,19 @@ mod tests {
         assert_eq!(
             assistant_texts(&events).last().map(String::as_str),
             Some("third reply"),
-            "the serviced review consumed the queued decline"
+            "the third turn answered"
         );
     }
 
+    /// A taken round stamps the cooldown (a failed spawn already
+    /// surfaced); a re-armed trigger under the cooldown stays pending and
+    /// silent at the checkpoint, and the failed spawn's in-flight release
+    /// keeps the cadence un-wedged.
     #[test]
-    fn the_declining_review_stamps_the_cooldown() {
+    fn a_taken_round_stamps_the_cooldown_and_the_failed_spawn_releases_the_round() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // reserve 1: the headroom never crosses, so only the manual
         // compaction runs.
         let (engine, _dir) = trigger_engine(
@@ -257,7 +283,6 @@ mod tests {
                     {"text": "first reply"},
                     {"text": "second reply"},
                     {"text": "the summary"},
-                    {"text": DECLINE},
                     {"text": "third reply"},
                 ]
             }),
@@ -287,64 +312,38 @@ mod tests {
             "the manual compaction ran"
         );
         assert!(engine.compact_auto_refine_pending(), "the trigger armed");
-        // Round one: the review declines.
-        let consumed = engine.consume_compact_auto_refine().expect("the round ran");
-        assert!(consumed.is_none(), "the decline surfaced nothing");
-        // The declined review still billed the session: one usage row records it.
-        let built = engine
-            .session
-            .blocking_lock()
-            .clone()
-            .expect("session built");
-        let rows = engine.runtime.block_on(async {
-            built
-                .session
-                .shared_persistence()
-                .lock()
-                .await
-                .get_entries()
-        });
-        let review_rows = serde_json::to_value(rows)
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|row| row["type"] == "custom" && row["data"]["source"] == "refine_review")
-            .map(|row| row["data"]["usage"]["totalTokens"].as_u64().unwrap_or(0))
-            .collect::<Vec<_>>();
-        assert!(
-            matches!(review_rows.as_slice(), [tokens] if *tokens > 0),
-            "one billed review row, got {review_rows:?}"
-        );
+        // Round one: the take consumed the trigger and the spawn refused —
+        // the standalone engine has no child runtime.
+        engine
+            .consume_compact_auto_refine()
+            .expect_err("the spawn refused");
         assert!(
             !engine.compact_auto_refine_pending(),
             "the trigger consumed"
         );
-        // The cooldown holds it at the boundary (TS keeps the pending flag
-        // while the cooldown runs).
+        // The cooldown holds a re-armed trigger at the boundary (the take
+        // is silent and the trigger stays pending).
         engine.mark_compact_auto_refine_pending();
-        let held = engine
+        engine
             .consume_compact_auto_refine()
-            .expect("the held round ran");
-        assert!(held.is_none(), "no review under the cooldown");
+            .expect("the held round answered");
         assert!(
             engine.compact_auto_refine_pending(),
-            "the checkpoint preserved the trigger"
+            "the cooldown preserved the trigger"
         );
         admit(&engine, "third turn".to_string(), &mut events);
         assert_eq!(
             assistant_texts(&events).last().map(String::as_str),
             Some("third reply"),
-            "the cooldown held the trigger without a review request"
-        );
-        assert!(
-            engine.compact_auto_refine_pending(),
-            "the trigger stayed armed through the turn boundary"
+            "the cooldown held the trigger without a round"
         );
     }
 
     #[test]
-    fn sessions_without_the_refine_surface_never_run_a_review() {
+    fn sessions_without_the_refine_surface_never_run_a_round() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let headroom = crossing_headroom();
         let (engine, _dir) = trigger_engine(
             &json!({
@@ -377,7 +376,7 @@ mod tests {
         assert_eq!(
             assistant_texts(&events).last().map(String::as_str),
             Some("third reply"),
-            "no review ran without the refine surface"
+            "no round ran without the refine surface"
         );
         assert!(
             !engine.compact_auto_refine_pending(),
@@ -393,7 +392,6 @@ mod tests {
                     {"text": "first reply"},
                     {"text": "second reply"},
                     {"text": "the summary"},
-                    {"text": DECLINE},
                     {"text": "third reply"},
                 ]
             }),
@@ -426,70 +424,73 @@ mod tests {
             engine.compact_auto_refine_pending(),
             "the manual compaction armed the trigger"
         );
-        let consumed = engine.consume_compact_auto_refine().expect("the round ran");
-        assert!(consumed.is_none(), "the decline surfaced nothing");
+        // The round was taken; the spawn refused without the daemon.
+        engine
+            .consume_compact_auto_refine()
+            .expect_err("the spawn refused");
         assert!(
             !engine.compact_auto_refine_pending(),
             "the trigger was consumed"
         );
         assert!(
             refinement_rows(&events).is_empty(),
-            "the decline surfaced nothing"
+            "the refused round surfaced no rows"
         );
         admit(&engine, "third turn".to_string(), &mut events);
         assert_eq!(
             assistant_texts(&events).last().map(String::as_str),
             Some("third reply"),
-            "the review consumed the queued decline"
+            "the third turn answered"
         );
     }
 
+    /// `/refine` without a rollback refuses on the standalone engine (the
+    /// planning refinement is the refinement child's — the daemon-backed
+    /// command host spawns it): the refusal is the command's failure row,
+    /// never a silent no-op.
     #[test]
-    fn refine_session_command_hands_completion_off_the_turn_runner() {
+    fn refine_session_command_refuses_without_the_daemon() {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (reply, succeeds) in [
-            (
-                r#"{"summary":"one edit","edits":[{"action":"create","kind":"memory","id":"m1","title":"t","content":"c"}]}"#,
-                true,
-            ),
-            ("not json", false),
-        ] {
-            let (engine, _dir) =
-                trigger_engine(&json!({ "responses": [{"text": reply}] }), 1, true);
-            let (send, receive) = std::sync::mpsc::channel();
-            *engine.refinement_completion_sink.lock().unwrap() =
-                Some(std::sync::Arc::new(move |pending| {
-                    send.send(pending).unwrap();
-                }));
-            let mut events = Vec::new();
-            let execution = crate::session_commands::run_session_command(
-                &engine,
-                &refine_command(),
-                &[],
-                &mut |event| {
-                    events.push(event);
-                    true
-                },
-            )
-            .expect("slash command returns after scheduling");
-            assert!(execution.error.is_none());
-            let pending = receive
-                .try_recv()
-                .expect("completion handed to background sink");
-            let committed = engine.runtime.block_on(pending).unwrap();
-            if succeeds {
-                let result = committed.unwrap();
-                assert_eq!(result.result.summary, "one edit");
-                assert!(result.result.applied_edits[0].applied);
-            } else {
-                assert_eq!(
-                    committed.unwrap_err().to_string(),
-                    "Refiner did not return a JSON object"
-                );
-            }
-        }
+        let (engine, _dir) = trigger_engine(&json!({ "responses": [] }), 1, true);
+        let mut events: Vec<EngineEvent> = Vec::new();
+        let execution = crate::session_commands::run_session_command(
+            &engine,
+            &refine_command(),
+            &[],
+            &mut |event| {
+                events.push(event);
+                true
+            },
+        );
+        assert!(execution.is_some(), "the /refine command answered");
+        let result_row = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                EngineEvent::CustomMessage(row)
+                    if row["customType"] == "session_slash_command_result" =>
+                {
+                    Some(row.clone())
+                }
+                _ => None,
+            })
+            .expect("the failure row");
+        assert_eq!(result_row["details"]["success"], json!(false));
+        assert!(
+            result_row["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("daemon-backed"),
+            "the refusal names the gate: {result_row}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, EngineEvent::RefineComplete { .. })),
+            "no completion without the daemon: {events:?}"
+        );
     }
 
     fn refine_command() -> pa_core::session_engine::slash_commands::SessionSlashCommand {

@@ -135,9 +135,10 @@ fn saved_aliases(saved: &Value) -> Vec<String> {
     aliases
 }
 
-/// The SESSION column's width cap (TS `Math.min(28, ...)`, which `build_layout` mirrors): the
-/// widest the name column ever renders.
-const SESSION_NAME_COLUMN_MAX_CELLS: usize = 28;
+/// The SESSION column's width cap (TS `Math.min(28, ...)` originally; widened for the agents
+/// view's machine rows, whose chip-prefixed names — `⚙` machine children — cut off at 28
+/// cells): the widest the name column ever renders.
+const SESSION_NAME_COLUMN_MAX_CELLS: usize = 40;
 
 /// The widest title the SESSION column renders: the column cap minus the two cells every agent
 /// row spends on its icon and gap.

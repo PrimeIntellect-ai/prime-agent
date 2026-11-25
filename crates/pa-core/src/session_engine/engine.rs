@@ -2,7 +2,7 @@
 //! The session subscribes persistence listeners on the caller's reactor, so
 //! `create_session` is async.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pa_agent::agent::{Agent, AgentInitialState, AgentOptions};
@@ -59,6 +59,10 @@ pub struct SessionEngineConfig {
     /// Whether this session is a factory state's child (its spawn carried a
     /// factory run tag); selects the child prompt's factory line.
     pub factory_child: bool,
+    /// A factory child's output contract (its spawn's `factoryContract`):
+    /// registers the child's `factory.emit` and `factory.inputs`, and
+    /// selects the child prompt's emit line when it declares outputs.
+    pub factory_contract: Option<serde_json::Value>,
     /// Whether the session runs without a daemon: nothing outside the
     /// session itself (no scheduler, no bash-completion wake) starts a
     /// turn. Set explicitly by the embedding; print sessions are
@@ -240,7 +244,19 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     if let Some(traces) = traces {
         session_manager.on_persist(Box::new(move |path| traces.persisted(path)));
     }
-    let wiring = super::runtime_wiring::wire_session_runtime(
+    // A factory child's accepted outputs live beside its session file,
+    // where the parent's executor reads them. A daemon worker's engine
+    // session is not persisted (the worker owns the durable file), so the
+    // conversation-log path gives the directory there. A `--no-session`
+    // print child has neither; its in-memory manager is pinned to the
+    // child's own directory, the spawn handle's `session_dir`.
+    let factory_outputs_dir = session_manager
+        .get_session_file()
+        .or(config.conversation_log_path.as_deref())
+        .and_then(Path::parent)
+        .unwrap_or_else(|| session_manager.get_session_dir())
+        .to_path_buf();
+    let mut wiring = super::runtime_wiring::wire_session_runtime(
         session_manager,
         &config.agent_dir,
         super::runtime_wiring::RlmWiring {
@@ -253,6 +269,14 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         config.queued_goal_context_purge.clone(),
         config.cron_store.clone(),
     );
+    if let Some(contract) = config.factory_contract.clone() {
+        super::factory_host::register_factory_emit_host_handlers(
+            contract,
+            factory_outputs_dir,
+            config.cwd.clone(),
+            &mut wiring.handlers,
+        );
+    }
 
     // A handle that outlives the move into the resource loader: the
     // refinement gate and the system prompt read it.
@@ -517,6 +541,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         on_unavailable_skills,
         on_bootstrap_result,
         config.kernel_ready_gate.clone(),
+        config.daemonless,
     );
     let mut tools = config.tools.clone();
     if !tools.iter().any(|tool| tool.name() == PYTHON_TOOL_NAME) {
@@ -592,7 +617,17 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             // A spawned child's prompt must read "depth: N (not root)" with
             // the child-agent reply doctrine, never the root identity.
             rlm_depth: config.rlm_depth.unwrap_or(0),
-            factory_child: config.factory_child,
+            // An empty contract (a state with no outputs) has nothing to emit.
+            factory_child: config.factory_child.then_some(
+                if config.factory_contract.as_ref().is_some_and(|contract| {
+                    pa_factory::Contract::from_json(contract)
+                        .is_ok_and(|contract| !contract.outputs.is_empty())
+                }) {
+                    crate::prompts::FactoryChild::Emit
+                } else {
+                    crate::prompts::FactoryChild::FinalMessage
+                },
+            ),
             daemonless: config.daemonless,
             can_spawn: config.rlm_subagent_host.is_some(),
         },
@@ -1092,11 +1127,12 @@ impl SessionEngine {
     }
 
     /// One factory activity over this session's live kernel: the `/factory`
-    /// view's bridge lane (graph/status/watch/run/stop/resume). A `run`
-    /// prefights the spec's declared models first (allowlist pin, request
-    /// auth) so a doomed run fails before any child spawns; then the
-    /// out-of-band frame carries the request into the kernel's executor,
-    /// which owns the run registry.
+    /// view's bridge lane (graph/status/watch/run/stop/resume, plus the
+    /// machine library's list/graph reads, and the arming-free `peek`
+    /// the all-session overview polls through). A `run` prefights the spec's
+    /// declared models first (allowlist pin, request auth) so a doomed run
+    /// fails before any child spawns; then the out-of-band frame carries
+    /// the request into the kernel's executor, which owns the run registry.
     ///
     /// # Errors
     ///
@@ -1109,9 +1145,11 @@ impl SessionEngine {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        entry: Option<&serde_json::Value>,
+        instance: Option<&serde_json::Value>,
     ) -> anyhow::Result<serde_json::Value> {
         let request = super::factory_host::FactoryActivityRequest::parse(
-            action, run_id, spec_id, timeout_ms,
+            action, run_id, spec_id, timeout_ms, entry, instance,
         )?;
         if request.action == "run" {
             let spec_id = request
@@ -1130,16 +1168,24 @@ impl SessionEngine {
                 .map_err(|join| anyhow::anyhow!("factory run preflight join failed: {join}"))?;
             preflight?;
         }
-        let manager = self
-            .provisioner
-            .manager()
-            .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
+        // The machines page's drill-in (`library` with a machine name) is an
+        // explicit open: it starts the kernel that builds the machine's
+        // graph. Every other action (the dock's run polling among them)
+        // never builds one.
+        let manager = if request.action == "library" {
+            self.provisioner.ensure(None, None).await?
+        } else {
+            self.provisioner
+                .manager()
+                .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?
+        };
         manager
             .factory_activity(
                 request.action,
                 request.run_id.as_deref(),
                 request.spec_id.as_deref(),
                 request.timeout_ms,
+                request.selector,
             )
             .await
     }

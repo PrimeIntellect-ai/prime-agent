@@ -168,6 +168,7 @@ async fn run_cells(kernel_python: &std::path::Path, calls: Vec<(&str, Value)>) -
         steering_mode: None,
         follow_up_mode: None,
         factory_child: false,
+        factory_contract: None,
         cwd: cwd.clone(),
         agent_dir,
         model: Some(model),

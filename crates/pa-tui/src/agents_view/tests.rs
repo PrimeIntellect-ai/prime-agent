@@ -13,6 +13,7 @@ mod drill_down;
 mod edge_jumps;
 mod empty_sessions;
 mod entry_anchor;
+mod factory_markers;
 mod heartbeat_badge;
 mod hints_render;
 mod hover_band;

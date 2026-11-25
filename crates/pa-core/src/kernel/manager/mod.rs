@@ -854,6 +854,7 @@ impl ReplKernelManager {
         self.enqueue_request(
             Request::Execute {
                 code: code.to_string(),
+                runtime_bootstrap: opts.runtime_bootstrap,
             },
             opts,
             execution_timeout_ms,
@@ -926,8 +927,12 @@ impl ReplKernelManager {
     /// [`Self::bash_activity`] this bypasses the cell FIFO (a running turn
     /// must never delay the live view) and never boots an idle kernel.
     ///
-    /// `action` is one of `graph`/`status`/`watch`/`run`/`stop`/`resume`;
-    /// `run_id`/`spec_id` carry the target and `timeout_ms` bounds a watch.
+    /// `action` is one of `graph`/`status`/`watch`/`run`/`stop`/`resume`/
+    /// `library` (the machine library's list/graph reads), `node` (one run
+    /// state's detail) and `peek` (the all-session overview's arming-free
+    /// live list, which takes no target); `run_id`/`spec_id` carry the
+    /// target, `selector` picks a node's `(entry, instance)`, and
+    /// `timeout_ms` bounds a watch.
     /// The kernel owns the run registry, so the reply is the kernel's
     /// result payload verbatim.
     ///
@@ -943,6 +948,7 @@ impl ReplKernelManager {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        selector: Option<(u64, u64)>,
     ) -> anyhow::Result<Value> {
         if !self.is_running() {
             return Err(anyhow!("Kernel is not running"));
@@ -963,6 +969,8 @@ impl ReplKernelManager {
             "runId": run_id,
             "specId": spec_id,
             "timeoutMs": timeout_ms,
+            "entry": selector.map(|(entry, _)| entry),
+            "instance": selector.map(|(_, instance)| instance),
         });
         if let Err(error) = self.inner.write_line(&frame).await {
             lock(&self.inner.guarded)
