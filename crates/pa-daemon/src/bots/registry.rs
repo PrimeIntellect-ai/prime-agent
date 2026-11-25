@@ -103,6 +103,10 @@ pub struct BotRecord {
     /// the sandbox. `None` until a wake with a relay configured.
     #[serde(default)]
     pub pause_token: Option<String>,
+    /// The relay host the sandbox's rules carry; `None` while they carry
+    /// no relay rule. A wake whose relay host differs pushes fresh rules.
+    #[serde(default)]
+    pub pause_rule_host: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

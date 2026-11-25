@@ -613,6 +613,82 @@ async fn a_bot_paused_by_the_guest_needs_no_second_pause() {
     assert_eq!(resumed.sandbox_id.as_deref(), Some(sandbox_id.as_str()));
 }
 
+/// A relay whose host another bot rule already uses: the spawn fails
+/// loud instead of arming a bot whose pause token cannot ride its host.
+#[tokio::test]
+async fn a_relay_host_already_in_use_fails_the_spawn() {
+    let (dir, platform, manager) = setup();
+    // The fake's key rules name `key<n>.example.com` hosts.
+    platform.state().key_hosts = 1;
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({
+            "bots": {
+                "relay": { "url": "http://key0.example.com", "token": "t" },
+                "selfPauseMinutes": 3,
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let error = manager.spawn(&spec("bot-collide")).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("already carries another bot rule"),
+        "{error:#}"
+    );
+    assert!(platform.state().sandboxes.is_empty(), "nothing leaked");
+}
+
+/// A relay configured after the spawn: the next wake pushes the
+/// sandbox's rules, so the bot's pause token rides them. The push marks
+/// the record, so a later wake does not push again.
+#[tokio::test(start_paused = true)]
+async fn a_relay_added_after_the_spawn_reaches_the_existing_sandbox() {
+    let (dir, platform, manager) = setup();
+    let spawned = manager.spawn(&spec("bot-late-relay")).await.unwrap();
+    let sandbox_id = spawned.sandbox_id.clone().unwrap();
+    assert!(spawned.pause_rule_host.is_none());
+    assert!(platform.state().rule_updates.is_empty());
+
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({
+            "bots": {
+                "relay": { "url": "https://relay.example", "token": "t" },
+                "selfPauseMinutes": 3,
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let woken = manager.ensure_running("bot-late-relay").await.unwrap();
+    assert_eq!(woken.pause_rule_host.as_deref(), Some("relay.example"));
+    let token = woken.pause_token.unwrap();
+
+    // The wake pushed the sandbox's rules, and the relay's host rides them.
+    let updates = platform.state().rule_updates.clone();
+    assert_eq!(updates.len(), 1, "one rules push");
+    assert_eq!(updates[0].0, sandbox_id);
+    assert!(
+        updates[0].1.contains(&"relay.example".to_string()),
+        "the pushed hosts: {:?}",
+        updates[0].1
+    );
+    // The pushed token is the one the record now carries.
+    let name = format!(
+        "PRIME_AGENT_BOT_PAUSE_{}",
+        super::credentials::key_fingerprint("bot-late-relay")
+    );
+    assert_eq!(platform.state().secrets[&name], token);
+
+    // The marker the push left stops the next wake from pushing again.
+    let again = manager.ensure_running("bot-late-relay").await.unwrap();
+    assert_eq!(again.pause_rule_host.as_deref(), Some("relay.example"));
+    assert_eq!(platform.state().rule_updates.len(), 1, "no second push");
+}
+
 #[tokio::test(start_paused = true)]
 async fn spawn_pause_resume_delete() {
     let (dir, platform, manager) = setup();

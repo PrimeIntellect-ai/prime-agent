@@ -399,18 +399,20 @@ impl BotManager {
             let provider = guest_provider(&record).to_string();
             let required = self.injects(&provider).await.then_some(provider.as_str());
             let outcome = match self.credentials_for(&record, required, record.github).await {
-                Ok((credentials, logins)) => self
+                Ok((credentials, logins, relay_host)) => self
                     .platform
                     .set_network_rules(&sandbox_id, &credentials.network_rules)
                     .await
-                    .map(|()| logins)
+                    .map(|()| (logins, relay_host))
                     .map_err(anyhow::Error::from),
                 Err(error) => Err(error),
             };
             match outcome {
-                Ok(logins) => {
-                    // The refresher follows the logins the new rules carry.
+                Ok((logins, relay_host)) => {
+                    // The refresher follows the logins the new rules carry,
+                    // and the relay host they now carry.
                     record.logins = logins;
+                    record.pause_rule_host = relay_host;
                     let running = record.status == BotStatus::Running;
                     let watch = running && !record.logins.is_empty();
                     if let Err(error) = self.save(record.clone()) {
@@ -491,6 +493,7 @@ impl BotManager {
             git_identity: spec.git_identity.clone(),
             logins: Vec::new(),
             pause_token: Some(uuid::Uuid::new_v4().simple().to_string()),
+            pause_rule_host: None,
         })?;
         match self.ensure_running_locked(&spec.bot_id).await {
             Ok(record) => Ok(record),
@@ -688,10 +691,13 @@ impl BotManager {
     async fn ensure_running_locked(&self, bot_id: &str) -> Result<BotRecord> {
         let deadline = Instant::now() + OPERATION_BUDGET;
         let mut record = self.record(bot_id)?;
-        // A relay-configured wake gives a bot without a pause token one:
-        // a record rebuilt from labels, or a relay configured after the
-        // bot was spawned. The save below the wake persists it.
-        if record.pause_token.is_none() && !self.relay_settings().await.url.is_empty() {
+        // A relay-configured wake gives a bot without a pause token one
+        // (a record rebuilt from labels); the save below the wake
+        // persists it. A relay whose host the sandbox's rules do not
+        // carry — configured after the spawn, changed, or a record
+        // rebuilt from labels — gets its rule pushed below.
+        let relay_host = self.relay_settings().await.rule_host();
+        if relay_host.is_some() && record.pause_token.is_none() {
             record.pause_token = Some(uuid::Uuid::new_v4().simple().to_string());
         }
         let woken = match self.resolve_existing(&mut record).await? {
@@ -704,6 +710,7 @@ impl BotManager {
             }
             None => None,
         };
+        let reused = woken.is_some();
         let sandbox = match woken {
             Some(sandbox) => sandbox,
             None => self.acquire_new(&mut record, deadline).await?,
@@ -711,11 +718,37 @@ impl BotManager {
         record.sandbox_id = Some(sandbox.id.clone());
         record.status = BotStatus::Running;
         self.save(record.clone())?;
+        // A reused sandbox whose rules predate the relay gets fresh ones
+        // before the bootstrap arms the guest's self-pause; without them
+        // every pause request would authenticate with the placeholder
+        // and fail. A sandbox this wake created already carries the rule
+        // (its create applied the fresh credentials). A failed push
+        // leaves the stale marker, so the next wake retries.
+        if relay_host.is_some() && record.pause_rule_host != relay_host && reused {
+            self.push_relay_rules(&mut record, &sandbox).await?;
+        }
         // A resumed bot gets a fresh token before its first request.
         self.refresh_logins(&record).await;
         self.install_and_bootstrap(&mut record, deadline).await?;
         self.save(record.clone())?;
         Ok(record)
+    }
+
+    /// Push `record`'s fresh credentials — the relay pause rule included —
+    /// to its running sandbox, and follow the logins the new rules carry.
+    /// The record marks the relay host the pushed rules carry, so the
+    /// next wake pushes only when it changes again.
+    async fn push_relay_rules(&self, record: &mut BotRecord, sandbox: &BotSandbox) -> Result<()> {
+        let (credentials, logins, relay_host) =
+            self.guest_credentials(record, record.github).await?;
+        record.logins = logins;
+        retry(|| {
+            self.platform
+                .set_network_rules(&sandbox.id, &credentials.network_rules)
+        })
+        .await?;
+        record.pause_rule_host = relay_host;
+        Ok(())
     }
 
     /// The bot's live sandbox: the cached id when it is live, else the
@@ -896,8 +929,13 @@ impl BotManager {
             Some(checkpoint) => format!("ckpt:disk:{checkpoint}"),
             None => format!("img:{}", self.image),
         };
-        let (credentials, logins) = self.guest_credentials(record, record.github).await?;
+        let (credentials, logins, relay_host) =
+            self.guest_credentials(record, record.github).await?;
         record.logins = logins;
+        // The created sandbox's rules are the fresh credentials'; mark
+        // the relay host they carry, so a later wake pushes only when
+        // the relay changes.
+        record.pause_rule_host = relay_host;
         let mut labels = vec![
             BOT_LABEL.to_string(),
             bot_label(&record.bot_id),
@@ -1024,7 +1062,7 @@ impl BotManager {
                 .guest_credentials(record, false)
                 .await
                 .ok()
-                .map(|(credentials, _)| credentials),
+                .map(|(credentials, _, _)| credentials),
         };
         if let Some(auth) = guest.as_ref().and_then(|guest| guest.auth_json.as_ref()) {
             env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
@@ -1120,24 +1158,26 @@ impl BotManager {
 
     /// The header rules and guest auth for a new sandbox of `record`: its
     /// API keys, its GitHub access, and the owner's logins. Also returns
-    /// the logins it carries.
+    /// the logins and the relay host the rules carry.
     async fn guest_credentials(
         &self,
         record: &BotRecord,
         github: bool,
-    ) -> Result<(GuestCredentials, Vec<String>)> {
+    ) -> Result<(GuestCredentials, Vec<String>, Option<String>)> {
         self.credentials_for(record, Some(guest_provider(record)), github)
             .await
     }
 
     /// The header rules and guest auth for a bot that needs `provider`'s
-    /// key or login (`None`: whatever the plan gives, with no required one).
+    /// key or login (`None`: whatever the plan gives, with no required
+    /// one). Returns the rules, the logins they carry, and the relay
+    /// host they carry (`None`: no relay rule).
     async fn credentials_for(
         &self,
         record: &BotRecord,
         provider: Option<&str>,
         github: bool,
-    ) -> Result<(GuestCredentials, Vec<String>)> {
+    ) -> Result<(GuestCredentials, Vec<String>, Option<String>)> {
         let logins = self.logins.prepare(provider.unwrap_or_default()).await?;
         let key_provider =
             provider.filter(|provider| !logins.providers.iter().any(|login| login == provider));
@@ -1147,6 +1187,7 @@ impl BotManager {
         })
         .await?;
         credentials.network_rules.extend(logins.rules);
+        let mut relay_rule_host = None;
         // The relay pause rule: the relay's host only, carrying the bot's
         // per-bot token. The Prime API key never gets a rule; the relay
         // holds it, not the bot.
@@ -1160,14 +1201,27 @@ impl BotManager {
             .await
             {
                 Ok(()) => {
-                    credentials.network_rules.entry(host).or_insert_with(|| {
+                    // Another rule on the relay's host would win the pause
+                    // request's Authorization header, so the guest's pause
+                    // would authenticate as that rule's secret and fail.
+                    // Refuse the misconfiguration instead of arming a bot
+                    // whose self-pause cannot work.
+                    if credentials.network_rules.contains_key(&host) {
+                        bail!(
+                            "the relay host {host} already carries another bot rule \
+                             (a key, a login, or a custom secret); give the relay its own host"
+                        );
+                    }
+                    credentials.network_rules.insert(
+                        host.clone(),
                         pa_sandbox::HeaderRule {
                             headers: BTreeMap::from([(
                                 "Authorization".to_string(),
                                 format!("Bearer ${{prime.secrets.{name}}}"),
                             )]),
-                        }
-                    });
+                        },
+                    );
+                    relay_rule_host = Some(host);
                 }
                 Err(error) => eprintln!(
                     "pa-daemon: bots: {}: the relay pause token could not be stored: {error}",
@@ -1225,7 +1279,7 @@ impl BotManager {
             }
             credentials.auth_json = Some(Value::Object(auth));
         }
-        Ok((credentials, providers))
+        Ok((credentials, providers, relay_rule_host))
     }
 
     /// Run a guest command once the sandbox gateway answers: retries
@@ -1545,6 +1599,7 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
             .collect(),
         // A rebuilt record gets a fresh one at its next wake.
         pause_token: None,
+        pause_rule_host: None,
     }
 }
 
