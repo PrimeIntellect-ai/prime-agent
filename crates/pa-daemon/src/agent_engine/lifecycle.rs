@@ -983,8 +983,13 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         // The session's agent inbox (the kernel reads it through
-        // `rlm.inbox.*`): the store the session opened.
-        let inbox = self.open_inbox();
+        // `rlm.inbox.*`): the store the session opened. A closed session
+        // keeps the published store: a replacement points it at the new
+        // session before the session file moves.
+        let inbox = match self.inbox().filter(|_| self.session_is_closed()) {
+            Some(inbox) => inbox,
+            None => self.open_inbox(),
+        };
         // The engine session stays non-persisted (the worker owns the
         // durable file); the configured session dir leads, the file's
         // parent is the fallback.

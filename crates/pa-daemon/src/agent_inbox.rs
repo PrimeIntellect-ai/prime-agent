@@ -25,7 +25,7 @@ impl AgentSessionEngine {
     /// The inbox store for the current session file, opened and
     /// published on first use (see [`Self::open_inbox_at`]). Runs when a
     /// session opens (create, replacement), so notices route into the
-    /// inbox before the first build, and at every build.
+    /// inbox before the first build, and at every build of an open session.
     pub(crate) fn open_inbox(&self) -> Arc<SessionInbox> {
         let session_file = self
             .session_file

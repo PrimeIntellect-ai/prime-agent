@@ -731,6 +731,33 @@ async fn mail_waiting_at_a_replacement_moves_to_the_new_session() {
     assert_eq!(rows[0].covers, waiting_ids(&inbox));
 }
 
+/// A session build between the replacement's teardown and its file swap
+/// keeps the new session's inbox: mail sent after the build still reaches
+/// the new session.
+#[tokio::test]
+async fn a_build_during_a_replacement_keeps_the_new_sessions_inbox() {
+    let fx = fixture();
+    let successor = fx.dir.join("sessions").join("successor.jsonl");
+    fx.worker
+        .teardown_for_replacement(&successor)
+        .await
+        .expect("the teardown");
+    let model = fx.engine().resolve_model().expect("the faux model");
+    fx.engine()
+        .ensure_core_session_async(&model)
+        .await
+        .expect("the build");
+    assert!(
+        deliver_agent_message(&fx.worker, "after the build")
+            .await
+            .success
+    );
+    fx.engine().set_session_file(successor);
+    fx.worker.refresh_replaced_session_state().await;
+    let inbox = fx.engine().inbox().expect("the successor's inbox");
+    assert_eq!(inbox.count().0, 1, "the new session holds the mail");
+}
+
 /// A turn running at a replacement accepts no row once the mail moved:
 /// the arrival row it picked shows mail the new session now announces, so
 /// accepting that row would deliver the mail twice.
