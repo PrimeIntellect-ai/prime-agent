@@ -11,7 +11,8 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use pa_core::cron::{parse_iso_millis, JobStatus, ScheduleKind};
+use pa_core::cron::store::read_scheduled_jobs_artifact;
+use pa_core::cron::{parse_iso_millis, AgentCronJob, JobStatus, ScheduleKind};
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, Notify};
 
@@ -168,12 +169,40 @@ impl WakeupSync {
     }
 }
 
+/// Every scheduled job under the agent's session-artifacts tree. A child
+/// session's artifacts nest under its parent:
+/// `session-artifacts/<parent>/session-artifacts/<child>/scheduled-jobs.json`.
+/// The roster scan stops one level short of that layout, so the mirror
+/// walks the tree.
+fn scan_all_scheduled_jobs(agent_dir: &Path) -> Vec<AgentCronJob> {
+    let mut jobs = Vec::new();
+    let mut pending = vec![agent_dir.join("session-artifacts")];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some("scheduled-jobs.json")
+            {
+                jobs.extend(read_scheduled_jobs_artifact(&path));
+            }
+        }
+    }
+    jobs
+}
+
 /// The whole `rlm_heartbeat` set to mirror: every active job in every
 /// session artifact partition. Paused, cancelled, and non-RLM jobs stay
 /// local. `nextRunAt` is unix seconds, rounded up so the relay never wakes
 /// the sandbox before the native due time.
 pub(crate) fn wakeup_set(agent_dir: &Path) -> Vec<Value> {
-    let mut wakeups: Vec<Value> = crate::update_roster::scan_scheduled_jobs(agent_dir)
+    let mut wakeups: Vec<Value> = scan_all_scheduled_jobs(agent_dir)
         .into_iter()
         .filter(|job| job.source.as_deref() == Some("rlm_heartbeat"))
         .filter(|job| job.status == JobStatus::Active)
@@ -263,7 +292,8 @@ mod tests {
         let now = 1_700_000_000_000;
         let store = AgentCronJobStore::for_session_artifacts();
         let main = artifact(root, "main");
-        let child = main.join("child");
+        // Child sessions nest their artifacts under the parent's partition.
+        let child = main.join("session-artifacts").join("child");
         std::fs::create_dir_all(&child).unwrap();
         store.register_session_artifact("main", &main);
         store.register_session_artifact("child", &child);
@@ -407,7 +437,8 @@ mod tests {
         let now = crate::util::now_ms();
         let store = AgentCronJobStore::for_session_artifacts();
         let main = artifact(root, "main");
-        let child = main.join("child");
+        // Child sessions nest their artifacts under the parent's partition.
+        let child = main.join("session-artifacts").join("child");
         std::fs::create_dir_all(&child).unwrap();
         store.register_session_artifact("main", &main);
         store.register_session_artifact("child", &child);
