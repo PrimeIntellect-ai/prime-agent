@@ -23,11 +23,10 @@ pub mod types;
 
 pub use compile::compile;
 pub use convert::{convert_spec, DirFile, MachineMeta};
-pub use duration::parse_duration_ms;
 pub use emit::Contract;
 pub use library::{
-    machine_name_errors, parse_machine_md, read_machine_md, scan_library, Level, Library,
-    LibraryMachine, MachineKind, MachineMd, MACHINE_MD_FILE,
+    read_machine_md, scan_library, Level, Library, LibraryMachine, MachineKind, MachineMd,
+    MACHINE_MD_FILE,
 };
 pub use load::{load_machine_dir, CONTEXT_FILE, MACHINE_FILE};
 pub use machine::{

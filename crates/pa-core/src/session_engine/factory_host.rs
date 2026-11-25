@@ -483,7 +483,8 @@ impl FactoryActivityRequest {
 pub const FACTORY_COMPILE_REQUEST_TYPE: &str = "factory.compile";
 
 /// The kernel host request that checks a stored spec's numeric limits
-/// before a run starts (the limits live only in `pa_factory::limits`).
+/// before a run starts and answers the `max_transitions` bound the run caps
+/// its default at (the limits live only in `pa_factory::limits`).
 pub const FACTORY_LIMITS_REQUEST_TYPE: &str = "factory.limits";
 
 /// The machine library's levels in search order: the bundled library
@@ -542,7 +543,7 @@ pub fn register_factory_compile_host_handler(handlers: &mut HostRequestHandlers,
                     payload.data.get("spec").unwrap_or(&Value::Null),
                 );
                 if errors.is_empty() {
-                    Ok(json!({}))
+                    Ok(json!({"max_transitions": pa_factory::limits::MAX_TRANSITIONS}))
                 } else {
                     Err(anyhow!(errors.join("; ")))
                 }
