@@ -299,12 +299,8 @@ mod tests {
             )
             .await;
         assert!(created.success, "{created:?}");
-        let list = || {
-            worker.dispatch(
-                "factory_activity",
-                &serde_json::json!({ "action": "library" }),
-            )
-        };
+        let payload = serde_json::json!({ "action": "library" });
+        let list = || worker.dispatch("factory_activity", &payload);
         // The factory is off by default: the list refuses like the kernel.
         let refused = list().await;
         assert_eq!(
