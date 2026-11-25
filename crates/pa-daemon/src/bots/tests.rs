@@ -1,6 +1,7 @@
 //! Fake-platform tests of the bot lifecycle (after prime-orbs `test_dispatcher.py`).
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
@@ -406,6 +407,24 @@ pub(crate) fn setup() -> (tempfile::TempDir, Arc<FakePlatform>, BotManager) {
     (dir, platform, manager)
 }
 
+/// Write one saved session file under the agent dir's sessions root and
+/// return its durable session id, as boot reconcile proves an owner.
+fn saved_session(dir: &Path, name: &str) -> String {
+    let sessions = crate::paths::sessions_dir(dir).unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut session = crate::session_store::SessionFile::create("/work", None, 0);
+    session.append_session_info(name);
+    session.append_message(&serde_json::json!({
+        "role": "user", "content": "hi", "timestamp": 1u64
+    }));
+    let path = sessions.join(crate::session_store::session_file_name(
+        session.session_id(),
+    ));
+    session.set_path(path);
+    session.rewrite().unwrap();
+    session.session_id().to_string()
+}
+
 pub(crate) fn spec(bot_id: &str) -> BotSpec {
     BotSpec {
         bot_id: bot_id.to_string(),
@@ -561,10 +580,11 @@ async fn credential_provisioning_retries_a_transport_error() {
 #[tokio::test(start_paused = true)]
 async fn duplicates_are_deleted_and_lost_records_rebuilt() {
     let (dir, platform, manager) = setup();
+    let owner = saved_session(dir.path(), "owner");
     let labels = vec![
         BOT_LABEL.to_string(),
         bot_label("bot-a"),
-        owner_label("owner-1"),
+        owner_label(&owner),
     ];
     let older = platform.add_sandbox("helper", labels.clone());
     let newer = platform.add_sandbox("helper", labels);
@@ -580,7 +600,7 @@ async fn duplicates_are_deleted_and_lost_records_rebuilt() {
     assert_ne!(older, newer);
     let record = manager.get("bot-a").unwrap();
     assert_eq!(record.sandbox_id.as_deref(), Some(newer.as_str()));
-    assert_eq!(record.owner_session_id, "owner-1");
+    assert_eq!(record.owner_session_id, owner);
     assert_eq!(record.name, "helper");
 
     // A sandbox that vanished while the Mac was away leaves a stopped record.
@@ -591,6 +611,93 @@ async fn duplicates_are_deleted_and_lost_records_rebuilt() {
     let record = reloaded.get("bot-a").unwrap();
     assert_eq!(record.status, BotStatus::Stopped);
     assert_eq!(record.sandbox_id, None);
+}
+
+/// A labeled bot of another agent dir on the same team: its owner label
+/// names a session this agent dir never held. Boot reconcile must leave it
+/// alone: no adoption, no pause, no delete. The supervisor's post-reconcile
+/// pause loop only walks the registry, so a bot never adopted is never
+/// paused either.
+#[tokio::test(start_paused = true)]
+async fn boot_reconcile_leaves_a_foreign_bot_alone() {
+    let (dir, platform, manager) = setup();
+    let _owner = saved_session(dir.path(), "owner");
+    let foreign = platform.add_sandbox(
+        "chief-of-staff",
+        vec![
+            BOT_LABEL.to_string(),
+            bot_label("bot-foreign"),
+            owner_label("session-of-another-agent-dir"),
+        ],
+    );
+
+    manager.reconcile_on_boot().await.unwrap();
+
+    assert!(
+        manager.get("bot-foreign").is_none(),
+        "a foreign bot is never adopted"
+    );
+    assert!(manager.list().is_empty());
+    assert_eq!(platform.state().pauses, 0, "never paused");
+    assert_eq!(
+        platform.state().sandboxes[&foreign].status,
+        BotStatus::Running
+    );
+    assert_eq!(platform.live().len(), 1, "its sandbox is left alive");
+}
+
+/// An older bot without an owner label is not adopted either: with no
+/// owner to prove, the safe default leaves it alone.
+#[tokio::test(start_paused = true)]
+async fn boot_reconcile_skips_a_bot_without_an_owner_label() {
+    let (dir, platform, manager) = setup();
+    let _owner = saved_session(dir.path(), "owner");
+    let unlabeled =
+        platform.add_sandbox("helper", vec![BOT_LABEL.to_string(), bot_label("bot-old")]);
+
+    manager.reconcile_on_boot().await.unwrap();
+
+    assert!(manager.get("bot-old").is_none());
+    assert_eq!(
+        platform.state().sandboxes[&unlabeled].status,
+        BotStatus::Running
+    );
+    assert_eq!(platform.live().len(), 1, "its sandbox is left alive");
+}
+
+/// A lost record is still rebuilt when the owner is an RLM child of this
+/// agent dir: the spawn ledger proves the owner.
+#[tokio::test(start_paused = true)]
+async fn a_bot_of_a_spawn_ledger_child_is_adopted() {
+    let (dir, platform, manager) = setup();
+    let sessions = crate::paths::sessions_dir(dir.path()).unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+    crate::rlm_ledger::RlmSpawnLedger::new(dir.path(), &sessions, |_| {})
+        .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+            child_id: "child-1".to_string(),
+            parent: sessions.join("parent.jsonl").to_string_lossy().into(),
+            child: sessions.join("child-1.jsonl").to_string_lossy().into(),
+            depth: 1,
+            name: "worker".to_string(),
+            factory: None,
+            decision_child: false,
+        })
+        .unwrap();
+    platform.add_sandbox(
+        "helper",
+        vec![
+            BOT_LABEL.to_string(),
+            bot_label("bot-child"),
+            owner_label("child-1"),
+        ],
+    );
+
+    manager.reconcile_on_boot().await.unwrap();
+
+    assert_eq!(
+        manager.get("bot-child").unwrap().owner_session_id,
+        "child-1"
+    );
 }
 
 #[tokio::test(start_paused = true)]

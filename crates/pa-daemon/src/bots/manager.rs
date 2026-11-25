@@ -483,19 +483,37 @@ impl BotManager {
 
     /// Rebuild the cache from labels: newest live sandbox per bot wins, the
     /// others are deleted; a lost registry record is rebuilt from the labels;
-    /// a record whose sandbox is gone becomes `Stopped`.
+    /// a record whose sandbox is gone becomes `Stopped`. A bot this registry
+    /// never held is rebuilt only when its owner label names a session of
+    /// this agent dir: the team account carries every agent dir's bots, and a
+    /// foreign bot is never adopted, paused, or deleted here.
     ///
     /// # Errors
     /// Returns an error when listing or a duplicate delete fails.
     pub async fn reconcile_on_boot(&self) -> Result<()> {
+        let agent_dir = self.agent_dir.clone();
+        let owned_sessions = tokio::task::spawn_blocking(move || agent_dir_sessions(&agent_dir))
+            .await
+            .context("read this agent dir's sessions")?;
         let mut bot_ids = BTreeSet::new();
         for sandbox in retry(|| self.platform.list(BOT_LABEL)).await? {
             if sandbox.status.is_terminal() {
                 continue;
             }
-            if let Some(bot_id) = label_value(&sandbox.labels, &format!("{BOT_LABEL}:")) {
-                bot_ids.insert(bot_id);
+            let Some(bot_id) = label_value(&sandbox.labels, &format!("{BOT_LABEL}:")) else {
+                continue;
+            };
+            // A bot this registry never held is adopted only when its owner
+            // label names a session of this agent dir. Another agent dir's
+            // bot on the same team, or one without an owner label, is left
+            // entirely alone: never adopted, paused, or deleted.
+            if self.get(&bot_id).is_none()
+                && !label_value(&sandbox.labels, &format!("{BOT_LABEL}-owner:"))
+                    .is_some_and(|owner| owned_sessions.contains(&owner))
+            {
+                continue;
             }
+            bot_ids.insert(bot_id);
         }
         // Wakes and deletes may run meanwhile: each bot is settled under its
         // lock, against a fresh listing and a fresh read of its record.
@@ -1220,6 +1238,33 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
             .map(str::to_string)
             .collect(),
     }
+}
+
+/// The durable session ids this agent dir can prove: every saved session
+/// file (live and archived) plus every live RLM child edge in the spawn
+/// ledger. A bot whose owner label names none of these belongs to another
+/// agent dir on the same team account.
+fn agent_dir_sessions(agent_dir: &Path) -> BTreeSet<String> {
+    let mut sessions = BTreeSet::new();
+    let Ok(sessions_dir) = crate::paths::sessions_dir(agent_dir) else {
+        return sessions;
+    };
+    let archive = agent_dir.join("sessions-archive");
+    for dir in [sessions_dir.as_path(), archive.as_path()] {
+        sessions.extend(
+            crate::session_store::list_sessions(dir)
+                .into_iter()
+                .map(|info| info.id),
+        );
+    }
+    let ledger = crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, &sessions_dir, |_| {});
+    match ledger.edges(false) {
+        Ok(edges) => sessions.extend(edges.into_iter().map(|edge| edge.child_id)),
+        Err(error) => eprintln!(
+            "pa-daemon: bots: spawn ledger unreadable, no ledger child proves a bot owner: {error:#}"
+        ),
+    }
+    sessions
 }
 
 /// Retry 409, 5xx, and network failures with backoff (orbs `_request_resume_with_retry`).

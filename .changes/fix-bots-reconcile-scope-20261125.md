@@ -1,0 +1,1 @@
+- Bots: a daemon's boot reconcile adopts a labeled bot only when its owner label names a session of its own agent dir. Bots of another agent dir on the same team, and older bots without an owner label, are never adopted, paused, or deleted.
