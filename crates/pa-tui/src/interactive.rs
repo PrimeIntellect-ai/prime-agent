@@ -124,9 +124,10 @@ pub struct SelectionOrigin {
 /// bound.
 pub const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
 
-/// The kernel activity poll cadence: the session's shells/factory refresh and the agents view's
-/// activity-line counts and persistent shells list.
-pub(crate) const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// The activity poll cadence (`ACTIVITY_POLL_INTERVAL` in pa-types):
+/// the one shared constant every TUI activity poll fires at, which the
+/// daemon's factory live-freshness bound derives from.
+pub(crate) use pa_types::daemon::ACTIVITY_POLL_INTERVAL;
 
 /// Explicit model selection carried into every `create` config: the CLI
 /// `--provider`/`--model`/`--api-key`/`--thinking` flags, authoritative end-to-end — the

@@ -426,7 +426,8 @@ impl FactoryActivityRequest {
     /// # Errors
     ///
     /// Returns an error when the action is unknown, a required target is
-    /// missing, or the timeout is outside its bounds.
+    /// missing, `peek` carries a target, or the timeout is outside its
+    /// bounds.
     pub fn parse(
         action: &str,
         run_id: Option<&str>,
@@ -443,7 +444,18 @@ impl FactoryActivityRequest {
         if action == "run" && spec_id.is_none_or(|id| id.trim().is_empty()) {
             return Err(anyhow!("factory activity run requires specId"));
         }
-        if action != "graph" && action != "run" && run_id.is_none_or(|id| id.trim().is_empty()) {
+        // `peek` serves the unscoped list the overview reads and takes no
+        // target: a targeted peek would answer one snapshot with no live
+        // claim behind it.
+        if action == "peek"
+            && (run_id.is_some_and(|id| !id.trim().is_empty())
+                || spec_id.is_some_and(|id| !id.trim().is_empty()))
+        {
+            return Err(anyhow!("factory activity peek takes no runId or specId"));
+        }
+        if !matches!(action, "graph" | "run" | "peek")
+            && run_id.is_none_or(|id| id.trim().is_empty())
+        {
             return Err(anyhow!("factory activity {action} requires runId"));
         }
         if let Some(timeout_ms) = timeout_ms {

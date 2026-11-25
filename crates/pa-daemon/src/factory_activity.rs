@@ -89,10 +89,12 @@ impl Worker {
                 pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE
             )),
         };
-        // The unscoped graph (the dock's and the agents view's poll) also carries the session's
-        // stored specs: durable harness entries, so a live session without a kernel (not booted
-        // yet, or passivated) answers them with no runs instead of the refusal.
-        let lists_runs = action == "graph" && run_id.is_none() && spec_id.is_none();
+        // The unscoped graph (the dock's and the agents view's poll) and
+        // the overview's arming-free peek both list runs: a live session
+        // without a kernel (not booted yet, or passivated) answers them
+        // with no runs instead of the refusal.
+        let lists_runs =
+            matches!(action.as_str(), "graph" | "peek") && run_id.is_none() && spec_id.is_none();
         let reply = match reply {
             Err(error)
                 if lists_runs
@@ -104,7 +106,9 @@ impl Worker {
         };
         match reply {
             Ok(mut result) => {
-                if lists_runs {
+                // The graph (the dock's and the agents view's poll) also
+                // carries the session's stored specs: durable harness entries.
+                if action == "graph" && run_id.is_none() && spec_id.is_none() {
                     match self.stored_factory_specs().await {
                         Ok(count) => result["factorySpecs"] = json!(count),
                         Err(error) => {
