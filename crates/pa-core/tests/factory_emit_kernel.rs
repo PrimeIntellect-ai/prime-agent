@@ -160,6 +160,8 @@ async fn a_child_fixes_a_rejected_emit_in_the_same_turn() {
     provider.push_text_turn("done");
 
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -306,6 +308,8 @@ async fn a_daemon_worker_child_emits_from_its_conversation_log_path() {
     provider.push_text_turn("done");
 
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,

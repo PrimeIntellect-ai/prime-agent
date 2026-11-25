@@ -1,0 +1,2 @@
+- A cell that awaits its own `bash()` handle is no longer interrupted by that handle's completion; the await resolves with the result.
+- A child session no longer settles as done while a backgrounded cell still runs: the settle gate and `collect`'s wait hold until the cell's completion is delivered. A child that only leaves a `bash()` process running still settles.

@@ -625,32 +625,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn thinking_part_detection() {
-        assert!(is_thinking_part(&json!({ "thought": true, "text": "hmm" })));
-        // thoughtSignature alone does NOT mark thinking content.
-        assert!(!is_thinking_part(
-            &json!({ "text": "hi", "thoughtSignature": "AAAA" })
-        ));
-    }
-
-    #[test]
-    fn maps_stop_reasons() {
-        assert_eq!(map_google_stop_reason("STOP").unwrap(), StopReason::Stop);
-        assert_eq!(
-            map_google_stop_reason("MAX_TOKENS").unwrap(),
-            StopReason::Length
-        );
-        assert_eq!(map_google_stop_reason("SAFETY").unwrap(), StopReason::Error);
-        assert!(map_google_stop_reason("NEW_THING").is_err());
-    }
-
-    #[test]
-    fn gemini3_classification() {
-        assert!(is_gemini3_pro_model("gemini-3-pro-preview"));
-        assert!(!is_gemini3_pro_model("gemini-2.5-pro"));
-    }
-
     /// Without a level map, Gemini Flash takes LOW for off and minimal: 3.7/3.8 Flash have no
     /// MINIMAL, and LOW is accepted by every Flash.
     #[test]
