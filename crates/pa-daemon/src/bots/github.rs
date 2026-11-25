@@ -248,11 +248,15 @@ pub fn lock(agent_dir: &Path) -> Result<LockDir> {
 /// resolves now differs from the one just written (a `clear` or a rotation
 /// that did not take [`lock`], an older binary), the secrets must not keep
 /// the old token. Delete them; the next spawn provisions the current one.
+///
+/// # Errors
+/// Returns the deletion error: while the stale secrets are still in place,
+/// the caller must not let a bot run with the rules that would send them.
 pub(super) async fn recheck_provisioned_token<T: SandboxTransport>(
     client: &PrimeSandboxClient<T>,
     agent_dir: &Path,
     planned_token: &str,
-) {
+) -> Result<()> {
     let dir = agent_dir.to_path_buf();
     let resolved = match tokio::task::spawn_blocking(move || resolve_token(&dir)).await {
         Ok(resolved) => resolved,
@@ -263,10 +267,9 @@ pub(super) async fn recheck_provisioned_token<T: SandboxTransport>(
             "bot credentials: the GitHub token changed while provisioning; the bots' GitHub \
              secrets are removed until the next spawn provisions the current one"
         );
-        if let Err(error) = delete_secrets(client).await {
-            eprintln!("bot credentials: removing the GitHub secrets failed: {error:#}");
-        }
+        delete_secrets(client).await?;
     }
+    Ok(())
 }
 
 /// This machine's git author (`git config --global`). Blocking.
@@ -362,6 +365,8 @@ mod tests {
     struct Platform {
         answers: Mutex<VecDeque<serde_json::Value>>,
         requests: Mutex<Vec<TransportRequest>>,
+        /// The next DELETE answers 500 (a removal the platform refuses).
+        fail_next_delete: std::sync::atomic::AtomicBool,
     }
 
     impl SandboxTransport for &Platform {
@@ -369,15 +374,19 @@ mod tests {
             &self,
             request: TransportRequest,
         ) -> impl Future<Output = Result<TransportResponse, SandboxError>> + Send {
-            self.requests.lock().unwrap().push(request);
+            self.requests.lock().unwrap().push(request.clone());
             let mut answers = self.answers.lock().unwrap();
             let body = if answers.len() > 1 {
                 answers.pop_front()
             } else {
                 answers.front().cloned()
             };
+            let refused = request.method.as_str() == "DELETE"
+                && self
+                    .fail_next_delete
+                    .swap(false, std::sync::atomic::Ordering::SeqCst);
             std::future::ready(Ok(TransportResponse {
-                status: 200,
+                status: if refused { 500 } else { 200 },
                 body: body.unwrap_or_default().to_string().into_bytes(),
             }))
         }
@@ -591,7 +600,9 @@ mod tests {
             .iter()
             .all(|request| request.method.as_str() != "DELETE"));
         clear_token(dir.path()).unwrap();
-        recheck_provisioned_token(&client, dir.path(), "ghp_first").await;
+        recheck_provisioned_token(&client, dir.path(), "ghp_first")
+            .await
+            .expect("a successful removal keeps the recheck green");
         let deletes: Vec<String> = platform
             .requests
             .lock()
@@ -607,5 +618,30 @@ mod tests {
                 "https://api.test/api/v1/secrets/id-2",
             ]
         );
+    }
+
+    /// A recheck whose stale-secret removal the platform refuses fails:
+    /// the caller must not let a bot run with the rules while the stale
+    /// secrets are still in place.
+    #[tokio::test]
+    async fn a_failed_stale_secret_removal_fails_the_recheck() {
+        let dir = tempfile::tempdir().unwrap();
+        store_token(dir.path(), "ghp_first").unwrap();
+        let platform = Platform::default();
+        platform.answers.lock().unwrap().extend([json!({ "data": [
+            { "id": "id-1", "name": "PRIME_AGENT_GITHUB_OWNER1" },
+            { "id": "id-2", "name": "PRIME_AGENT_GITHUB_OWNER1_BASIC" },
+        ] })]);
+        platform
+            .fail_next_delete
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let client = client(&platform);
+        clear_token(dir.path()).unwrap();
+
+        let error = recheck_provisioned_token(&client, dir.path(), "ghp_first")
+            .await
+            .expect_err("the refused removal fails the recheck");
+
+        assert!(error.to_string().contains("Secret delete"), "{error}");
     }
 }

@@ -375,16 +375,33 @@ pub async fn provision(
             super::github::SET_TOKEN_COMMAND
         );
     }
-    // The token the plan would write, for the post-write recheck.
-    let planned_github_token = planned
+    // The token the plan would write, for the post-write recheck, and the
+    // hosts its rules would send it on.
+    let planned_github = planned
         .iter()
-        .find(|entry| entry.candidate.kind == SecretKind::GitHub && entry.status.injected())
-        .map(|entry| entry.candidate.secrets[0].1.clone());
+        .find(|entry| entry.candidate.kind == SecretKind::GitHub && entry.status.injected());
+    let planned_github_token = planned_github.map(|entry| entry.candidate.secrets[0].1.clone());
+    let planned_github_hosts: Vec<String> = planned_github
+        .map(|entry| entry.candidate.rules.keys().cloned().collect())
+        .unwrap_or_default();
     let mut provisioned = provision_planned(client, planned).await;
     provisioned.prime_team = prime_team;
     if let (Some(lock), Some(planned_token)) = (github_lock, planned_github_token) {
-        super::github::recheck_provisioned_token(client, &agent_dir, &planned_token).await;
+        let recheck =
+            super::github::recheck_provisioned_token(client, &agent_dir, &planned_token).await;
         drop(lock);
+        if let Err(error) = recheck {
+            // The secrets still hold a token the machine no longer resolves,
+            // and they could not be removed: this bot runs without the rules
+            // that would send it, never with the stale token.
+            eprintln!(
+                "bot credentials: GitHub is left out of this bot: the stale secrets could \
+                 not be removed: {error:#}"
+            );
+            provisioned
+                .rules
+                .retain(|host, _| !planned_github_hosts.contains(host));
+        }
     }
     provisioned
 }
