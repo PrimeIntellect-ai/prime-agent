@@ -106,7 +106,7 @@ impl AuthStorage {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map_or(i64::MAX, |d| d.as_millis() as i64);
                             if now_ms >= *expires {
-                                let refreshed = match self.refresh_oauth(provider_id) {
+                                let refreshed = match self.refresh_oauth(provider_id, now_ms) {
                                     Ok(refreshed) => refreshed,
                                     Err(failure) => {
                                         // The provider request still falls
@@ -212,7 +212,22 @@ impl AuthStorage {
         })
     }
 
-    /// Refresh an expired OAuth credential, returning the new credential on success.
+    /// Refresh `provider_id`'s OAuth credential when it expires at or before
+    /// `valid_until` (epoch ms), through the same single-flight gate, refresh
+    /// lock, and locked write as an expired credential's refresh. Returns the
+    /// stored credential when it stays valid past `valid_until`, the new one
+    /// after a refresh, and `None` when a needed refresh fails or the provider
+    /// has no OAuth login.
+    pub fn refresh_oauth_ahead(
+        &mut self,
+        provider_id: &str,
+        valid_until: i64,
+    ) -> Option<AuthCredential> {
+        self.refresh_oauth(provider_id, valid_until).ok().flatten()
+    }
+
+    /// Refresh an OAuth credential that expires at or before `valid_until`,
+    /// returning the new credential on success.
     ///
     /// Load-then-lock shape: the token fetch never runs under the document lock
     /// (TS refreshes inside `withLockAsync`; its single-threaded runtime pays nothing,
@@ -237,6 +252,7 @@ impl AuthStorage {
     fn refresh_oauth(
         &mut self,
         provider_id: &str,
+        valid_until: i64,
     ) -> Result<Option<AuthCredential>, OAuthRefreshFailure> {
         // LOAD: no document lock.
         let Ok(content) = self.storage.read() else {
@@ -264,11 +280,16 @@ impl AuthStorage {
             self.reload();
             return Ok(None);
         };
-        if now_epoch_ms() < *expires {
+        if valid_until < *expires {
             self.reload();
             return Ok(Some(credential));
         }
-        self.rotate_oauth(provider_id, credential, RefreshTrigger::Expired)
+        self.rotate_oauth(
+            provider_id,
+            credential,
+            RefreshTrigger::Expired,
+            valid_until,
+        )
     }
 
     /// Force-refresh the stored OAuth credential the provider rejected: this
@@ -283,7 +304,12 @@ impl AuthStorage {
         }
         match self.data.credential(provider_id) {
             Some(credential @ AuthCredential::Oauth { .. }) => self
-                .rotate_oauth(provider_id, credential, RefreshTrigger::Rejected)
+                .rotate_oauth(
+                    provider_id,
+                    credential,
+                    RefreshTrigger::Rejected,
+                    now_epoch_ms(),
+                )
                 .map(drop),
             Some(AuthCredential::ApiKey { .. } | AuthCredential::McpStaticToken { .. }) | None => {
                 Ok(())
@@ -297,6 +323,7 @@ impl AuthStorage {
         provider_id: &str,
         credential: AuthCredential,
         trigger: RefreshTrigger,
+        valid_until: i64,
     ) -> Result<Option<AuthCredential>, OAuthRefreshFailure> {
         // The credential this refresh set out to rotate: its identity
         // guards the re-check and the commit, so a credential that
@@ -346,7 +373,7 @@ impl AuthStorage {
             !still_original
                 && matches!(
                     credential,
-                    AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
+                    AuthCredential::Oauth { expires, .. } if valid_until < *expires
                 )
         }) {
             self.reload();
@@ -408,7 +435,7 @@ impl AuthStorage {
                 !still_original
                     && matches!(
                         credential,
-                        AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
+                        AuthCredential::Oauth { expires, .. } if valid_until < *expires
                     )
             }) {
                 // A peer refreshed or a concurrent `/login` landed a

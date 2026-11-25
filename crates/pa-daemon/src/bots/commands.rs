@@ -72,9 +72,10 @@ impl Drop for NameReservation {
     }
 }
 
-/// One bot as a `list_bots` row.
+/// One bot as a `list_bots` row. `login_stale` names the owner logins
+/// whose refresh failed or that expired.
 #[must_use]
-pub fn bot_row(record: &BotRecord, attached: bool) -> Value {
+pub fn bot_row(record: &BotRecord, attached: bool, login_stale: &[String]) -> Value {
     json!({
         "botId": record.bot_id,
         "name": record.name,
@@ -89,6 +90,7 @@ pub fn bot_row(record: &BotRecord, attached: bool) -> Value {
         "guestSessionId": record.guest_session_id,
         "attached": attached,
         "github": record.github,
+        "loginStale": login_stale,
     })
 }
 
@@ -125,9 +127,11 @@ impl Supervisor {
             git_identity: None,
         };
         match self.spawn_bot(spec, *github, *rlm_max_depth).await {
-            Ok(record) => {
-                response_success(Some(command_id), "spawn_bot", Some(bot_row(&record, false)))
-            }
+            Ok(record) => response_success(
+                Some(command_id),
+                "spawn_bot",
+                Some(bot_row(&record, false, &[])),
+            ),
             Err(error) => {
                 response_failure(Some(command_id), "spawn_bot", &format!("{error:#}"), None)
             }
@@ -244,7 +248,7 @@ impl Supervisor {
             Ok(record) => response_success(
                 Some(command_id),
                 "delete_bot",
-                Some(bot_row(&record, false)),
+                Some(bot_row(&record, false, &[])),
             ),
             Err(error) => {
                 response_failure(Some(command_id), "delete_bot", &format!("{error:#}"), None)
@@ -282,7 +286,13 @@ impl Supervisor {
                     .as_ref()
                     .is_none_or(|owner| &bot.owner_session_id == owner)
             })
-            .map(|bot| bot_row(bot, manager.attached(&bot.bot_id)))
+            .map(|bot| {
+                bot_row(
+                    bot,
+                    manager.attached(&bot.bot_id),
+                    &manager.login_stale(bot),
+                )
+            })
             .collect();
         response_success(Some(command_id), "list_bots", Some(json!({ "bots": rows })))
     }

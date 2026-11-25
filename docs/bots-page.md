@@ -62,3 +62,13 @@ The daemon pauses a bot 2 minutes after a settled turn. It does not pause a bot 
 4. Otherwise boot a new sandbox.
 
 When the daemon starts, it rebuilds its bot list from the sandbox labels, deletes duplicates (the newest wins), and pauses stray running bots.
+
+## Model logins
+
+A bot can run on its owner's subscription logins: Anthropic, OpenAI Codex, GitHub Copilot, and xAI. Every login this machine holds goes into new bots by default, next to the API keys. The tokens never enter the sandbox. Each login's access token is one Prime secret per Prime account (`PRIME_AGENT_LOGIN_<PROVIDER>_<account>`). A header rule sets it on the provider's API host. Codex also sends its account id from a second secret on the same rule. In the bot, the login record holds a placeholder token with no refresh token, so the bot never refreshes.
+
+This machine refreshes a login while at least one running bot uses it. It refreshes when less than 10 minutes or a quarter of the token's life remains. It uses the same auth storage and lock as its own sessions, then updates the secret. Running bots get the new token within a minute, with no restart. A bot that resumes gets a fresh token first.
+
+If a refresh fails, bots keep the current token until it expires, and the daemon logs one warning. The /bots page shows `login stale: <provider>`. After the login expires, a bot turn on it ends with "the owner's <provider> login expired; log in again on the Mac".
+
+Set `bots.inject.<provider>` to `false` in `settings.json` to keep a login or API key out of new bots.

@@ -49,6 +49,9 @@ pub(crate) struct FakeState {
     pub links: Vec<(tokio::io::DuplexStream, tokio::io::DuplexStream)>,
     /// Every guest command: its script and environment.
     pub execs: Vec<(String, BTreeMap<String, String>)>,
+    /// Platform secrets by name, and how many puts ran.
+    pub secrets: BTreeMap<String, String>,
+    pub secret_puts: usize,
 }
 
 /// An in-memory Prime account: sandboxes are running as soon as they exist.
@@ -320,8 +323,9 @@ impl BotPlatform for FakePlatform {
 
     fn credentials<'a>(
         &'a self,
-        _provider: &'a str,
+        _provider: Option<&'a str>,
         github: bool,
+        _reserved_hosts: usize,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
         async move {
             let mut state = self.state();
@@ -344,6 +348,24 @@ impl BotPlatform for FakePlatform {
                 network_rules,
                 auth_json: None,
             })
+        }
+        .boxed()
+    }
+
+    fn owner(&self) -> &'static str {
+        "OWNER"
+    }
+
+    fn put_secret<'a>(
+        &'a self,
+        name: &'a str,
+        value: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            let mut state = self.state();
+            state.secret_puts += 1;
+            state.secrets.insert(name.to_string(), value.to_string());
+            Ok(())
         }
         .boxed()
     }
@@ -669,6 +691,9 @@ fn attach_guard_counts_attaches() {
     assert!(!manager.attached("bot-a"));
 }
 
+/// What [`live_ask`] returns for a turn that ended without an answer.
+const NO_ANSWER: &str = "<no answer>";
+
 /// Send `task` to a live bot and wait up to 3 minutes for its reply.
 async fn live_ask(
     manager: &BotManager,
@@ -694,10 +719,16 @@ async fn live_ask(
     while reply.is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::timeout_at(
             deadline,
-            super::replies::sync_deliveries(&mut guest, &ledger, &bot.guest_session_id, |text| {
-                reply = text;
-                async { anyhow::Ok(()) }
-            }),
+            super::replies::sync_deliveries(
+                &mut guest,
+                &ledger,
+                &bot.guest_session_id,
+                || Some(NO_ANSWER.to_string()),
+                |text| {
+                    reply = text;
+                    async { anyhow::Ok(()) }
+                },
+            ),
         )
         .await??;
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -798,6 +829,207 @@ cat "$HOME/.gitconfig" "$HOME/.prime-agent-git-credential"
     assert!(output.stdout.contains("PR=https://github.com/"));
     assert!(output.stdout.contains("CLOSED"));
     assert!(!output.stdout.contains(&token) && !output.stderr.contains(&token));
+}
+
+/// A [`super::platform::PrimePlatform`] whose Prime Inference rule names a
+/// throwaway secret, so a live test can change the secret's value without
+/// touching the secrets other bots use.
+struct ThrowawaySecret {
+    inner: Arc<super::platform::PrimePlatform>,
+    secret: String,
+}
+
+impl BotPlatform for ThrowawaySecret {
+    fn create<'a>(&'a self, request: &'a BotCreate) -> BoxFuture<'a, PlatformResult<BotSandbox>> {
+        self.inner.create(request)
+    }
+    fn get<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<BotSandbox>> {
+        self.inner.get(sandbox_id)
+    }
+    fn list<'a>(&'a self, label: &'a str) -> BoxFuture<'a, PlatformResult<Vec<BotSandbox>>> {
+        self.inner.list(label)
+    }
+    fn delete<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
+        self.inner.delete(sandbox_id)
+    }
+    fn pause<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<Option<String>>> {
+        self.inner.pause(sandbox_id)
+    }
+    fn resume<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<BotSandbox>> {
+        self.inner.resume(sandbox_id)
+    }
+    fn checkpoint<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<String>> {
+        self.inner.checkpoint(sandbox_id)
+    }
+    fn wait_checkpoint<'a>(&'a self, checkpoint_id: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
+        self.inner.wait_checkpoint(checkpoint_id)
+    }
+    fn checkpoint_durable<'a>(
+        &'a self,
+        checkpoint_id: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<bool>> {
+        self.inner.checkpoint_durable(checkpoint_id)
+    }
+    fn delete_checkpoint<'a>(
+        &'a self,
+        checkpoint_id: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<()>> {
+        self.inner.delete_checkpoint(checkpoint_id)
+    }
+    fn exec<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        script: &'a str,
+        env: &'a BTreeMap<String, String>,
+        stdin: Option<&'a [u8]>,
+    ) -> BoxFuture<'a, PlatformResult<ExecOutput>> {
+        self.inner.exec(sandbox_id, script, env, stdin)
+    }
+    fn open_stream<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        command: &'a CommandSpec,
+    ) -> BoxFuture<'a, PlatformResult<ExecStreamHalves>> {
+        self.inner.open_stream(sandbox_id, command)
+    }
+    fn credentials<'a>(
+        &'a self,
+        provider: Option<&'a str>,
+        github: bool,
+        reserved_hosts: usize,
+    ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
+        async move {
+            let mut credentials = self
+                .inner
+                .credentials(provider, github, reserved_hosts)
+                .await?;
+            let rule = credentials
+                .network_rules
+                .get_mut("api.pinference.ai")
+                .expect("a Prime Inference rule");
+            rule.headers.insert(
+                "Authorization".to_string(),
+                format!("Bearer ${{prime.secrets.{}}}", self.secret),
+            );
+            Ok(credentials)
+        }
+        .boxed()
+    }
+    fn owner(&self) -> &str {
+        self.inner.owner()
+    }
+    fn put_secret<'a>(
+        &'a self,
+        name: &'a str,
+        value: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<()>> {
+        self.inner.put_secret(name, value)
+    }
+}
+
+/// Ask a live bot for `pong` until it answers (`want_answer`) or a turn
+/// fails (not `want_answer`); the platform applies a secret update within
+/// 60 s.
+async fn ask_until(
+    manager: &BotManager,
+    agent_dir: &std::path::Path,
+    bot: &super::BotRecord,
+    asked: &mut u32,
+    want_answer: bool,
+) -> anyhow::Result<String> {
+    let task = "Reply with the single word pong and nothing else.";
+    for _ in 0..12 {
+        *asked += 1;
+        let reply = live_ask(manager, agent_dir, bot, &format!("m{asked}"), task).await?;
+        eprintln!("live update: reply {asked}: {reply:?}");
+        if reply.to_lowercase().contains("pong") == want_answer {
+            return Ok(reply);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+    anyhow::bail!("the bot never switched to answered={want_answer}")
+}
+
+/// Live: a secret update reaches a running bot without a restart. A bot on
+/// Prime Inference whose rule names a throwaway secret answers; the secret
+/// is set to a bad key, so a turn fails; the good key is put back through
+/// the same update path, and the same bot answers again. Needs what the
+/// live test below needs:
+/// `cargo test -p pa-daemon --lib bots::tests::live_secret_update -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "creates a real Prime sandbox and a Prime secret"]
+async fn live_secret_update_reaches_a_running_bot() {
+    let api_key = std::env::var("PRIME_API_KEY").expect("PRIME_API_KEY");
+    let new_client = || {
+        pa_sandbox::PrimeSandboxClient::new(
+            &api_key,
+            pa_sandbox::ClientOptions {
+                base_url: pa_sandbox::DEFAULT_BASE_URL.to_string(),
+                team_id: std::env::var("PRIME_TEAM_ID").ok(),
+                request_timeout: None,
+                allow_insecure_localhost: false,
+            },
+        )
+        .unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let secret = format!(
+        "PRIME_AGENT_LIVE_UPDATE_{}",
+        uuid::Uuid::new_v4().simple().to_string()[..12].to_ascii_uppercase()
+    );
+    let platform = Arc::new(ThrowawaySecret {
+        inner: Arc::new(super::platform::PrimePlatform::new(
+            new_client(),
+            dir.path(),
+            "LIVE".to_string(),
+        )),
+        secret: secret.clone(),
+    });
+    let manager =
+        BotManager::new(dir.path(), Arc::clone(&platform) as Arc<dyn BotPlatform>).unwrap();
+    let bot_id = format!("live-upd-{}", uuid::Uuid::new_v4());
+    let spec = BotSpec {
+        model: Some("prime-inference/anthropic/claude-haiku-4.5".to_string()),
+        ..spec(&bot_id)
+    };
+    let started = std::time::Instant::now();
+    let step = |name: &str| {
+        eprintln!("live update: {name} at {}s", started.elapsed().as_secs());
+    };
+    let mut asked = 0;
+    let run = async {
+        platform.put_secret(&secret, &api_key).await?;
+        let bot = manager.spawn(&spec).await?;
+        step("spawned");
+        let first = ask_until(&manager, dir.path(), &bot, &mut asked, true).await?;
+        step("first answer");
+        platform.put_secret(&secret, "bad-key").await?;
+        step("secret set to a bad key");
+        let failed = ask_until(&manager, dir.path(), &bot, &mut asked, false).await?;
+        step("turn failed");
+        platform.put_secret(&secret, &api_key).await?;
+        step("good key put back");
+        let again = ask_until(&manager, dir.path(), &bot, &mut asked, true).await?;
+        step("answer again");
+        let same = manager.get(&bot_id).unwrap();
+        anyhow::Ok((bot, first, failed, again, same))
+    }
+    .await;
+    manager.delete(&bot_id).await.unwrap();
+    let client = new_client();
+    for listed in client.list_secrets().await.unwrap() {
+        if listed.name == secret {
+            client.delete_secret(&listed.id).await.unwrap();
+        }
+    }
+    step("deleted");
+    let (bot, first, failed, again, same) = run.unwrap();
+    assert!(first.to_lowercase().contains("pong"));
+    assert!(!failed.to_lowercase().contains("pong"));
+    assert!(again.to_lowercase().contains("pong"));
+    // No restart: the same sandbox and guest session served every turn.
+    assert_eq!(same.sandbox_id, bot.sandbox_id);
+    assert_eq!(same.guest_session_id, bot.guest_session_id);
 }
 
 /// Live: one real bot on this build through spawn, a task and its reply,

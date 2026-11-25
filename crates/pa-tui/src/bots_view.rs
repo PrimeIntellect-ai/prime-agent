@@ -36,6 +36,8 @@ pub struct BotRow {
     pub attached: bool,
     /// The bot reaches GitHub with the owner's token.
     pub github: bool,
+    /// The owner logins of the bot whose refresh failed or that expired.
+    pub login_stale: Vec<String>,
 }
 
 impl BotRow {
@@ -71,6 +73,9 @@ impl BotRow {
         let mut note = self.status.clone();
         if self.attached {
             note.push_str(" \u{b7} attached");
+        }
+        if !self.login_stale.is_empty() {
+            let _ = write!(note, " \u{b7} login stale: {}", self.login_stale.join(", "));
         }
         if self.has_turn {
             let _ = write!(
@@ -185,6 +190,17 @@ pub fn parse_bots(value: &Value) -> Result<BotsCatalog, String> {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 github: row.get("github").and_then(Value::as_bool).unwrap_or(false),
+                login_stale: row
+                    .get("loginStale")
+                    .and_then(Value::as_array)
+                    .map(|stale| {
+                        stale
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(scrub_controls)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect();

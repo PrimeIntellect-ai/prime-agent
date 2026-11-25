@@ -1,0 +1,1 @@
+- Bots: a bot can run on its owner's Anthropic, Codex, Copilot, or xAI subscription login. Every login goes into new bots by default (`bots.inject.<provider>` turns one off). The token stays outside the sandbox in a Prime secret that this machine refreshes and updates while a bot runs. The /bots page shows `login stale: <provider>` when a refresh fails.
