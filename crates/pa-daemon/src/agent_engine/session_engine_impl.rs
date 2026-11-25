@@ -224,6 +224,10 @@ impl SessionEngine for AgentSessionEngine {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
+            // The replaced conversation's refinement children go with it.
+            // This runs before the retire takes the build gate: a spawn
+            // admission takes the build gate under the spawn lock.
+            self.abandon_refine_children().await;
             self.retire_session_runtime().await;
         })
     }
@@ -326,10 +330,31 @@ impl SessionEngine for AgentSessionEngine {
     /// The `compact` command path: the compact-trigger auto-refine round
     /// runs after the compaction answered (the same gated body as the
     /// boundaries).
-    fn consume_compact_auto_refine(
-        &self,
-    ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
+    fn consume_compact_auto_refine(&self) -> anyhow::Result<()> {
         self.consume_compact_auto_refine_round()
+    }
+
+    /// The refine child's reply wake, delivery half: an in-flight child's
+    /// reply (or its failure envelope) parks for the idle-boundary
+    /// apply — the child's send never waits on the parent's apply.
+    fn park_refine_child_reply(
+        &self,
+        sender_active_session_id: &str,
+        message: &str,
+    ) -> crate::engine::RefineChildReplyPark<'_> {
+        // The fully-qualified call names the inherent (sync) park over
+        // this same-named trait method: the delivery answers immediately.
+        let parked =
+            AgentSessionEngine::park_refine_child_reply(self, sender_active_session_id, message);
+        Box::pin(async move { parked })
+    }
+
+    /// The oldest parked refine reply's idle-boundary apply, through the
+    /// shared refinement commit.
+    fn apply_pending_refine_reply(&self) -> crate::engine::PendingRefineApply<'_> {
+        // The fully-qualified call names the inherent (async) apply over
+        // this same-named trait method.
+        Box::pin(async move { AgentSessionEngine::apply_pending_refine_reply(self).await })
     }
 
     /// The worker's live session summary, rendered into the sender identity block.
@@ -818,6 +843,9 @@ impl SessionEngine for AgentSessionEngine {
             return Ok(());
         }
         self.runtime.block_on(async move {
+            // The moved branch abandons the refinement children that plan on
+            // the conversation it leaves.
+            self.abandon_refine_children().await;
             let guard = self.session.lock().await;
             let Some(engine) = guard.as_deref() else {
                 return Ok(());
@@ -1255,14 +1283,16 @@ impl SessionEngine for AgentSessionEngine {
         })
     }
 
-    fn run_refinement(
+    fn run_rollback_refinement(
         &self,
         options: pa_core::session_engine::refine::RefineOptions,
     ) -> anyhow::Result<Value> {
+        // The rollback plans without a model call; the commit waits for
+        // the session to go idle.
         let model = self.resolve_model()?;
         self.ensure_core_session(&model)?;
         let (model, api_key) = self.resolve_request_target(model);
-        // The lock covers the clone only; the model call below must not ride it.
+        // The lock covers the clone only; the commit below must not ride it.
         let core = self
             .session
             .blocking_lock()
@@ -1282,6 +1312,17 @@ impl SessionEngine for AgentSessionEngine {
         })?;
         serde_json::to_value(&committed.result)
             .map_err(|error| anyhow::anyhow!("refinement result conversion failed: {error}"))
+    }
+
+    fn spawn_refinement_child(
+        &self,
+        options: pa_core::session_engine::refine::RefineOptions,
+        source: pa_core::session_engine::refine::RefinementSource,
+    ) -> anyhow::Result<String> {
+        // Fire-and-wake: the spawn returns once the child is admitted; the
+        // child's proposal applies on its reply's arrival.
+        self.runtime
+            .block_on(async { self.spawn_refine_child(&options, source).await })
     }
 
     fn rlm_max_depth_status(&self) -> Value {

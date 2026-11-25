@@ -195,6 +195,10 @@ struct ChildRecord {
     /// A factory state's child: the factory reads its settle through
     /// collect, so no terminal notice reaches the parent conversation.
     factory: bool,
+    /// The refinement child (the daemon's `refine_child` spawn): a
+    /// one-shot planning pass whose record the registry retires at its
+    /// own settle — no engine-side teardown.
+    refine_child: bool,
     /// The delete or close of this child, kept apart from `run` so a live run
     /// is never faked settled during a delete's kill.
     retirement: Retirement,
@@ -668,6 +672,33 @@ impl SupervisorChildSessions {
         identities
     }
 
+    /// Whether one child is live: only a record that is present and still
+    /// running can still reply — an absent record (deleted or replaced) and
+    /// a settled run cannot. The refine flight's liveness probe.
+    pub async fn child_live(&self, rlm_child_id: &str) -> bool {
+        let children = self.inner.children.lock().await;
+        for record in children.iter() {
+            let record = record.lock().await;
+            if record.rlm_child_id == rlm_child_id {
+                return record.run.is_running();
+            }
+        }
+        false
+    }
+
+    /// Release a refine child's held task prompt: its parent calls this once
+    /// the child's flight is recorded, so the child's reply always finds it.
+    pub async fn release_child_prompt(&self, rlm_child_id: &str) {
+        let children = self.inner.children.lock().await;
+        for record in children.iter() {
+            let mut record = record.lock().await;
+            if record.rlm_child_id == rlm_child_id {
+                record.run.apply(RunEvent::ReleasePrompt);
+                return;
+            }
+        }
+    }
+
     /// Re-arm usage observation for a child after an agent message was
     /// delivered to it; no-op for non-children or already-observed targets.
     pub async fn observe_child_usage(&self, target: &str) {
@@ -743,6 +774,7 @@ impl SupervisorChildSessions {
                 direct_observation: Arc::new(Mutex::new(())),
                 notice_delivered: false,
                 factory: false,
+                refine_child: false,
                 retirement: Retirement::live(),
                 usage_registration_forgotten: false,
                 session_file: None,

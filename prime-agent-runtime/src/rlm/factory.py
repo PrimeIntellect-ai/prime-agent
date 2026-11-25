@@ -852,7 +852,8 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
     """Apply defaults to a validated machine and normalize it into a clean dict.
 
     Defaults: run failure_policy 'escalate', run max_parallel 8, run
-    max_transitions 10 per state, run max_children 10000,
+    max_transitions 10 per state (a run caps it at the host's bound), run
+    max_children 10000,
     state entry False, state max_entries 1, state lifecycle 'task', state
     retries 0, state failure_policy copied from the run policy, and
     transition on 'settled'.
@@ -902,16 +903,19 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
     return canonical
 
 
-async def _check_limits(spec: dict[str, Any]) -> None:
+async def _check_limits(spec: dict[str, Any], canonical: dict[str, Any]) -> None:
     """Check a valid spec's declared numeric limits with the host (the
-    Rust ``pa_factory::limits``, the one copy of those numbers); raises
-    ``ValueError`` with every bound the spec breaks."""
+    Rust ``pa_factory::limits``, the one copy of those numbers), then cap
+    the canonical ``max_transitions`` (10 per state by default) at the
+    host's bound; raises ``ValueError`` with every bound the spec breaks."""
     from . import host_request
 
     try:
-        await host_request("factory.limits", {"spec": spec})
+        bounds = await host_request("factory.limits", {"spec": spec})
     except RuntimeError as error:
         raise ValueError(str(error)) from None
+    run = canonical["run"]
+    run["max_transitions"] = min(run["max_transitions"], bounds["max_transitions"])
 
 
 def canonicalize_factory_spec(spec: Any) -> dict[str, Any]:
@@ -1878,7 +1882,7 @@ class FactoryExecutor:
         resolved, reference_errors = self._resolve_subagents(harness, canonical)
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
-        await _check_limits(spec)
+        await _check_limits(spec, canonical)
         run = self._create_run(entry.id, canonical, resolved, name=name)
         return await self._launch_run(run)
 
@@ -1899,7 +1903,7 @@ class FactoryExecutor:
         resolved, reference_errors = self._resolve_subagents(harness, canonical)
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
-        await _check_limits(machine.spec)
+        await _check_limits(machine.spec, canonical)
         run = self._create_run(machine.name, canonical, resolved, name=name)
         result = await self._launch_run(run)
         result["machine"] = machine.name
