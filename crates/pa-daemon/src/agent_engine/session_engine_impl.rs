@@ -413,6 +413,7 @@ impl SessionEngine for AgentSessionEngine {
 
     fn configure_model(&self, selection: EngineModelSelection) {
         // Merge like the TS runtime config: explicit wire flags replace; absent fields keep.
+        let replaces_key = selection.api_key.is_some();
         {
             let mut current = self.selection.write().expect("model selection lock");
             if selection.provider.is_some() {
@@ -427,6 +428,9 @@ impl SessionEngine for AgentSessionEngine {
             if selection.thinking.is_some() {
                 current.thinking = selection.thinking;
             }
+        }
+        if replaces_key {
+            self.bind_selection_api_key();
         }
         // The merge may have changed the selection: drop the cached level;
         // later summary/state calls stay side-effect-free.
@@ -598,6 +602,11 @@ impl SessionEngine for AgentSessionEngine {
             patterns,
             is_continuing,
         });
+        // The create's model selection is complete (the saved-model restore,
+        // then this scope): bind an explicit key to the model it selected.
+        if self.current_selection().api_key.is_some() {
+            self.bind_selection_api_key();
+        }
         // The scope changed the startup decisions: drop the stale level; the
         // next read re-resolves against the scope.
         *self
