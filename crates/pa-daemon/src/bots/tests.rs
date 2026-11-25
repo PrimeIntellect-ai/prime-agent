@@ -1473,7 +1473,7 @@ async fn a_rules_refresh_reaches_running_and_paused_bots_only() {
     manager.spawn(&spec("bot-c")).await.unwrap();
     manager.delete("bot-c").await.unwrap();
 
-    assert_eq!(manager.refresh_network_rules().await, (2, Vec::new()));
+    assert!(manager.refresh_network_rules().await.is_empty());
     let mut updated: Vec<String> = platform
         .state()
         .rule_updates

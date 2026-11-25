@@ -115,6 +115,8 @@ pub struct SecretsView {
     rows: Vec<SecretRow>,
     hosts: usize,
     max_hosts: usize,
+    /// The bots that kept old header rules after the last change, with why.
+    stale_bots: Vec<String>,
     /// The secret rows, then the add row.
     selected: usize,
     viewport_rows: usize,
@@ -130,6 +132,7 @@ impl SecretsView {
             rows: Vec::new(),
             hosts: 0,
             max_hosts: 0,
+            stale_bots: Vec::new(),
             selected: 0,
             viewport_rows,
             armed_remove: None,
@@ -154,6 +157,16 @@ impl SecretsView {
                 .unwrap_or(0)
         };
         self.hosts = count("hosts");
+        self.stale_bots = data
+            .get("staleBots")
+            .and_then(Value::as_array)
+            .map(|bots| {
+                bots.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         self.max_hosts = count("maxHosts");
         self.armed_remove = None;
         self.selected = selected
@@ -226,6 +239,17 @@ impl SecretsView {
             width,
             "",
         ));
+        if !self.stale_bots.is_empty() {
+            let warning = format!(
+                " Kept old rules, retry by changing a secret: {}",
+                self.stale_bots.join("; ")
+            );
+            lines.push(crate::width::truncate_line(
+                &vec![theme.fg_span(ThemeColor::Warning, warning)],
+                width,
+                "\u{2026}",
+            ));
+        }
         let total = self.rows.len() + 1;
         let visible = self.visible_rows(total);
         let start = self
@@ -301,7 +325,8 @@ impl SecretsView {
     }
 
     fn visible_rows(&self, total: usize) -> usize {
-        let reserved = TITLE_ROWS + HINT_ROWS + DETAIL_ROWS;
+        let reserved =
+            TITLE_ROWS + HINT_ROWS + DETAIL_ROWS + usize::from(!self.stale_bots.is_empty());
         if self.viewport_rows <= reserved {
             return 1;
         }
@@ -362,6 +387,21 @@ mod tests {
                 inject: true
             }
         );
+        let mut stale = answer();
+        stale["staleBots"] = serde_json::json!(["triage: HTTP 503"]);
+        view.apply(&stale);
+        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let frame: String = view
+            .render(&theme, 100, &kb)
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(frame.contains("Kept old rules"), "{frame}");
         let mut reordered = answer();
         reordered["secrets"].as_array_mut().unwrap().reverse();
         view.apply(&reordered);

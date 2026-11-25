@@ -319,6 +319,9 @@ impl Supervisor {
         let type_name = crate::protocol::command_type_name(command);
         let agent_dir = self.options.agent_dir.clone();
         let changed = !matches!(command, DaemonCommand::ListBotSecrets { .. });
+        // One change at a time: each one reads the settings and the auth
+        // storage fresh, so no change saves over another one's.
+        let _change = SECRETS_CHANGE.lock().await;
         let result = match command {
             DaemonCommand::ListBotSecrets { .. } => Ok(()),
             DaemonCommand::SetBotSecretInject { name, inject, .. } => {
@@ -357,15 +360,7 @@ impl Supervisor {
             return response_failure(Some(command_id), type_name, &format!("{error:#}"), None);
         }
         if changed && super::registry::BotRegistry::path_in(&agent_dir).exists() {
-            let dir = agent_dir.clone();
-            tokio::spawn(async move {
-                let Ok(manager) = super::manager_for(&dir) else {
-                    return;
-                };
-                for failure in manager.refresh_network_rules().await.1 {
-                    eprintln!("bot secrets: kept the old header rules for {failure}");
-                }
-            });
+            tokio::spawn(refresh_bot_rules(agent_dir.clone()));
         }
         let dir = agent_dir.clone();
         match blocking(move || {
@@ -376,12 +371,60 @@ impl Supervisor {
         })
         .await
         {
-            Ok(rows) => response_success(Some(command_id), type_name, Some(rows)),
+            Ok(mut rows) => {
+                rows["staleBots"] = json!(*lock_failures());
+                response_success(Some(command_id), type_name, Some(rows))
+            }
             Err(error) => {
                 response_failure(Some(command_id), type_name, &format!("{error:#}"), None)
             }
         }
     }
+}
+
+/// Serializes the `/secrets` changes.
+static SECRETS_CHANGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Serializes the rules refreshes: the last one to finish is current.
+static RULES_REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// The bots that kept old header rules after the last refresh, with why.
+static RULES_FAILURES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// How long the refresh waits before each retry of a failed bot.
+const RULES_RETRY_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(60),
+];
+
+fn lock_failures() -> std::sync::MutexGuard<'static, Vec<String>> {
+    RULES_FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Send every bot its new header rules; retry while some bot kept its old
+/// ones. The bots still failing after the retries are listed by `/secrets`.
+async fn refresh_bot_rules(agent_dir: std::path::PathBuf) {
+    let _refresh = RULES_REFRESH.lock().await;
+    let manager = match super::manager_for(&agent_dir) {
+        Ok(manager) => manager,
+        Err(error) => {
+            *lock_failures() = vec![format!("all bots: {error:#}")];
+            return;
+        }
+    };
+    let mut failures = manager.refresh_network_rules().await;
+    for delay in RULES_RETRY_DELAYS {
+        if failures.is_empty() {
+            break;
+        }
+        *lock_failures() = failures;
+        tokio::time::sleep(delay).await;
+        failures = manager.refresh_network_rules().await;
+    }
+    for failure in &failures {
+        eprintln!("bot secrets: kept the old header rules for {failure}");
+    }
+    *lock_failures() = failures;
 }
 
 /// The Prime account fingerprint that names its GitHub secrets; empty
