@@ -4,11 +4,13 @@
 //! `${prime.secrets.<NAME>}`, and the platform resolves them outside the
 //! sandbox:
 //!
-//! - `GET  {base}/api/v1/secrets/` — list, paged by `offset`/`limit`;
-//! - `POST {base}/api/v1/secrets/` — create; `camelCase` body.
+//! - `GET    {base}/api/v1/secrets/` — list, paged by `offset`/`limit`;
+//! - `POST   {base}/api/v1/secrets/` — create; `camelCase` body;
+//! - `PATCH  {base}/api/v1/secrets/{id}` — replace the value;
+//! - `DELETE {base}/api/v1/secrets/{id}` — delete.
 //!
-//! The value is sent once, on create; the platform never returns it, and
-//! no error message or `details` preview ever carries it.
+//! The value is sent only on create and update; the platform never returns
+//! it, and no error message or `details` preview ever carries it.
 
 use serde::Deserialize;
 
@@ -16,6 +18,7 @@ use crate::client::PrimeSandboxClient;
 use crate::error::SandboxError;
 use crate::transport::SandboxTransport;
 use crate::types::Method;
+use crate::wire::is_url_segment;
 
 /// Secrets per list page (the platform's default page size).
 const SECRETS_PAGE_LIMIT: usize = 100;
@@ -165,5 +168,61 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             },
         )
         .await
+    }
+
+    /// Replace the value of the secret `secret_id`. The platform applies
+    /// it to header rules within 60 seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::SandboxErrorCode::InvalidRequest`] for a malformed
+    /// id or an empty value (nothing is sent), and a status-mapped error
+    /// for non-2xx responses (the value redacted from its `details`).
+    pub async fn update_secret(&self, secret_id: &str, value: &str) -> Result<(), SandboxError> {
+        if !is_url_segment(secret_id) {
+            return Err(SandboxError::invalid_request("Secret id is invalid"));
+        }
+        if value.is_empty() {
+            return Err(SandboxError::invalid_request(
+                "Secret value must be non-empty",
+            ));
+        }
+        let body = serde_json::json!({ "value": value })
+            .to_string()
+            .into_bytes();
+        self.request_json(
+            Method::Patch,
+            self.secret_url(secret_id)?,
+            self.platform_headers(),
+            Some(body),
+            self.request_timeout,
+            vec![self.api_key.as_str(), value],
+            "Secret update",
+            |_| Ok(()),
+        )
+        .await
+    }
+
+    /// Delete the secret `secret_id`. A missing secret is success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::SandboxErrorCode::InvalidRequest`] for a malformed
+    /// id, and a status-mapped error for other non-2xx responses.
+    pub async fn delete_secret(&self, secret_id: &str) -> Result<(), SandboxError> {
+        if !is_url_segment(secret_id) {
+            return Err(SandboxError::invalid_request("Secret id is invalid"));
+        }
+        self.delete_tolerating_404(self.secret_url(secret_id)?, "Secret delete")
+            .await
+    }
+
+    fn secret_url(&self, secret_id: &str) -> Result<String, SandboxError> {
+        let mut url = url::Url::parse(&format!("{}/api/v1/secrets/{secret_id}", self.base_url))
+            .map_err(|_| SandboxError::invalid_request("Secret URL is invalid"))?;
+        if let Some(team_id) = &self.team_id {
+            url.query_pairs_mut().append_pair("teamId", team_id);
+        }
+        Ok(url.to_string())
     }
 }

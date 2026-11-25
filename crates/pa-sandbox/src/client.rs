@@ -520,7 +520,11 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
 
     /// An idempotent platform delete: any 2xx (whatever its body) and a
     /// 404 are success.
-    async fn delete_tolerating_404(&self, url: String, context: &str) -> Result<(), SandboxError> {
+    pub(crate) async fn delete_tolerating_404(
+        &self,
+        url: String,
+        context: &str,
+    ) -> Result<(), SandboxError> {
         let response = self
             .transport
             .execute(TransportRequest {

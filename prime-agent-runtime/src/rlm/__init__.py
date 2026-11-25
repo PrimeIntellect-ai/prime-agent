@@ -253,6 +253,7 @@ async def spawn(
     cwd: str | None = None,
     kind: str | None = None,
     target: str | None = None,
+    github: bool | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -272,9 +273,18 @@ async def spawn(
     set ``bots.enabled`` in the daemon settings.json. Do not change this
     setting yourself. The kwarg is forwarded only when passed, so an omitted
     ``target`` sends the byte-identical wire payload.
+    ``github`` (sandbox targets only) turns the bot's GitHub access on or off;
+    when omitted, the ``bots.github`` setting decides (default on).
     """
     return await _spawn(
-        prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind, target=target
+        prompt,
+        name=name,
+        model=model,
+        thinking=thinking,
+        cwd=cwd,
+        kind=kind,
+        target=target,
+        github=github,
     )
 
 
@@ -288,6 +298,7 @@ async def _spawn(
     target: str | None = None,
     factory: dict[str, str] | None = None,
     kind: str | None = None,
+    github: bool | None = None,
 ) -> RLMSpawnHandle:
     """``spawn`` plus the factory executor's run tag (``{runId, specId,
     stateId}``), which the host records on the child's ledger spawn edge."""
@@ -295,6 +306,8 @@ async def _spawn(
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
     if target is not None and not isinstance(target, str):
         raise TypeError(f"target must be str, got {type(target).__name__}")
+    if github is not None and not isinstance(github, bool):
+        raise TypeError(f"github must be bool, got {type(github).__name__}")
     kwargs: dict[str, Any] = {"name": name}
     if model is not None:
         kwargs["model"] = model
@@ -308,6 +321,8 @@ async def _spawn(
         kwargs["factory"] = factory
     if kind is not None:
         kwargs["kind"] = kind
+    if github is not None:
+        kwargs["github"] = github
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     handle = _spawn_handle_from_payload(payload)
@@ -1005,9 +1020,17 @@ class _RLMNamespace:
         cwd: str | None = None,
         kind: str | None = None,
         target: str | None = None,
+        github: bool | None = None,
     ) -> RLMSpawnHandle:
         return await spawn(
-            prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind, target=target
+            prompt,
+            name=name,
+            model=model,
+            thinking=thinking,
+            cwd=cwd,
+            kind=kind,
+            target=target,
+            github=github,
         )
 
     async def create_session(

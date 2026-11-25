@@ -35,6 +35,17 @@ Each row shows a status dot, the bot's name and model, its version, and its last
 
 Attach opens the normal session view against the bot's daemon. Prompts, steering, scroll, and the model and effort pickers go to the bot unchanged. Slash commands that act on this machine (for example `/new`, `/fork`, `/login`, `/mcp`, `/update`) are refused with a clear message. Leaving the view closes the connection to the bot.
 
+## GitHub access
+
+A bot reaches GitHub with its owner's token, and the token never enters the sandbox. The daemon stores the token as two Prime secrets, one per Prime account: the token, and the git Basic credential. The sandbox's header rules set them on its HTTPS requests to `api.github.com` (`Authorization: Bearer`) and `github.com` (`Authorization: Basic`). In the bot, `GH_TOKEN` and the git credential hold a placeholder, which the platform replaces. The bot image gets a pinned `gh`.
+
+- `prime-agent bots github set` reads a token from stdin and stores it on this machine. A fine-grained token with only the repositories the bots need is the safest choice.
+- Without a stored token, the daemon uses the `gh` CLI login (`gh auth token`).
+- `prime-agent bots github clear` removes the stored token and deletes the Prime secrets, so running bots lose access within a minute.
+- `prime-agent bots github status` shows the token source, the setting, and the git author.
+
+GitHub is on by default. Set `bots.github` to `false` in `settings.json`, or spawn with `rlm.spawn(..., target="sandbox", github=False)`, to turn it off. `github=True` with no token fails the spawn with the command to run. The daemon writes the current token to the secrets each time it creates a bot sandbox. Running bots get the new value within a minute. A bot commits as the owner's git author (`git config --global user.name` and `user.email`); `bots.gitIdentity` (`{"name": ..., "email": ...}`) overrides it. The /bots detail pane shows `github on` or `off`.
+
 ## Version match
 
 A bot runs the same prime-agent version as the daemon that owns it. The sandbox boots the public `python:3.12-bookworm` image (override it with `PRIME_AGENT_BOT_IMAGE`). The daemon installs that exact release in the sandbox when it creates the bot, and again on resume when the bot's version differs. If the versions still differ, attach and messaging are refused with a message that says which side to upgrade. After the install, the daemon checks that the bot's build has the bot guest side; a release without it refuses the spawn with a clear message.

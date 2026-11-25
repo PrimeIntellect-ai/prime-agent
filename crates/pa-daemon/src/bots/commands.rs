@@ -88,6 +88,7 @@ pub fn bot_row(record: &BotRecord, attached: bool) -> Value {
         "lastTurnAt": record.last_turn_at,
         "guestSessionId": record.guest_session_id,
         "attached": attached,
+        "github": record.github,
     })
 }
 
@@ -107,6 +108,7 @@ impl Supervisor {
             thinking,
             prompt,
             rlm_max_depth,
+            github,
             ..
         } = command
         else {
@@ -119,8 +121,10 @@ impl Supervisor {
             model: model.clone(),
             thinking: thinking.clone(),
             prompt: prompt.clone(),
+            github: false,
+            git_identity: None,
         };
-        match self.spawn_bot(&spec, *rlm_max_depth).await {
+        match self.spawn_bot(spec, *github, *rlm_max_depth).await {
             Ok(record) => {
                 response_success(Some(command_id), "spawn_bot", Some(bot_row(&record, false)))
             }
@@ -130,9 +134,20 @@ impl Supervisor {
         }
     }
 
-    async fn spawn_bot(self: &Arc<Self>, spec: &BotSpec, rlm_max_depth: u64) -> Result<BotRecord> {
+    async fn spawn_bot(
+        self: &Arc<Self>,
+        mut spec: BotSpec,
+        github: Option<bool>,
+        rlm_max_depth: u64,
+    ) -> Result<BotRecord> {
         let agent_dir = &self.options.agent_dir;
         admit_bot_spawn(agent_dir).await?;
+        let dir = agent_dir.clone();
+        (spec.github, spec.git_identity) =
+            tokio::task::spawn_blocking(move || super::github::for_spawn(&dir, github))
+                .await
+                .context("the GitHub settings read failed")??;
+        let spec = &spec;
         let manager = super::manager_for(agent_dir)?;
         let _reservation = NameReservation::take(&spec.owner_session_id, &spec.name)?;
         if manager

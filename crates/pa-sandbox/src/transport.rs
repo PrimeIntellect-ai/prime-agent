@@ -342,6 +342,7 @@ fn reqwest_method(method: Method) -> reqwest::Method {
     match method {
         Method::Get => reqwest::Method::GET,
         Method::Post => reqwest::Method::POST,
+        Method::Patch => reqwest::Method::PATCH,
         Method::Delete => reqwest::Method::DELETE,
     }
 }

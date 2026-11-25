@@ -10,6 +10,7 @@ pub mod commands;
 pub mod credentials;
 pub mod exec_stream;
 pub mod files;
+pub mod github;
 pub mod guest;
 pub mod ledger;
 pub mod link;
@@ -32,6 +33,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, Result};
 use pa_core::auth::AuthStorage;
+use pa_core::settings::BotGitIdentity;
 use pa_sandbox::{ClientOptions, PrimeSandboxClient, DEFAULT_BASE_URL};
 use sha2::{Digest, Sha256};
 
@@ -44,6 +46,8 @@ pub const DEFAULT_BOT_IMAGE: &str = "python:3.12-bookworm";
 pub const BOT_IMAGE_ENV: &str = "PRIME_AGENT_BOT_IMAGE";
 /// The label every bot sandbox carries.
 pub const BOT_LABEL: &str = "prime-agent-bot";
+/// The label of a bot with GitHub access.
+pub const GITHUB_LABEL: &str = "prime-agent-bot-github";
 /// The guest daemon's socket.
 pub const GUEST_DAEMON_SOCKET: &str = "/root/.prime/agent/bot-daemon.sock";
 
@@ -72,6 +76,10 @@ pub struct BotSpec {
     pub thinking: Option<String>,
     /// The first owner message; the spawn layer sends it after [`BotManager::spawn`].
     pub prompt: String,
+    /// GitHub access through the platform's header rules.
+    pub github: bool,
+    /// The git author the bot commits as.
+    pub git_identity: Option<BotGitIdentity>,
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -95,6 +103,17 @@ pub fn manager_for(agent_dir: &Path) -> Result<Arc<BotManager>> {
     if let Some(manager) = MANAGER.get() {
         return Ok(Arc::clone(manager));
     }
+    let (client, owner) = prime_client(agent_dir)?;
+    let platform = Arc::new(platform::PrimePlatform::new(client, agent_dir, owner));
+    let manager = Arc::new(BotManager::new(agent_dir, platform)?);
+    Ok(Arc::clone(MANAGER.get_or_init(|| manager)))
+}
+
+/// The Prime client bots use, and the fingerprint of its account key.
+///
+/// # Errors
+/// Returns an error when no Prime credential is configured.
+pub fn prime_client(agent_dir: &Path) -> Result<(PrimeSandboxClient, String)> {
     let mut auth = AuthStorage::create(agent_dir);
     let api_key = auth.get_api_key("prime-inference").ok_or_else(|| {
         anyhow!("Bots need a Prime API key. Log in to Prime Inference or set PRIME_API_KEY.")
@@ -112,7 +131,5 @@ pub fn manager_for(agent_dir: &Path) -> Result<Arc<BotManager>> {
             allow_insecure_localhost: false,
         },
     )?;
-    let platform = Arc::new(platform::PrimePlatform::new(client, agent_dir));
-    let manager = Arc::new(BotManager::new(agent_dir, platform)?);
-    Ok(Arc::clone(MANAGER.get_or_init(|| manager)))
+    Ok((client, github::owner_fingerprint(&api_key)))
 }

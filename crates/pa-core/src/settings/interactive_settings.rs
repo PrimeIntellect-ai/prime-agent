@@ -433,6 +433,25 @@ impl SettingsManager {
         })
     }
 
+    /// `bots.github`: new bots get GitHub access unless the global
+    /// settings set it to `false`.
+    #[must_use]
+    pub fn get_bots_github(&self) -> bool {
+        self.global_raw()
+            .and_then(|document| document.get("bots")?.get("github")?.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// `bots.gitIdentity`: the git author the bots commit as, when the
+    /// global settings name both a name and an email.
+    #[must_use]
+    pub fn get_bots_git_identity(&self) -> Option<crate::settings::BotGitIdentity> {
+        let identity = self.global_raw()?.get("bots")?.get("gitIdentity")?.clone();
+        serde_json::from_value::<crate::settings::BotGitIdentity>(identity)
+            .ok()
+            .filter(|identity| !identity.name.is_empty() && !identity.email.is_empty())
+    }
+
     /// `bots.enabled` setter: persists the opt-in gate to the global
     /// scope (the same shared settings key the daemon's
     /// sandbox-admission gate reads).

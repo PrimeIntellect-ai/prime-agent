@@ -434,6 +434,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     let handle = children
         .spawn(RlmSpawnRequest {
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
+            github: None,
             prompt: "work on the lane".to_string(),
             name: Some("kid".to_string()),
             model: None,
@@ -768,6 +769,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         let handle = children
             .spawn(RlmSpawnRequest {
                 target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
+                github: None,
                 prompt: "work on the lane".to_string(),
                 name: Some(kid_name.to_string()),
                 model: None,
@@ -912,6 +914,7 @@ async fn family_edges_never_cross_families_end_to_end() {
     let grandkid_handle = kid_children
         .spawn(RlmSpawnRequest {
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
+            github: None,
             prompt: "grandkid work".to_string(),
             name: Some("grandkid".to_string()),
             model: None,
@@ -1234,6 +1237,7 @@ async fn parent_renames_a_child_end_to_end() {
     let handle = children
         .spawn(RlmSpawnRequest {
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
+            github: None,
             prompt: "work on the lane".to_string(),
             name: Some("kid".to_string()),
             model: None,
@@ -1629,6 +1633,7 @@ async fn passivated_child_recent_messages_reads_its_file_end_to_end() {
     children
         .spawn(RlmSpawnRequest {
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
+            github: None,
             prompt: "kid-a work".to_string(),
             name: Some("kid-a".to_string()),
             model: None,
@@ -1802,6 +1807,7 @@ async fn family_members_read_each_others_transcripts_end_to_end() {
             let handle = children
                 .spawn(RlmSpawnRequest {
                     target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
+                    github: None,
                     prompt: format!("{kid} work"),
                     name: Some((*kid).to_string()),
                     model: None,

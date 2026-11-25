@@ -13,6 +13,7 @@ pa-ai = { path = "../pa-ai" }
 pa-telemetry = { path = "../pa-telemetry" }
 pa-sandbox = { path = "../pa-sandbox" }
 anyhow = { workspace = true }
+base64 = "0.23"
 futures = { workspace = true }
 globset = "0.4"
 serde = { workspace = true }

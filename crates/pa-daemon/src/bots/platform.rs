@@ -16,9 +16,9 @@ use pa_sandbox::{
     MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
 };
 
-use super::credentials;
 use super::exec_stream::{spawn_exec_halves, ExecStreamHalves, SandboxAuthSource};
 use super::BotStatus;
+use super::{credentials, github};
 
 /// The parts of a sandbox the manager reads.
 #[derive(Debug, Clone, PartialEq)]
@@ -122,10 +122,12 @@ pub trait BotPlatform: Send + Sync {
         sandbox_id: &'a str,
         command: &'a CommandSpec,
     ) -> BoxFuture<'a, PlatformResult<ExecStreamHalves>>;
-    /// The platform secrets and guest auth for a bot that runs `provider`.
+    /// The platform secrets and guest auth for a bot that runs `provider`,
+    /// with GitHub access when `github` is set.
     fn credentials<'a>(
         &'a self,
         provider: &'a str,
+        github: bool,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>>;
 }
 
@@ -160,14 +162,17 @@ pub struct PrimePlatform {
     client: Arc<PrimeSandboxClient>,
     /// Where the provider keys to inject are stored.
     agent_dir: PathBuf,
+    /// The Prime account's fingerprint, which names its GitHub secrets.
+    owner: String,
 }
 
 impl PrimePlatform {
     #[must_use]
-    pub fn new(client: PrimeSandboxClient, agent_dir: &Path) -> Self {
+    pub fn new(client: PrimeSandboxClient, agent_dir: &Path, owner: String) -> Self {
         Self {
             client: Arc::new(client),
             agent_dir: agent_dir.to_path_buf(),
+            owner,
         }
     }
 
@@ -561,30 +566,50 @@ impl BotPlatform for PrimePlatform {
     fn credentials<'a>(
         &'a self,
         provider: &'a str,
+        github: bool,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
         async move {
-            let provisioned = credentials::provision(&self.client, &self.agent_dir, provider).await;
+            let reserved = if github { github::RULE_HOSTS } else { 0 };
+            let provisioned =
+                credentials::provision(&self.client, &self.agent_dir, provider, reserved).await;
             let auth_json = provisioned.guest_auth();
-            let network_rules = provisioned.rules_for(provider).map_err(|error| {
-                let message = format!("{error:#}");
-                // A platform blip while confirming the secret is retried.
-                match error.downcast_ref::<SandboxError>().map(map_error) {
-                    Some(PlatformError::Transient(_)) => PlatformError::Transient(message),
-                    Some(PlatformError::Conflict(_)) => PlatformError::Conflict(message),
-                    Some(
-                        PlatformError::NotFound(_)
-                        | PlatformError::CheckpointQuota(_)
-                        | PlatformError::Other(_),
-                    )
-                    | None => PlatformError::Other(message),
+            let mut network_rules = provisioned
+                .rules_for(provider)
+                .map_err(|error| credential_error(&error))?;
+            if github {
+                match github::provision(&self.client, &self.agent_dir, &self.owner)
+                    .await
+                    .map_err(|error| credential_error(&error))?
+                {
+                    Some(rules) => network_rules.extend(rules),
+                    None => eprintln!(
+                        "bot credentials: no GitHub token on this machine; the bot runs without \
+                         GitHub access (run `{}`)",
+                        github::SET_TOKEN_COMMAND
+                    ),
                 }
-            })?;
+            }
             Ok(GuestCredentials {
                 network_rules,
                 auth_json,
             })
         }
         .boxed()
+    }
+}
+
+/// A credential provisioning failure; a platform blip is retried.
+fn credential_error(error: &anyhow::Error) -> PlatformError {
+    let message = format!("{error:#}");
+    match error.downcast_ref::<SandboxError>().map(map_error) {
+        Some(PlatformError::Transient(_)) => PlatformError::Transient(message),
+        Some(PlatformError::Conflict(_)) => PlatformError::Conflict(message),
+        Some(
+            PlatformError::NotFound(_)
+            | PlatformError::CheckpointQuota(_)
+            | PlatformError::Other(_),
+        )
+        | None => PlatformError::Other(message),
     }
 }
 
