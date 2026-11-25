@@ -643,6 +643,18 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// Copy one file or directory out of a bot the owner session owns into
+    /// `dest`, an absolute directory on this machine.
+    PullBotFiles {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        bot_id: String,
+        owner_session_id: String,
+        path: String,
+        dest: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     /// The bots the daemon manages, optionally only one owner's.
     ListBots {
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -434,6 +434,10 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "delete_bot",
         r#"{"type": "delete_bot", "botId": "b", "ownerSessionId": "o"}"#,
     ),
+    (
+        "pull_bot_files",
+        r#"{"type": "pull_bot_files", "botId": "b", "ownerSessionId": "o", "path": "out", "dest": "/tmp/d"}"#,
+    ),
     ("list_bots", r#"{"type": "list_bots"}"#),
 ];
 

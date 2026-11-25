@@ -9,6 +9,7 @@ pub mod attach;
 pub mod commands;
 pub mod credentials;
 pub mod exec_stream;
+pub mod files;
 pub mod guest;
 pub mod ledger;
 pub mod link;

@@ -1,0 +1,1 @@
+feat(bots): `rlm.pull_bot_files(bot, path, dest)` copies one file or directory out of a bot into the owner's working directory over the bot's exec stream; it resumes a paused bot, and a path over 256 MiB fails instead of being cut
