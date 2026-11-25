@@ -1350,7 +1350,8 @@ impl BotManager {
     /// checkpoints this daemon never records, so when the sandbox later
     /// ends the recorded head may be stale, and a restore from it would
     /// roll the bot back. A failed or empty query leaves the record
-    /// alone, so the recorded checkpoints stay the fallback.
+    /// alone, and so does a head that is still uploading and newer than
+    /// the winner: the recorded checkpoints stay the fallback.
     async fn prefer_platform_checkpoint(&self, record: &mut BotRecord) {
         let label = bot_label(&record.bot_id);
         let listed = match retry(|| self.platform.list_checkpoints(&label)).await {
@@ -1363,8 +1364,8 @@ impl BotManager {
                 return;
             }
         };
-        let mut newest: Option<BotCheckpoint> = None;
-        for checkpoint in listed {
+        let mut newest: Option<&BotCheckpoint> = None;
+        for checkpoint in &listed {
             if !checkpoint.durable {
                 continue;
             }
@@ -1381,10 +1382,25 @@ impl BotManager {
         if record.checkpoint_id.as_deref() == Some(newest.id.as_str()) {
             return;
         }
+        // A pending head may still be uploading and hold newer state than
+        // the newest durable checkpoint: promoting the older durable one
+        // would move the head into the older list, where prune deletes it.
+        // Keep the record alone then; the candidate loop below restores
+        // from the older durable one without touching the record.
+        let head_pending_newer = record
+            .checkpoint_id
+            .as_deref()
+            .and_then(|head| listed.iter().find(|checkpoint| checkpoint.id == head))
+            .is_some_and(|head| {
+                !head.durable && head.created_at.as_str() > newest.created_at.as_str()
+            });
+        if head_pending_newer {
+            return;
+        }
         // The winner may already sit in the older list (the recorded head
         // never became durable): it must exist once, as the head.
         record.older_checkpoint_ids.retain(|id| id != &newest.id);
-        if let Err(error) = self.replace_checkpoint(record, newest.id).await {
+        if let Err(error) = self.replace_checkpoint(record, newest.id.clone()).await {
             eprintln!(
                 "pa-daemon: bot {}: could not record the newest platform checkpoint: {error:#}",
                 record.bot_id
