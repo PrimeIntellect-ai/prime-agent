@@ -78,7 +78,9 @@ if [[ -n "$id" ]]; then
   # The bake also proves the image runs: the guest answers its version and
   # passes the relay probe under a plain system PATH. A freshly placed
   # sandbox refuses commands for a few seconds, so retry.
-  probe='export PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin; prime-agent --version; prime-agent relay --probe; node --version; gh --version | head -1'
+  # set -euo pipefail inside: the probe must fail when any check fails,
+  # not just the last pipeline.
+  probe='set -euo pipefail; export PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin; prime-agent --version; prime-agent relay --probe; node --version; gh --version | head -1'
   ok=0
   for _ in $(seq 1 20); do
     if prime sandbox run "$id" --plain -- bash -c "$probe"; then ok=1; break; fi

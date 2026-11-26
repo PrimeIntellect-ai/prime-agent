@@ -155,55 +155,79 @@ command -v prime-agent >/dev/null 2>&1 && prime-agent relay --probe >/dev/null 2
 /// that runs another version. The install fails when the build has no bot
 /// guest side. Its `guest_tool` step installs the pinned tools the bot image
 /// lacks (Node.js with npm, and the GitHub CLI).
+///
+/// The script is idempotent across [`super::manager::BotManager`]'s exec
+/// retries: an uploaded tarball stays in place until an attempt succeeds
+/// (so a partially run attempt leaves it for the next one), and a rerun
+/// after a successful attempt skips straight to the post-install checks.
 pub const INSTALL_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
-asset="prime-agent-${PA_VERSION}-linux-x64.tar.gz"
-work="$(mktemp -d)"
-trap 'rm -rf "$work"; rm -f "${PA_TARBALL_PATH:-}"' EXIT
-cd "$work"
-local_tarball=""
-if [ -n "${PA_TARBALL_PATH:-}" ]; then
-  # The daemon uploaded the tarball over the gateway transfer endpoint.
-  test -f "$PA_TARBALL_PATH"
-  echo "${PA_TARBALL_SHA256}  $PA_TARBALL_PATH" | sha256sum -c - >/dev/null
-  mv "$PA_TARBALL_PATH" "$asset"
-  local_tarball=1
-elif [ -n "${PA_TARBALL_BYTES:-}" ]; then
-  # Fallback: the daemon wrote the tarball to this process's stdin.
-  head -c "$PA_TARBALL_BYTES" > "$asset"
-  echo "${PA_TARBALL_SHA256}  $asset" | sha256sum -c - >/dev/null
-  local_tarball=1
+# A retried install (a recovered gateway stream reruns this script through
+# `exec_ready`) may have installed this version already and retired the
+# uploaded tarball. Nothing is left to install then; only the checks at the
+# end of this script remain.
+if command -v prime-agent >/dev/null 2>&1 \
+  && [ "$(prime-agent --version 2>/dev/null)" = "$PA_VERSION" ]; then
+  installed_already=1
 else
-  base="https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${PA_VERSION}"
-  status="$(curl -sSL --retry 3 -o SHA256SUMS -w '%{http_code}' "$base/SHA256SUMS" || true)"
-  if [ "$status" = 404 ]; then
-    echo "prime-agent ${PA_VERSION} has no published linux-x64 release" >&2
-    exit 3
+  installed_already=""
+fi
+if [ -z "$installed_already" ]; then
+  asset="prime-agent-${PA_VERSION}-linux-x64.tar.gz"
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' EXIT
+  cd "$work"
+  local_tarball=""
+  if [ -n "${PA_TARBALL_PATH:-}" ]; then
+    # The daemon uploaded the tarball over the gateway transfer endpoint.
+    # It is copied, not moved, and removed only by a successful run below,
+    # so an attempt that ran partway leaves it for the next one.
+    test -f "$PA_TARBALL_PATH"
+    echo "${PA_TARBALL_SHA256}  $PA_TARBALL_PATH" | sha256sum -c - >/dev/null
+    cp "$PA_TARBALL_PATH" "$asset"
+    local_tarball=1
+  elif [ -n "${PA_TARBALL_BYTES:-}" ]; then
+    # Fallback: the daemon wrote the tarball to this process's stdin.
+    head -c "$PA_TARBALL_BYTES" > "$asset"
+    echo "${PA_TARBALL_SHA256}  $asset" | sha256sum -c - >/dev/null
+    local_tarball=1
+  else
+    base="https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${PA_VERSION}"
+    status="$(curl -sSL --retry 3 -o SHA256SUMS -w '%{http_code}' "$base/SHA256SUMS" || true)"
+    if [ "$status" = 404 ]; then
+      echo "prime-agent ${PA_VERSION} has no published linux-x64 release" >&2
+      exit 3
+    fi
+    test "$status" = 200
+    curl -fsSL --retry 3 -o "$asset" "$base/$asset"
+    awk -v f="$asset" '$2 == f || $2 == "*" f { print $1 "  " f }' SHA256SUMS > expected
+    test -s expected
+    sha256sum -c expected >/dev/null
   fi
-  test "$status" = 200
-  curl -fsSL --retry 3 -o "$asset" "$base/$asset"
-  awk -v f="$asset" '$2 == f || $2 == "*" f { print $1 "  " f }' SHA256SUMS > expected
-  test -s expected
-  sha256sum -c expected >/dev/null
-fi
-if [ -n "$local_tarball" ]; then
-  tar -xzf "$asset" package.json
-  tarball_version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
-  if [ "$tarball_version" != "$PA_VERSION" ]; then
-    echo "the bot tarball is prime-agent ${tarball_version}, not ${PA_VERSION}" >&2
-    exit 4
+  if [ -n "$local_tarball" ]; then
+    tar -xzf "$asset" package.json
+    tarball_version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+    if [ "$tarball_version" != "$PA_VERSION" ]; then
+      echo "the bot tarball is prime-agent ${tarball_version}, not ${PA_VERSION}" >&2
+      exit 4
+    fi
+    # A bot that spawns bots installs its children from this same tarball.
+    mkdir -p /root/.prime-agent-bot-tarball
+    cp "$asset" /root/.prime-agent-bot-tarball/
   fi
-  # A bot that spawns bots installs its children from this same tarball.
-  mkdir -p /root/.prime-agent-bot-tarball
-  cp "$asset" /root/.prime-agent-bot-tarball/
+  if command -v prime-agent >/dev/null 2>&1; then
+    prime-agent shutdown --force >/dev/null 2>&1 || true
+  fi
+  tar -xzf "$asset" install.sh
+  sh ./install.sh --archive "$work/$asset" --force
 fi
-if command -v prime-agent >/dev/null 2>&1; then
-  prime-agent shutdown --force >/dev/null 2>&1 || true
-fi
-tar -xzf "$asset" install.sh
-sh ./install.sh --archive "$work/$asset" --force
 test "$(prime-agent --version)" = "$PA_VERSION"
+# The uploaded tarball outlives a failed or partial attempt, so a retry
+# finds it; a successful install (this far) retires it.
+if [ -n "${PA_TARBALL_PATH:-}" ] && [ -f "$PA_TARBALL_PATH" ]; then
+  rm -f "$PA_TARBALL_PATH"
+fi
 if ! prime-agent relay --probe >/dev/null 2>&1; then
   echo "prime-agent ${PA_VERSION} has no bot guest support" >&2
   exit 5

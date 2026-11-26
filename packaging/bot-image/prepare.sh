@@ -55,8 +55,12 @@ else
   curl -fsSL --retry 3 -o "$work/SHA256SUMS" "$base/SHA256SUMS" \
     || fail "no published release for $version (pass --tarball instead)"
   curl -fsSL --retry 3 -o "$work/$name" "$base/$name" || fail "download failed: $name"
-  sha256=$(awk -v f="$name" '$2 == f || $2 == "*" f { print $1 }' "$work/SHA256SUMS")
-  [[ -n "$sha256" ]] || fail "SHA256SUMS has no row for $name"
+  # A caller-pinned digest wins over the manifest, so an archive that
+  # violates the pin cannot pass as the release.
+  if [[ -z "$sha256" ]]; then
+    sha256=$(awk -v f="$name" '$2 == f || $2 == "*" f { print $1 }' "$work/SHA256SUMS")
+    [[ -n "$sha256" ]] || fail "SHA256SUMS has no row for $name"
+  fi
 fi
 
 actual=$(sha256_file "$work/$name")

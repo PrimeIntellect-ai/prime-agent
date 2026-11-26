@@ -6,5 +6,5 @@
   artifact so the first bot of a new tag never waits in `PENDING`.
 - The bot install uploads a local tarball over the gateway multipart
   endpoint (`upload_file`) instead of piping it through the exec stream.
-  The exec-stream transfer stays as the fallback, and the install removes
-  the uploaded file.
+  The exec-stream transfer stays as the fallback. The upload survives a
+  retried install; a successful install removes it.
