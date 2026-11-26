@@ -678,6 +678,12 @@ fn a2a_card_served_at_the_well_known_uri() {
         .iter()
         .find(|(name, _)| name == "etag")
         .expect("the card carries an ETag");
+    let vary = reply
+        .headers
+        .iter()
+        .find(|(name, _)| name == "vary")
+        .expect("the card varies on Host");
+    assert_eq!(vary.1, "host");
     let revalidated = child.request(
         "GET",
         "/.well-known/agent-card.json",
@@ -686,6 +692,13 @@ fn a2a_card_served_at_the_well_known_uri() {
         None,
     );
     assert_eq!(revalidated.status, 304);
+    assert!(
+        revalidated
+            .headers
+            .iter()
+            .any(|(name, value)| name == "vary" && value == "host"),
+        "the 304 keeps the Host variance"
+    );
 }
 
 /// The blocking send (spec 3.2.2): the task returns completed with the
@@ -793,6 +806,11 @@ fn a2a_version_gate_rejects_missing_and_unsupported() {
     // The patch suffix is ignored (Major.Minor negotiation).
     let patch = child.request("POST", "/", &[], Some(&body), Some("1.0.1"));
     assert_eq!(patch.status, 200);
+
+    // Clients may send the service parameter as a query parameter
+    // instead of a header (spec 3.6.1).
+    let query = child.request("POST", "/?A2A-Version=1.0", &[], Some(&body), None);
+    assert_eq!(query.status, 200);
 }
 
 /// The streaming send (spec 3.1.2): the stream opens with the Task
@@ -1380,10 +1398,10 @@ fn send_body(
 
 /// The JSON-RPC binding's HTTP surface (spec 9): a protocol POST must
 /// carry `Content-Type: application/json` (a form's `text/plain` answers
-/// -32005 with no task admitted), and `A2A-Version` rides the header
-/// only — the query string no longer substitutes for it (spec 9.2).
+/// -32005 with no task admitted), and `A2A-Version` rides the header or
+/// the query-parameter form the spec allows (3.6.1).
 #[test]
-fn a2a_protocol_posts_need_the_json_content_type_and_version_header() {
+fn a2a_protocol_posts_need_the_json_content_type_and_version() {
     let child = A2aChild::spawn(&[], &plain_script());
     // The minted token rides every probe: the auth gate fires before
     // the content-type and version gates, and the probes assert the
@@ -1465,12 +1483,15 @@ fn a2a_protocol_posts_need_the_json_content_type_and_version_header() {
         "POST",
         "/?A2A-Version=1.0",
         &[("Content-Type", "application/json"), auth],
-        &body,
+        &list_body,
         true,
     )
     .expect("the probe answered");
-    let query = serde_json::from_slice::<Value>(&query.body).expect("a JSON error");
-    assert_eq!(query["error"]["code"], -32009, "{query}");
+    let query = serde_json::from_slice::<Value>(&query.body).expect("a JSON body");
+    assert!(
+        query.get("error").is_none() && query["result"].get("totalSize").is_some(),
+        "the query-parameter version is served: {query}"
+    );
 
     let list = child.request(
         "POST",
@@ -1517,6 +1538,27 @@ fn a2a_loopback_bind_refuses_foreign_hosts_and_origins() {
     )
     .expect("the probe answered");
     assert_eq!(rebound.status, 403, "the rebound Host is refused");
+
+    for host in ["[::1]@evil.example", "localhost:80@evil.example"] {
+        let malformed = raw_request(
+            &child.url,
+            "POST",
+            "/",
+            &[
+                ("Host", host),
+                ("Content-Type", "application/json"),
+                ("A2A-Version", "1.0"),
+                ("Authorization", auth.as_str()),
+            ],
+            &body,
+            true,
+        )
+        .expect("the probe answered");
+        assert_eq!(
+            malformed.status, 403,
+            "the malformed Host {host} is refused"
+        );
+    }
 
     let origin = raw_request(
         &child.url,

@@ -15,10 +15,10 @@
 //! rebinding and the cross-site `text/plain` form POST). A protocol
 //! POST must carry `Content-Type: application/json` (else the spec's
 //! `ContentTypeNotSupportedError`) and the `A2A-Version` service
-//! parameter as a header (an empty or missing header is `0.3` per the
-//! spec; this 1.0 server answers the spec's
-//! `VersionNotSupportedError` — the same verdict the official
-//! a2a-python server's `validate_version` reaches).
+//! parameter as a header or the query-parameter form the spec allows
+//! (an empty or missing value is `0.3` per the spec; this 1.0 server
+//! answers the spec's `VersionNotSupportedError` — the same verdict the
+//! official a2a-python server's `validate_version` reaches).
 
 use std::sync::Arc;
 
@@ -267,11 +267,25 @@ async fn handle_request(
     if request.headers().contains_key("origin") {
         return Ok(forbidden());
     }
-    let version_header = request
+    // The version service parameter: a header, or the query parameter
+    // the spec lets clients use instead (spec 3.6.1). A header wins when
+    // both are present; an empty header falls through to the query, and
+    // an empty or missing value is 0.3 per the spec.
+    let version = request
         .headers()
         .get(jsonrpc::VERSION_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            request.uri().query().and_then(|query| {
+                query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("A2A-Version="))
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+        });
 
     if well_known_card {
         return Ok(card_response(&served, &request));
@@ -338,10 +352,10 @@ async fn handle_request(
                 Some(&json!({ "supported": JSON_CONTENT_TYPE })),
             )));
         }
-        // The version gate (spec 3.6): the HTTP header only (the
-        // binding's service parameters are headers; an empty header is
-        // 0.3, and only 1.0 is served).
-        let requested = version_header.filter(|header| !header.is_empty());
+        // The version gate (spec 3.6): the header or the query
+        // parameter (an empty or missing value is 0.3, and only 1.0 is
+        // served).
+        let requested = version;
         if !requested.as_deref().is_some_and(is_supported_version) {
             // The version gate is the protocol's first-contact refusal:
             // the adoption event counts it like every other served
@@ -411,23 +425,31 @@ fn bearer_credentials(value: &str) -> Option<&str> {
 /// colon outside brackets is a port suffix on a colon-free name (an
 /// unbracketed IPv6 literal is invalid as a `Host` — RFC 9110 §7.2:
 /// the bracketed form is the only IP-literal uri-host), and a
-/// colon-free value is the name alone. `None` names no servable
-/// form; the port rides as suffix text, unparsed here.
+/// colon-free value is the name alone. A suffix that is not empty or
+/// `:` followed by digits is malformed and returns `None`, so a
+/// crafted `Host` cannot ride a loopback name past the gate.
 fn split_host_port(host: &str) -> Option<(&str, Option<&str>)> {
     let host = host.trim();
     if let Some(rest) = host.strip_prefix('[') {
         let (name, tail) = rest.split_once(']')?;
-        return Some((name, tail.strip_prefix(':')));
+        let port = match tail {
+            "" => None,
+            tail => Some(tail.strip_prefix(':')?),
+        };
+        if let Some(port) = port {
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+        }
+        return Some((name, port));
     }
     if host.contains(':') {
-        return match host.rsplit_once(':') {
-            Some((name, port))
-                if port.chars().all(|c| c.is_ascii_digit()) && !name.contains(':') =>
-            {
-                Some((name, (!port.is_empty()).then_some(port)))
-            }
-            _ => None,
-        };
+        let (name, port) = host.rsplit_once(':')?;
+        if name.contains(':') || port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        return Some((name, Some(port)));
     }
     Some((host, None))
 }
@@ -498,9 +520,13 @@ impl PublicAuthority {
         if !name.eq_ignore_ascii_case(&self.name) {
             return false;
         }
-        let port = port
-            .and_then(|port| port.parse::<u16>().ok())
-            .unwrap_or(self.default_port);
+        let port = match port {
+            Some(port) => match port.parse::<u16>() {
+                Ok(port) => port,
+                Err(_) => return false,
+            },
+            None => self.default_port,
+        };
         port == self.port.unwrap_or(self.default_port)
     }
 }
@@ -585,6 +611,7 @@ fn card_response(served: &ServedCard, request: &Request<Incoming>) -> Response<B
             return Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header("etag", etag)
+                .header("vary", "host")
                 .body(full(""))
                 .expect("static response");
         }
@@ -592,6 +619,7 @@ fn card_response(served: &ServedCard, request: &Request<Incoming>) -> Response<B
     Response::builder()
         .header("content-type", JSON_CONTENT_TYPE)
         .header("etag", etag)
+        .header("vary", "host")
         .header("cache-control", "max-age=300")
         .body(full(serde_json::to_string(&body).unwrap_or_default()))
         .expect("static response")
@@ -675,6 +703,12 @@ mod tests {
             "::1",
             "::1:7800",
             "0.0.0.0:7800",
+            "[::1]@evil.example",
+            "[::1]x",
+            "[::1]:",
+            "[::1]:80evil",
+            "localhost:",
+            "localhost:80@evil.example",
         ] {
             assert!(!host_is_loopback(host), "{host} must be refused");
         }
@@ -699,6 +733,9 @@ mod tests {
         for host in [
             "agent.example.com:8443",
             "agent.example.com:80",
+            "agent.example.com:",
+            "agent.example.com:80evil",
+            "agent.example.com:99999",
             "rebind.attacker.example",
             "rebind.attacker.example:443",
         ] {
