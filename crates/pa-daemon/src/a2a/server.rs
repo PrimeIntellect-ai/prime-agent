@@ -734,12 +734,14 @@ async fn stop_task_work(
     session: &str,
     admission_id: &str,
 ) -> anyhow::Result<()> {
-    link.request_ok(DaemonCommand::RetireContinuations {
-        id: None,
-        active_session_id: session.to_string(),
-        rest: Map::default(),
-    })
-    .await?;
+    // A failed retire still stops the work; its error is reported last.
+    let retired = link
+        .request_ok(DaemonCommand::RetireContinuations {
+            id: None,
+            active_session_id: session.to_string(),
+            rest: Map::default(),
+        })
+        .await;
     let lease_key = uuid::Uuid::new_v4().to_string();
     let pause_id = acquire_session_input_pause(link, session, &lease_key).await?;
     let stopped = async {
@@ -760,7 +762,7 @@ async fn stop_task_work(
     }
     .await;
     let released = release_session_input_pause(link, session, &pause_id).await;
-    stopped.and(released)
+    stopped.and(released).and(retired)
 }
 
 fn prompt_command(session: &str, text: String, admission_id: String) -> DaemonCommand {
