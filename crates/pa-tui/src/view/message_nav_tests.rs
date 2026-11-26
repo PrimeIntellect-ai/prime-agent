@@ -174,3 +174,99 @@ fn prepending_shifts_the_recorded_anchor() {
     }]);
     assert_eq!(v.message_nav, Some(6));
 }
+
+
+#[test]
+fn first_message_jumps_to_the_first_user_message() {
+    let mut v = mixed();
+    v.render_frame(80, 24);
+    assert!(v.is_following());
+    v.navigate_to_first_message();
+    let offsets = v.layout_pass(80).offsets;
+    assert_eq!(
+        v.scroll_top, offsets[0],
+        "the first user message owns the top"
+    );
+    assert_eq!(v.message_nav, Some(0));
+}
+
+#[test]
+fn last_message_jumps_to_the_last_user_message() {
+    let mut v = mixed();
+    v.render_frame(80, 24);
+    assert!(v.is_following());
+    v.navigate_to_last_message();
+    let offsets = v.layout_pass(80).offsets;
+    assert_eq!(
+        v.scroll_top, offsets[5],
+        "the last user message owns the top"
+    );
+    assert_eq!(v.message_nav, Some(5));
+}
+
+#[test]
+fn first_message_with_no_user_messages_is_no_op() {
+    let mut v = view();
+    v.push(TranscriptItem::SystemNote {
+        text: "only notes here".to_string(),
+    });
+    v.render_frame(80, 24);
+    let before = v.scroll_info();
+    v.navigate_to_first_message();
+    v.navigate_to_last_message();
+    assert_eq!(v.scroll_info(), before);
+    assert_eq!(v.message_nav, None);
+}
+
+#[test]
+fn first_last_message_steps_past_ends_are_no_ops() {
+    let mut v = mixed();
+    v.render_frame(80, 24);
+    v.navigate_to_first_message();
+    let (top, below) = (v.scroll_info().lines_above, v.scroll_info().lines_below);
+    v.navigate_to_first_message();
+    assert_eq!(
+        v.message_nav, Some(0),
+        "target stays on first anchor"
+    );
+    assert_eq!(v.scroll_info().lines_above, top, "window does not move");
+    assert_eq!(v.scroll_info().lines_below, below);
+
+    v.navigate_to_last_message();
+    let (top2, below2) = (v.scroll_info().lines_above, v.scroll_info().lines_below);
+    v.navigate_to_last_message();
+    assert_eq!(
+        v.message_nav, Some(5),
+        "target stays on last anchor"
+    );
+    assert_eq!(v.scroll_info().lines_above, top2, "window does not move");
+    assert_eq!(v.scroll_info().lines_below, below2);
+}
+
+#[test]
+fn first_last_message_re_anchor_cut_off_message() {
+    let mut v = mixed();
+    v.render_frame(80, 24);
+    v.navigate_to_first_message();
+    // One row down puts the landed user message's top above the window.
+    v.scroll_by(1);
+    let offsets = v.layout_pass(80).offsets;
+    assert_ne!(v.scroll_info().lines_above, offsets[0]);
+    // Re-invoking first_message re-lands the cut-off message.
+    v.navigate_to_first_message();
+    assert_eq!(
+        v.scroll_info().lines_above,
+        offsets[0],
+        "first_message re-lands the cut-off message"
+    );
+
+    v.navigate_to_last_message();
+    v.scroll_by(1);
+    assert_ne!(v.scroll_info().lines_above, offsets[5]);
+    v.navigate_to_last_message();
+    assert_eq!(
+        v.scroll_info().lines_above,
+        offsets[5],
+        "last_message re-lands the cut-off message"
+    );
+}

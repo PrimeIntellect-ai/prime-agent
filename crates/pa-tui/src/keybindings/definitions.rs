@@ -278,6 +278,26 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
             "Scroll to the next user message (fullscreen)"
         ),
     ),
+    // SANCTIONED DIVERGENCE from TS (pa-gpui parity, operator ask 2026-11-26):
+    // TS has no first/last-message transcript keys; the defaults follow
+    // pa-gpui's `first_message`/`last_message` (widgets.rs). Both keys are
+    // also the editor-scope document jumps, and the session dispatch gives
+    // the editor precedence while a draft is in progress — the transcript
+    // jump runs only on the empty editor.
+    (
+        "tui.viewport.firstMessage",
+        def!(
+            &["ctrl+home", "super+home"],
+            "Scroll to the first user message (fullscreen)"
+        ),
+    ),
+    (
+        "tui.viewport.lastMessage",
+        def!(
+            &["ctrl+end", "super+end"],
+            "Scroll to the last user message (fullscreen)"
+        ),
+    ),
     ("tui.select.up", def!(&["up"], "Move selection up")),
     ("tui.select.down", def!(&["down"], "Move selection down")),
     ("tui.select.pageUp", def!(&["pageUp"], "Selection page up")),

@@ -103,6 +103,74 @@ impl AgentView {
             self.layout_width,
         ));
     }
+
+    /// Jump to the first user message anchor (pa-gpui `first_message`
+    /// parity, `widgets.rs`). The first user message's first row sits at
+    /// the viewport top; a call with no user messages is a no-op.
+    pub(crate) fn navigate_to_first_message(&mut self) {
+        if self.layout_width == 0 || self.window_rows == 0 || self.chat.is_empty() {
+            return;
+        }
+        if self.has_selection() {
+            self.resolve_sparse_geometry();
+        }
+        let anchors = self.user_message_anchors();
+        let Some(&first) = anchors.first() else {
+            return;
+        };
+        let sparse_enabled = self.sparse_enabled;
+        let layout = crate::image_component::with_fullscreen_image_fallback(|| {
+            self.layout_pass(self.layout_width)
+        });
+        self.sparse_enabled = sparse_enabled;
+        let offsets = &layout.offsets;
+        let total = layout.total;
+        let top = offsets[first];
+        let last_max_scroll = total.saturating_sub(self.window_rows);
+        self.last_max_scroll = last_max_scroll;
+        self.scroll_top = top.min(last_max_scroll);
+        self.following = self.scroll_top >= last_max_scroll;
+        self.message_nav = Some(first);
+        self.sparse_window = Some(super::lazy::SparseWindow::at_row(
+            self.scroll_top,
+            self.detail,
+            self.layout_width,
+        ));
+    }
+
+    /// Jump to the last user message anchor (pa-gpui `last_message`
+    /// parity, `widgets.rs`). The last user message's first row sits at
+    /// the viewport top; a call with no user messages is a no-op.
+    pub(crate) fn navigate_to_last_message(&mut self) {
+        if self.layout_width == 0 || self.window_rows == 0 || self.chat.is_empty() {
+            return;
+        }
+        if self.has_selection() {
+            self.resolve_sparse_geometry();
+        }
+        let anchors = self.user_message_anchors();
+        let Some(&last) = anchors.last() else {
+            return;
+        };
+        let sparse_enabled = self.sparse_enabled;
+        let layout = crate::image_component::with_fullscreen_image_fallback(|| {
+            self.layout_pass(self.layout_width)
+        });
+        self.sparse_enabled = sparse_enabled;
+        let offsets = &layout.offsets;
+        let total = layout.total;
+        let top = offsets[last];
+        let last_max_scroll = total.saturating_sub(self.window_rows);
+        self.last_max_scroll = last_max_scroll;
+        self.scroll_top = top.min(last_max_scroll);
+        self.following = self.scroll_top >= last_max_scroll;
+        self.message_nav = Some(last);
+        self.sparse_window = Some(super::lazy::SparseWindow::at_row(
+            self.scroll_top,
+            self.detail,
+            self.layout_width,
+        ));
+    }
 }
 
 #[cfg(test)]

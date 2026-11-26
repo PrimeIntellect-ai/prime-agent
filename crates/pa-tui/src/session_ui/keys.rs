@@ -440,29 +440,41 @@ impl SessionUi {
         // ctrl+up/ctrl+down paragraph motion keeps them while a draft is in
         // progress — the transcript jump runs only on the empty editor (the
         // plain Up/Down deference pattern).
-        let (message_prev, message_next) = {
+        let (message_prev, message_next, message_first, message_last) = {
             let kb = view.editor.keybindings();
             (
                 kb.matches(&id, "tui.viewport.prevMessage"),
                 kb.matches(&id, "tui.viewport.nextMessage"),
+                kb.matches(&id, "tui.viewport.firstMessage"),
+                kb.matches(&id, "tui.viewport.lastMessage"),
             )
         };
-        if (message_prev || message_next) && view.editor.get_text().trim().is_empty() {
+        if (message_prev || message_next || message_first || message_last)
+            && view.editor.get_text().trim().is_empty()
+        {
             view.editor.clear_selection();
-            let direction = if message_prev {
-                crate::view::message_nav::MessageNavDirection::Prev
+            if message_first {
+                view.navigate_to_first_message();
+                self.track_scroll("message_first", view.is_following());
+            } else if message_last {
+                view.navigate_to_last_message();
+                self.track_scroll("message_last", view.is_following());
             } else {
-                crate::view::message_nav::MessageNavDirection::Next
-            };
-            view.navigate_messages(direction);
-            self.track_scroll(
-                if message_prev {
-                    "message_prev"
+                let direction = if message_prev {
+                    crate::view::message_nav::MessageNavDirection::Prev
                 } else {
-                    "message_next"
-                },
-                view.is_following(),
-            );
+                    crate::view::message_nav::MessageNavDirection::Next
+                };
+                view.navigate_messages(direction);
+                self.track_scroll(
+                    if message_prev {
+                        "message_prev"
+                    } else {
+                        "message_next"
+                    },
+                    view.is_following(),
+                );
+            }
             self.dirty = true;
             return Ok(());
         }
@@ -1020,7 +1032,9 @@ pub(crate) fn opening_echo_key_claimed(
             // The message-navigation keys walk the transcript only on the
             // empty editor; with a draft the editor's paragraph motion stays.
             || kb.matches(id, "tui.viewport.prevMessage")
-            || kb.matches(id, "tui.viewport.nextMessage"))
+            || kb.matches(id, "tui.viewport.nextMessage")
+            || kb.matches(id, "tui.viewport.firstMessage")
+            || kb.matches(id, "tui.viewport.lastMessage"))
     {
         return true;
     }
@@ -1093,14 +1107,14 @@ mod opening_echo_claim_tests {
     #[test]
     fn message_navigation_keys_defer_to_a_draft() {
         let kb = KeybindingsManager::new();
-        for id in ["ctrl+up", "ctrl+down"] {
+        for id in ["ctrl+up", "ctrl+down", "ctrl+home", "ctrl+end", "super+home", "super+end"] {
             assert!(
                 opening_echo_key_claimed(&kb, id, &editor_with("")),
                 "{id} on the empty editor walks the transcript"
             );
             assert!(
                 !opening_echo_key_claimed(&kb, id, &editor_with("draft")),
-                "{id} with a draft is the editor's paragraph motion"
+                "{id} with a draft is the editor's doc motion"
             );
         }
     }
@@ -1221,5 +1235,22 @@ mod opening_echo_claim_tests {
             "ctrl+t",
             &editor_with("draft")
         ));
+    }
+
+    /// The message-navigation first/last keys claim on the empty editor
+    /// only (default bindings: ctrl+home/super+home, ctrl+end/super+end).
+    #[test]
+    fn first_last_message_keys_defer_to_a_draft() {
+        let kb = KeybindingsManager::new();
+        for id in ["ctrl+home", "ctrl+end", "super+home", "super+end"] {
+            assert!(
+                opening_echo_key_claimed(&kb, id, &editor_with("")),
+                "{id} on the empty editor walks the transcript"
+            );
+            assert!(
+                !opening_echo_key_claimed(&kb, id, &editor_with("draft")),
+                "{id} with a draft is the editor's doc motion"
+            );
+        }
     }
 }
