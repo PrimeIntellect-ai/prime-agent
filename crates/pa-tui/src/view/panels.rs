@@ -74,14 +74,14 @@ impl AgentView {
     /// The autocomplete dropdown, mounted just above the editor surface (TS anchors the overlay
     /// above the cursor row). The panel opens with the full-width muted rule (the operator's
     /// 2026-09-26 top-border directive).
-    fn render_autocomplete_overlay(&mut self, width: usize) -> Vec<Line> {
+    pub(super) fn render_autocomplete_overlay(&mut self, width: usize) -> Vec<Line> {
         editor_surface::overlay(&self.editor, &self.theme, width)
     }
 
     /// The editor surface (TS `Editor.render` with a background): a
     /// blank bg row, content rows with the `> ` prompt and a reverse-video
     /// cursor, and a trailing bg row.
-    fn render_editor_surface(
+    pub(super) fn render_editor_surface(
         &mut self,
         width: usize,
         dock_row: usize,

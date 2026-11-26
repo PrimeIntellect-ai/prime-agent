@@ -2,25 +2,10 @@
 //! rows, compaction aborts, and the telemetry seams.
 use super::{
     assistant_message_parts, event_to_update, pop_superseded_attempt_row, AgentView, ChatEntry,
-    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock,
-    Overlay, Result, RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
+    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock, Result,
+    RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
 };
 use crate::interactive::reconnect::{ConnectionEffect, ConnectionEvent};
-
-/// Which press fired the shared interrupt ladder: the idle
-/// backgrounded-cell cancel rides only a BARE press (one that arms no
-/// other action); an ARMING press (the Escape clear/tree repeat, the
-/// Ctrl+C exit pair) never stops backgrounded work as a side effect of
-/// arming something else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InterruptOrigin {
-    /// The press also arms another action (an Escape repeat, the Ctrl+C
-    /// exit pair): the scoped cancel never rides it.
-    Arming,
-    /// The press arms nothing else: the only gesture that may stop the
-    /// session's parked backgrounded cell.
-    Bare,
-}
 
 /// One backgrounded compaction-abort outcome: a failed abort surfaces as
 /// the transcript note and clears the stuck compaction loader locally.
@@ -298,11 +283,15 @@ impl SessionUi {
                     self.settled = None;
                     self.bash_list_epoch += 1;
                     self.factory_list_epoch += 1;
+                    self.library_overview_epoch += 1;
                     self.bash_activities = serde_json::json!({"activities": []});
                     self.factory_graph = serde_json::json!({"runs": []});
-                    if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
+                    if let Some(factory_view) = view.run_page_mut() {
                         factory_view.apply_runs(Vec::new());
                     }
+                    // The factory page keeps its all-session rows: its
+                    // cache is not the closed session's scoped graph, so
+                    // only the epoch retires an in-flight reply.
                     self.update_subagent_summary(view);
                     match reason.as_str() {
                         "shutdown" => self.error_row(
@@ -352,18 +341,12 @@ impl SessionUi {
                         .join(", ");
                     view.push_entry(crate::chat::ChatEntry::Status {
                         text: format!(
-                            "Prime Agent is updating — restarting the daemon (about {}s). {} will resume automatically.",
-                            update.est_seconds.max(1),
+                            "Prime Agent is updating — restarting the daemon. {} will resume automatically.",
                             if names.is_empty() { "Your session".to_string() } else { names }
                         ),
                         kind: crate::chat::StatusKind::Info,
                     });
-                    self.connection_event(
-                        ConnectionEvent::UpdateNotice {
-                            est_seconds: update.est_seconds,
-                        },
-                        view,
-                    );
+                    self.connection_event(ConnectionEvent::UpdateNotice, view);
                 } else {
                     self.note(&format!("the daemon is shutting down ({reason})"), view);
                     // The announcement is what arms the shutdown recovery: a bare session stop
@@ -804,11 +787,10 @@ impl SessionUi {
     }
 
     /// The abort ladder shared by the Ctrl+C and Escape interrupts: a compacting session aborts the
-    /// compaction run, a streaming turn aborts through `abort_and_send_queued`, an idle session's
-    /// BARE press (one that arms no other action) stops a parked backgrounded cell through the
-    /// scoped abort, and a running user bash aborts alongside. The side-question abort stays at the
-    /// call sites.
-    pub(super) fn interrupt_running_work(&self, view: &AgentView, origin: InterruptOrigin) {
+    /// compaction run, a streaming turn aborts through `abort_and_send_queued`, an idle session
+    /// stops a parked backgrounded cell through the scoped abort, and a running user bash aborts
+    /// alongside. The side-question abort stays at the call sites.
+    pub(super) fn interrupt_running_work(&self, view: &AgentView) {
         // Abort the trace upload sweep first.
         if let Some(run) = &self.trace_upload {
             run.cancel.cancel();
@@ -821,18 +803,13 @@ impl SessionUi {
             // No transient abort hint: the aborted turn's own assistant row carries
             // the interrupt, so nothing is noted here.
             self.abort_turn();
-        } else if origin == InterruptOrigin::Bare
-            && self
-                .client
-                .supports_session_server_capability("background_cell_abort")
+        } else if self
+            .client
+            .supports_session_server_capability("background_cell_abort")
         {
-            // The idle arm rides only a press that arms nothing else (an
-            // Escape with the tree shortcut already spent): the first
-            // Escape arms the clear/tree repeat and the first Ctrl+C arms
-            // the exit pair, so stopping backgrounded work must not be
-            // their side effect. The scoped abort touches nothing else —
-            // a session without a parked cell is a reported no-op, and a
-            // peer without the capability keeps the old no-op behavior.
+            // The scoped abort touches nothing but a parked backgrounded
+            // cell, so every idle press may send it; a peer without the
+            // capability keeps the old no-op behavior.
             self.abort_background_cell();
         }
         // A running user-bash command aborts the same way; the settled run
@@ -844,7 +821,8 @@ impl SessionUi {
 
     /// The idle scoped abort (`abort` with scope `background_cell`): stop
     /// only the session's parked backgrounded cell, never the queues, and
-    /// report whether one was stopped.
+    /// note when one was stopped (an idle press with no such cell stays
+    /// silent).
     fn abort_background_cell(&self) {
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
@@ -864,11 +842,9 @@ impl SessionUi {
                         .and_then(|data| data.get("stoppedBackgroundCell"))
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    let _ = notes.send(if stopped {
-                        "the backgrounded cell was stopped".to_string()
-                    } else {
-                        "no backgrounded cell is running".to_string()
-                    });
+                    if stopped {
+                        let _ = notes.send("the backgrounded cell was stopped".to_string());
+                    }
                 }
                 Ok(response) => {
                     let _ = notes.send(format!(

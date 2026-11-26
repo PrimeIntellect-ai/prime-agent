@@ -18,6 +18,9 @@
 #![allow(clippy::too_many_lines)]
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -379,17 +382,11 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, stderr_path: &Path) -> Supe
         )
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor {
-                child,
-                socket: socket.to_path_buf(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(10));
+    Supervisor {
+        child,
+        socket: socket.to_path_buf(),
     }
-    panic!("supervisor socket never appeared");
 }
 
 fn write_fixture(agent_dir: &Path, session_dir: &Path, mock_url: &str) {
@@ -797,46 +794,6 @@ fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
         "exactly one planning call (the child's, never the parent's)"
     );
 
-    // The planning pass bills on the parent's totals: the child's answer
-    // row carries the model reply's usage and stop reason, so the wake's
-    // usage attribution folds the planning call into a durable
-    // `child_usage_attributed` row (origin: the spawn task, the mock's
-    // usage shape: input 10, output 5).
-    let session_file = std::fs::read_dir(&session_dir)
-        .expect("read session dir")
-        .filter_map(std::result::Result::ok)
-        .find(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
-        .expect("the parent's session file")
-        .path();
-    let attribution_deadline = Instant::now() + Duration::from_secs(20);
-    let attributed_row = loop {
-        let rows: Vec<Value> = std::fs::read_to_string(&session_file)
-            .expect("read session file")
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        let attributed = rows
-            .iter()
-            .find(|row| row["type"] == "child_usage_attributed");
-        if let Some(attributed) = attributed {
-            break attributed.clone();
-        }
-        assert!(
-            Instant::now() < attribution_deadline,
-            "the planning call never billed on the parent: no child_usage_attributed row"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    assert_eq!(attributed_row["origin"], "spawn_task", "{attributed_row}");
-    assert_eq!(
-        attributed_row["childUsage"]["input"], 10,
-        "{attributed_row}"
-    );
-    assert_eq!(
-        attributed_row["childUsage"]["output"], 5,
-        "{attributed_row}"
-    );
-
     // Teardown: the one-shot child retires after its reply's apply.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -847,6 +804,43 @@ fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
         assert!(
             Instant::now() < deadline,
             "the refinement child never tore down; rows: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The planning pass bills on the parent's totals: the child's answer row
+    // carries the mock's usage (input 10, output 5), and the retired child's
+    // ledger edge folds it into the parent's published total.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let id = format!("list-{attempt}");
+        client.send_command(&id, &json!({ "type": "list" }));
+        let listed = client.read_response(&id);
+        let parent = listed["data"]["sessions"]
+            .as_array()
+            .and_then(|sessions| {
+                sessions.iter().find(|session| {
+                    session["sessionFile"]
+                        .as_str()
+                        .and_then(|file| Path::new(file).file_stem())
+                        .and_then(|stem| stem.to_str())
+                        == Some(durable_session_id.as_str())
+                })
+            })
+            .cloned()
+            .unwrap_or_default();
+        let tokens = |key: &str, field: &str| parent[key][field].as_u64().unwrap_or(0);
+        let child_input =
+            tokens("totalUsage", "inputTokens").saturating_sub(tokens("usage", "inputTokens"));
+        let child_output =
+            tokens("totalUsage", "outputTokens").saturating_sub(tokens("usage", "outputTokens"));
+        if (child_input, child_output) == (10, 5) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the planning call never billed on the parent's total: {parent}"
         );
         std::thread::sleep(Duration::from_millis(200));
     }

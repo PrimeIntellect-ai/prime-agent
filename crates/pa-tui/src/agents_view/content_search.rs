@@ -1,4 +1,4 @@
-//! Full-text session search: `app.agents.searchContent` (default ctrl+f) switches the search
+//! Full-text session search: `app.agents.searchContent` (default ctrl+g) switches the search
 //! field from session titles to message text. The daemon's `search_session_content` scan answers
 //! with the matching session ids, and the list keeps those rows (and their ancestors).
 use std::collections::HashSet;

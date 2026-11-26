@@ -367,6 +367,7 @@ impl Worker {
                 // A TS replacement runtime has no semantic spawn.
                 semantic_spawn: None,
                 factory_child: false,
+                factory_contract: None,
             }) {
             Ok(()) => self.reseed_rlm_children().await,
             Err(error) => eprintln!("pa-daemon: replacement identity rebind failed: {error:#}"),
@@ -768,11 +769,21 @@ impl Worker {
     ///
     /// Panics when the session-core mutex is poisoned.
     pub(crate) fn outstanding_background_jobs(&self) -> u64 {
+        let core = self.core.lock().unwrap();
+        self.outstanding_background_jobs_locked(&core)
+    }
+
+    /// The same count over a held session-core guard: a caller that also reads
+    /// the session summary takes both from one snapshot, so a completion
+    /// notice cannot be dequeued into a new turn between the two reads. A
+    /// finished handle's notice is admitted before the handle leaves the live
+    /// set, so reading the live count first cannot miss a delivery.
+    pub(crate) fn outstanding_background_jobs_locked(&self, core: &SessionCore) -> u64 {
         let live = self
             .agent_engine
             .as_ref()
             .map_or(0, |engine| engine.background_work_count());
-        (live + queued_completion_deliveries(&self.core.lock().unwrap())) as u64
+        (live + queued_completion_deliveries(core)) as u64
     }
 
     /// The background completions still owed to this run: detached cells
@@ -793,7 +804,7 @@ impl Worker {
     }
 
     /// Detached cells whose terminal notice is not yet admitted.
-    fn pending_detached_completions(&self) -> usize {
+    pub(crate) fn pending_detached_completions(&self) -> usize {
         self.agent_engine
             .as_ref()
             .and_then(|engine| engine.live_handles())

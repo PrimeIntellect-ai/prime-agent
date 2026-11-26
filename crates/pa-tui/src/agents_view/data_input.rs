@@ -550,7 +550,7 @@ impl AgentsViewMode {
         {
             return;
         }
-        // `app.agents.searchContent` (default ctrl+f): switch the search between titles and
+        // `app.agents.searchContent` (default ctrl+g): switch the search between titles and
         // message text; the typed query stays.
         if self.keybindings.matches(key, "app.agents.searchContent") {
             self.toggle_content_search();
@@ -621,6 +621,12 @@ impl AgentsViewMode {
         // row's target spawn program.
         if !has_query && self.keybindings.matches(key, "app.agents.program") {
             self.cycle_program_for_selected();
+            return;
+        }
+        // `app.agents.factory` (default ctrl+f, empty editor only): open the factory page through
+        // the selected row's session.
+        if !has_query && self.keybindings.matches(key, "app.agents.factory") {
+            self.open_factory_for_selected();
             return;
         }
         // `app.agents.expand` (default alt+right, search empty): toggle the selected parent's

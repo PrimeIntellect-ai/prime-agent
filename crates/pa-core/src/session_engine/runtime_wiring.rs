@@ -34,7 +34,7 @@ pub struct RlmWiring {
     /// Child-session machinery backing `rlm.spawn`/`rlm.create_session` and
     /// the roster/collect/delete surface.
     pub subagent_host: Option<Arc<dyn RlmSubagentHost>>,
-    pub usage_store: Option<Arc<dyn super::rlm_usage::RlmChildUsageStore>>,
+    pub usage_store: Option<Arc<dyn super::usage_store::UsageStore>>,
     /// Announces every accepted `rlm.progress.note`; `None` keeps the store
     /// the only surface.
     pub progress_note_emit: Option<super::rlm_host::RlmProgressNoteEmit>,
@@ -90,9 +90,9 @@ pub struct SessionKernelWiring {
     pub runtime: Arc<SessionRuntime>,
     /// The RLM bridge: progress-note state the daemon roster reads.
     pub rlm: Arc<RlmHostBridge>,
-    /// The child-usage attribution producer the daemon's children
-    /// registry drives after the engine is built.
-    pub rlm_usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    /// The session's durable usage store (the embedding's, else the
+    /// session manager's own).
+    pub usage_store: Arc<dyn super::usage_store::UsageStore>,
 }
 
 /// Build the session runtime and register the `goal.*`, `rlm.*`, the
@@ -164,10 +164,9 @@ pub fn wire_session_runtime(
             agent_dir.join("models.json"),
         ))
     });
-    let rlm_usage = Arc::new(super::rlm_usage::RlmChildUsageAttributions::new(
-        rlm.usage_store
-            .unwrap_or_else(|| Arc::new(super::rlm_usage::SessionUsageStore(session.clone()))),
-    ));
+    let usage_store = rlm
+        .usage_store
+        .unwrap_or_else(|| Arc::new(super::usage_store::SessionUsageStore(session.clone())));
     // The daemon supplies the child-session host; an embedding without
     // one keeps the no-children behavior, whose self-rename appends the
     // session's own `session_info` name row.
@@ -177,10 +176,11 @@ pub fn wire_session_runtime(
     let rlm_bridge = Arc::new(RlmHostBridge::new(
         model_registry,
         subagent_host,
-        rlm_usage.clone(),
         rlm.progress_note_emit,
     ));
     register_rlm_host_handlers(&mut handlers, &rlm_bridge);
+    super::factory_host::register_factory_compile_host_handler(&mut handlers, agent_dir);
+    super::factory_host::register_factory_check_host_handler(&mut handlers);
     if let Some(inbox) = &rlm.inbox {
         super::inbox::register_inbox_host_handlers(inbox, &mut handlers);
     }
@@ -189,7 +189,7 @@ pub fn wire_session_runtime(
         handlers,
         runtime,
         rlm: rlm_bridge,
-        rlm_usage,
+        usage_store,
     }
 }
 
@@ -241,7 +241,9 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
 /// likewise propagated (`RLM_SESSION_DIR` + `RLM_HARNESS_STATE_DIR`), so kernel-side
 /// harness writes land in the session-local store. The artifact dir is keyed by the
 /// durable session id (the session file's stem), exported as `RLM_SESSION_ID` for the
-/// persistent `bash()` shells' assignment. `cwd` is the SESSION's working directory.
+/// persistent `bash()` shells' assignment. `RLM_DAEMONLESS` tells the kernel its session's
+/// children live in this process (`--print`), so a factory run cannot outlive it. `cwd` is
+/// the SESSION's working directory.
 /// `shell_path` is the session-start-resolved kernel shell: an invalid `shellPath` fails
 /// `create_session`, not the kernel boot.
 #[allow(clippy::too_many_arguments)] // one wiring funnel, same style as AgentSession::from_session_arc
@@ -264,8 +266,9 @@ pub fn kernel_provisioner(
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
     on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
     ready_gate: Option<crate::kernel::provisioner::KernelReadyGate>,
+    daemonless: bool,
 ) -> Arc<KernelProvisioner> {
-    let mut env = HashMap::with_capacity(3);
+    let mut env = HashMap::with_capacity(4);
     env.insert(
         "PRIME_AGENT_CODING_AGENT_DIR".to_string(),
         agent_dir.to_string_lossy().to_string(),
@@ -278,6 +281,11 @@ pub fn kernel_provisioner(
         .map(|id| id.to_string_lossy().to_string())
         .unwrap_or_default();
     env.insert("RLM_SESSION_ID".to_string(), rlm_session_id);
+    // Always set too: a daemon kernel must not inherit a `--print` ancestor's flag.
+    env.insert(
+        "RLM_DAEMONLESS".to_string(),
+        if daemonless { "1" } else { "" }.to_string(),
+    );
     for (key, value) in [
         ("RLM_SESSION_DIR", session_artifact_dir.clone()),
         (

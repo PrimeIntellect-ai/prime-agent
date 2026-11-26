@@ -158,11 +158,6 @@ impl AgentSessionEngine {
                     source,
                 },
             );
-        // The planning pass bills on the parent's totals: register the
-        // spawn with the usage attribution (the kernel path's own
-        // `register_spawn`), so the child's answer-row usage folds in at
-        // its settle.
-        self.register_refine_child_usage(&rlm_child_id).await;
         children.release_child_prompt(&rlm_child_id).await;
         Ok(rlm_child_id)
     }

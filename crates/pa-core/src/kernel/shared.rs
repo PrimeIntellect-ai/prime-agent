@@ -46,9 +46,15 @@ pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;
 pub const MAX_KERNEL_STDERR_CHARS: usize = 8 * 1024;
 
 /// The `factory_activity` out-of-band frame's action vocabulary, mirroring
-/// the kernel executor's `ACTIVITY_ACTIONS` (the `/factory` view's bridge).
-pub const FACTORY_ACTIVITY_ACTIONS: [&str; 6] =
-    ["graph", "status", "watch", "run", "stop", "resume"];
+/// the kernel executor's `ACTIVITY_ACTIONS` (the `/factory` view's bridge):
+/// one run's graph/status/watch/stop/resume, a run by spec id, the machine
+/// library's list/graph reads (the `/factory` view's library page),
+/// `peek` (the all-session overview's foreign live read: the unscoped
+/// graph minus the rehydration re-arm), and `node` (one run state's detail
+/// for the node view).
+pub const FACTORY_ACTIVITY_ACTIONS: [&str; 9] = [
+    "graph", "status", "watch", "run", "stop", "resume", "library", "peek", "node",
+];
 
 /// Upper bound on one `factory_activity` watch's `timeoutMs` (the kernel
 /// caps its own at 60s; the host bridge pins the view's polling cadence
@@ -346,6 +352,12 @@ pub struct ExecuteOptions {
     /// `None` and zero disable it; the runtime bootstrap and state ops never
     /// arm it.
     pub cell_timeout_ms: Option<u64>,
+    /// The runtime's OWN bootstrap execute: the host sends it after every
+    /// restore attempt (a refused restore included), so it is internal
+    /// machinery, never a gate-permitted command. The runtime's only use
+    /// of the flag is to skip `boot_arm_persisted_runs()`, so this execute
+    /// never releases the factory boot arm.
+    pub runtime_bootstrap: bool,
 }
 
 /// A typed request from Python code running in the kernel to the host.

@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Result};
+use pa_ai::oauth::query_param;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -300,38 +301,6 @@ async fn write_response(
     stream.flush().await
 }
 
-/// One decoded query parameter (`+` as space, percent-decoded).
-fn query_param(query: &str, name: &str) -> Option<String> {
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if percent_decode(&key.replace('+', " ")) == name {
-            return Some(percent_decode(&value.replace('+', " ")));
-        }
-    }
-    None
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                out.push(byte);
-                index += 3;
-                continue;
-            }
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).to_string()
-}
-
 fn escape_html(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for character in value.chars() {
@@ -544,17 +513,6 @@ mod tests {
         assert!(server.wait_for_code().await.is_none());
     }
 
-    #[test]
-    fn query_and_percent_decoding() {
-        assert_eq!(percent_decode("a%20b"), "a b");
-        assert_eq!(percent_decode("bad%2"), "bad%2");
-        assert_eq!(
-            query_param("code=1&state=2", "state"),
-            Some("2".to_string())
-        );
-        assert_eq!(query_param("code=a+b", "code"), Some("a b".to_string()));
-        assert_eq!(query_param("code", "state"), None);
-    }
     #[tokio::test]
     async fn zero_callback_port_is_rejected_before_binding_or_registration() {
         assert!(redirect_uris(Some(0))

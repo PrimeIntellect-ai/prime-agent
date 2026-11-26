@@ -39,6 +39,7 @@ pub(crate) use probe::{
     has_prime_agent_runtime, missing_python_skill_import_labels, missing_rlm_extra_import_labels,
 };
 use probe::{has_prime_agent_runtime_memoized, installed_runtime_identity};
+pub(crate) use runtime_source::bundled_machines_dir;
 use runtime_source::collect_python_files;
 pub(super) use runtime_source::{hash_runtime_source, require_runtime_source_dir};
 pub(super) use runtime_source::{package_dir, packaged_runtime_dir};

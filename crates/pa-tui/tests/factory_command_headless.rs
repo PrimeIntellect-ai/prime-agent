@@ -94,6 +94,7 @@ impl MockSupervisor {
         // A page stop also stops the mock's session: the daemon's `session_closed` follows the
         // stop's reply, and the closed session's graph lane answers a refusal from then on.
         let mut session_closed = false;
+        let mut node_requests = 0;
         serve_connection(
             stream,
             &capabilities,
@@ -115,8 +116,11 @@ impl MockSupervisor {
                         // The lane's mock: a graph action answers the
                         // configured refusal (the worker arm's exact
                         // kernel-not-running wire shape) or the configured
-                        // runs reply; every other action answers empty data
-                        // (the guard reads the graph list only).
+                        // runs reply; the overview action answers the same
+                        // configured runs owned by the attached session (the
+                        // page's all-session lane in this battery); every other
+                        // action answers empty data (the guard reads the graph
+                        // list only).
                         if command.get("action").and_then(Value::as_str) == Some("stop") {
                             write_json(
                                 writer,
@@ -164,6 +168,73 @@ impl MockSupervisor {
                             command.get("action").and_then(Value::as_str),
                         ) {
                             (Some(runs), Some("graph")) => runs.clone(),
+                            // The page's overview lane: the same configured
+                            // runs, owned by the attached session (`sess-1`), so
+                            // the page's rows and its owned drill-in behave
+                            // exactly as they did on the scoped graph.
+                            (Some(runs), Some("overview")) => {
+                                let owned: Vec<Value> = runs
+                                    .get("runs")
+                                    .and_then(Value::as_array)
+                                    .map(|rows| {
+                                        rows.iter()
+                                            .cloned()
+                                            .map(|mut row| {
+                                                if let Some(object) = row.as_object_mut() {
+                                                    object.insert(
+                                                        "ownerId".to_string(),
+                                                        json!("sess-1"),
+                                                    );
+                                                    object
+                                                        .insert("ownerName".to_string(), json!(""));
+                                                    object
+                                                        .insert("saved".to_string(), json!(false));
+                                                    // The daemon's live-cache rows carry the
+                                                    // peek lane's `armed` marker (null for an
+                                                    // executing run): the page routes an
+                                                    // owned row's Enter by it.
+                                                    object.insert("armed".to_string(), json!(null));
+                                                }
+                                                row
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                json!({ "runs": owned, "warnings": [] })
+                            }
+                            // The node view's lane: the fixture answers the requested
+                            // entry and instance; a refresh answers the updated document.
+                            (_, Some("node")) => {
+                                node_requests += 1;
+                                let entry =
+                                    command.get("entry").and_then(Value::as_u64).unwrap_or(1);
+                                let index =
+                                    command.get("instance").and_then(Value::as_u64).unwrap_or(1);
+                                json!({
+                                    "name": "node-run",
+                                    "specId": "sw",
+                                    "state": {
+                                        "id": "worker",
+                                        "status": "running",
+                                        "instances": [
+                                            {"index": 0, "entry": 0, "status": "done", "child": "child-0"},
+                                            {"index": 1, "entry": 1, "status": "running", "child": "child-1"},
+                                        ],
+                                    },
+                                    "entry": {"index": entry, "status": "running"},
+                                    "instance": {
+                                        "index": index,
+                                        "entry": entry,
+                                        "status": "running",
+                                        "child": format!("child-{index}"),
+                                        "prompt": if index == 0 { "Earlier node prompt" } else if node_requests > 1 { "Updated node prompt" } else { "Node prompt fixture" },
+                                        "inputs": "{}",
+                                        "answer": if node_requests > 1 { "Updated node answer" } else { "Node answer fixture" },
+                                    },
+                                })
+                            }
+                            // The factory page's machine list: an empty library.
+                            (_, Some("library")) => json!({"machines": [], "warnings": []}),
                             _ => json!({}),
                         };
                         write_json(
@@ -444,7 +515,7 @@ fn factory_on_and_off_round_trip_the_gate_through_the_seam() {
     let all = flat_text(&frames);
     assert!(
         all.contains(
-            "The factory is enabled. Restart the client to surface the factory group (the factory page and the agent-side factory API follow the same gate)."
+            "The factory is enabled. Restart the client to surface the machines group (the machines page and the agent-side factory API follow the same gate)."
         ),
         "the enabled note rendered:\n{all}"
     );
@@ -454,7 +525,7 @@ fn factory_on_and_off_round_trip_the_gate_through_the_seam() {
     );
     assert!(
         all.contains(
-            "The factory is disabled. The factory group and page disappear on the next client start."
+            "The factory is disabled. The machines group and page disappear on the next client start."
         ),
         "the off note rendered:\n{all}"
     );
@@ -515,7 +586,7 @@ fn factory_off_refuses_while_runs_are_live() {
     let all = flat_text(&frames);
     assert!(
         all.contains(
-            "Cannot disable the factory while 2 runs are still live — stop them first (the factory page's stop action or rlm.factory.stop), then /factory off."
+            "Cannot disable the factory while 2 runs are still live — stop them first (the run page's stop action or rlm.factory.stop), then /factory off."
         ),
         "the refusal names the live count:\n{all}"
     );
@@ -524,7 +595,7 @@ fn factory_off_refuses_while_runs_are_live() {
         "the gate stayed enabled after the refused off:\n{all}"
     );
     assert!(
-        !all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        !all.contains("The factory is disabled. The machines group and page disappear on the next client start."),
         "the off note never rendered:\n{all}"
     );
 }
@@ -548,7 +619,7 @@ fn factory_off_proceeds_once_no_runs_are_live() {
     let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
     let all = flat_text(&frames);
     assert!(
-        all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        all.contains("The factory is disabled. The machines group and page disappear on the next client start."),
         "the off proceeded with only terminal runs:\n{all}"
     );
     assert!(
@@ -579,7 +650,7 @@ fn factory_off_refuses_on_a_client_whose_hello_predates_the_gate() {
     let all = flat_text(&frames);
     assert!(
         all.contains(
-            "Cannot disable the factory while 1 run is still live — stop it first (the factory page's stop action or rlm.factory.stop), then /factory off."
+            "Cannot disable the factory while 1 run is still live — stop it first (the run page's stop action or rlm.factory.stop), then /factory off."
         ),
         "the unadvertised-lane guard still refused:\n{all}"
     );
@@ -603,7 +674,7 @@ fn factory_off_proceeds_when_the_lane_cannot_report() {
     let frames = run_plan_config(Vec::new(), None, steps);
     let all = flat_text(&frames);
     assert!(
-        all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        all.contains("The factory is disabled. The machines group and page disappear on the next client start."),
         "the unreadable count never blocked off:\n{all}"
     );
     assert!(
@@ -669,7 +740,7 @@ fn factory_off_proceeds_when_the_kernel_is_not_running() {
     );
     let all = flat_text(&frames);
     assert!(
-        all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        all.contains("The factory is disabled. The machines group and page disappear on the next client start."),
         "the no-kernel count never blocked off:\n{all}"
     );
     assert!(
@@ -691,9 +762,30 @@ fn factory_page_run(id: &str, name: &str) -> Value {
         "name": name,
         "state": "running",
         "elapsedMs": 100,
-        "machine": { "states": [], "transitions": [] },
+        "machine": { "states": [ { "id": "entry", "entry": true } ], "transitions": [] },
         "nodes": [],
         "usage": { "running": 0 },
+    })
+}
+
+/// One live run whose single state has a running instance: the node view battery's run.
+fn factory_node_run() -> Value {
+    json!({
+        "runId": "node-run",
+        "specId": "sw",
+        "name": "node-run",
+        "state": "running",
+        "elapsedMs": 100,
+        "machine": {
+            "states": [{"id": "worker", "entry": true, "subagent": "worker"}],
+            "transitions": [],
+        },
+        "nodes": [{
+            "id": "worker",
+            "status": "running",
+            "instances": [{"index": 0, "entry": 0, "status": "running", "child": "child-1"}],
+        }],
+        "usage": { "running": 1 },
     })
 }
 
@@ -735,8 +827,10 @@ fn escape() -> KeyEvent {
 /// selection).
 #[test]
 fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
-    // Oldest first on the wire; the page reads newest-first, so
-    // second-run is the opening selection and first-run is one Down away.
+    // Oldest first on the wire (the reply's start order): the machines
+    // page lists the runs in the reply's order and anchors on the first
+    // row, so first-run is the opening selection and Enter opens its run
+    // page.
     let graph = json!({
         "runs": [
             factory_page_run("run-old", "first-run"),
@@ -751,15 +845,22 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
         HeadlessStep::Key(down()),
         HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
-        // The page opens on the feed's live head: the newest run.
+        // The machines page lists the runs in the reply's order; the
+        // anchored marker sits on the first row, and Enter opens that
+        // row's run page.
         HeadlessStep::WaitRender {
-            needle: "factory: second-run".to_string(),
+            needle: "\u{25b8} \u{21b3} first-run".to_string(),
             timeout_ms: 5_000,
         },
-        // Down moves the selection to the older run, and Esc closes the
-        // page on the very next input — no poll cycle can land between
-        // the two, so the moved marker below can only be the arrow's own
-        // repaint.
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "run: first-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        // Down moves the selection onto the run's state row, and Esc
+        // closes the page on the very next input — no poll cycle can
+        // land between the two, so the moved frame below can only be
+        // the arrow's own repaint.
         HeadlessStep::Key(down()),
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitMs(200),
@@ -767,11 +868,11 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
     let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
     let all = flat_text(&frames);
     assert!(
-        all.contains("factory: second-run"),
-        "the page mounted on the newest run:\n{all}"
+        all.contains("run: first-run"),
+        "the page mounted on the anchored run:\n{all}"
     );
     assert!(
-        all.contains("\u{25b8} factory: first-run"),
+        all.contains("\u{2503} entry"),
         "the arrow's own repaint painted the moved selection before the page closed:\n{all}"
     );
 }
@@ -788,20 +889,71 @@ fn a_paste_on_the_factory_page_stays_out_of_the_hidden_editor() {
         HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
-            needle: "factory: only-run".to_string(),
+            needle: "\u{21b3} only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "run: only-run".to_string(),
             timeout_ms: 5_000,
         },
         HeadlessStep::Paste("zq-stray-paste".to_string()),
+        // The first Esc returns to the machines page, the second closes it and uncovers the
+        // editor, where a leaked paste would show.
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitGone {
-            needle: "factory: only-run".to_string(),
+            needle: "run: only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(escape()),
+        HeadlessStep::WaitGone {
+            needle: "machines \u{b7}".to_string(),
             timeout_ms: 5_000,
         },
     ];
     let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
     let all = flat_text(&frames);
     assert!(
-        all.contains("factory: only-run"),
+        all.contains("run: only-run"),
+        "the run page mounted before the paste:\n{all}"
+    );
+    let last = flat_text(&frames[frames.len() - 1..]);
+    assert!(
+        !last.contains("machines \u{b7}"),
+        "both pages closed, so the editor shows:\n{last}"
+    );
+    assert!(
+        !all.contains("zq-stray-paste"),
+        "the paste must not reach the editor behind the page:\n{all}"
+    );
+}
+
+/// A paste while the machines page owns the frame never lands in the editor hidden behind it: the
+/// page has no text input, so it consumes the paste like the other input-less frame owners.
+#[test]
+fn a_paste_on_the_machines_page_stays_out_of_the_hidden_editor() {
+    let graph = json!({ "runs": [factory_page_run("run-1", "only-run")] });
+    let steps = vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "\u{21b3} only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Paste("zq-stray-paste".to_string()),
+        HeadlessStep::Key(escape()),
+        HeadlessStep::WaitGone {
+            needle: "\u{21b3} only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+    ];
+    let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
+    let all = flat_text(&frames);
+    assert!(
+        all.contains("\u{21b3} only-run"),
         "the page mounted before the paste:\n{all}"
     );
     assert!(
@@ -811,9 +963,10 @@ fn a_paste_on_the_factory_page_stays_out_of_the_hidden_editor() {
 }
 
 /// A session the daemon stops while its factory page is open leaves no stale run cards: the
-/// close clears the dock's run cache and the mounted page with it.
+/// close clears the dock's run cache and the mounted run page with it (the machine page's
+/// all-session rows are not the closed session's cache; they stay).
 #[test]
-fn a_closed_session_clears_the_open_factory_page() {
+fn a_closed_session_clears_the_run_cards_and_the_run_page() {
     let graph = json!({ "runs": [factory_page_run("run-1", "only-run")] });
     let steps = vec![
         HeadlessStep::Key(alt_a()),
@@ -822,7 +975,12 @@ fn a_closed_session_clears_the_open_factory_page() {
         HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
-            needle: "factory: only-run".to_string(),
+            needle: "\u{21b3} only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "run: only-run".to_string(),
             timeout_ms: 5_000,
         },
         // The first stop press arms the selected run, the second stops it; the mock's daemon
@@ -841,4 +999,66 @@ fn a_closed_session_clears_the_open_factory_page() {
         last.contains("No live factory runs.") && !last.contains("only-run"),
         "the closed session's page drops its run cards:\n{last}"
     );
+}
+
+/// The node view battery's opening: the machines page row, its run page, then Enter on the
+/// run's one state opens the node view.
+fn open_node_steps() -> Vec<HeadlessStep> {
+    vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "\u{21b3} node-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "run: node-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "Node prompt fixture".to_string(),
+            timeout_ms: 5_000,
+        },
+    ]
+}
+
+/// Moving the instance walk fetches the selected entry and instance once.
+#[test]
+fn factory_node_navigation_fetches_the_selected_entry_and_instance() {
+    let mut steps = open_node_steps();
+    steps.extend([
+        HeadlessStep::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        HeadlessStep::WaitRender {
+            needle: "Earlier node prompt".to_string(),
+            timeout_ms: 5_000,
+        },
+    ]);
+    let frames = run_plan_config(
+        vec!["factory_activity".to_string()],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    assert!(flat_text(&frames).contains("Earlier node prompt"));
+}
+
+/// The mounted node view refreshes with the run's graph refresh.
+#[test]
+fn factory_node_refreshes_the_mounted_document() {
+    let mut steps = open_node_steps();
+    steps.push(HeadlessStep::WaitRender {
+        needle: "Updated node prompt".to_string(),
+        timeout_ms: 5_000,
+    });
+    let frames = run_plan_config(
+        vec!["factory_activity".to_string()],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    assert!(flat_text(&frames).contains("Updated node prompt"));
 }

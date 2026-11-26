@@ -33,6 +33,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         turn_completed: false,
         suppress_aborted_row: false,
         shutdown_requested: false,
+        supervisor_lost: false,
         compacting: false,
         auto_compaction_enabled: true,
         last_activity_ms: 0,
@@ -615,6 +616,104 @@ async fn a_failed_runs_agent_end_follows_its_final_retry_end() {
         ["turn_end", "auto_retry_end", "agent_end"],
         "{events:?}"
     );
+}
+
+/// An abort that lands after core admission keeps the admitted user row,
+/// with or without row suppression: the live context already holds it.
+#[tokio::test]
+async fn an_abort_after_admission_keeps_the_admitted_user_row() {
+    for suppress_aborted_row in [false, true] {
+        let row = json!({
+            "role": "user",
+            "content": [{ "type": "text", "text": "admitted" }],
+            "timestamp": 1,
+        });
+        let events = gate_sighting_events(
+            vec![EngineEvent::UserMessage(row), EngineEvent::DoneAborted],
+            true,
+            suppress_aborted_row,
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "message_start" && event["message"]["role"] == "user"),
+            "the admitted row reaches the store and clients: {events:?}"
+        );
+    }
+}
+
+/// A shutdown that lands before admission returns a plain prompt to its lane:
+/// a notice row emitted before admission is not the prompt's row. An injected
+/// row or a session command's echo row is the delivery's own row, so that
+/// delivery stays consumed.
+#[tokio::test]
+async fn a_shutdown_before_admission_requeues_a_prompt_behind_a_notice() {
+    let notice = json!({
+        "role": "custom",
+        "customType": "notice",
+        "content": "notice",
+        "display": true,
+        "timestamp": 1,
+    });
+    for (message, custom_message, requeued) in [
+        ("prompt", None, true),
+        ("/compact", None, false),
+        ("injected", Some(notice.clone()), false),
+    ] {
+        let engine = Arc::new(GateProbeEngine {
+            frames: vec![
+                EngineEvent::CustomMessage(notice.clone()),
+                EngineEvent::DoneAborted,
+            ],
+            ..GateProbeEngine::default()
+        });
+        let runner = burst_runner(engine.clone());
+        let core = Arc::clone(&runner.core);
+        let delivered = std::sync::atomic::AtomicUsize::new(0);
+        *engine.before_delivery.lock().unwrap() = Some(Box::new(move || {
+            // The shutdown lands after the first row, before the settle.
+            if delivered.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                let mut core = core.lock().unwrap();
+                core.shutdown_requested = true;
+                core.abort_requested = true;
+            }
+        }));
+        runner
+            .run_turn(
+                engine,
+                Lane::Steering,
+                vec![QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: message.to_string(),
+                    custom_message,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: true,
+                    policy: TurnPolicy::Queued,
+                    forced_batch: false,
+                }],
+            )
+            .await;
+        let lane: Vec<String> = runner
+            .core
+            .lock()
+            .unwrap()
+            .steering
+            .iter()
+            .map(|item| item.message.clone())
+            .collect();
+        let expected = if requeued {
+            vec![message.to_string()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(lane, expected, "{message}");
+    }
 }
 
 /// A turn aborted under row suppression (a manual compaction or tree move)

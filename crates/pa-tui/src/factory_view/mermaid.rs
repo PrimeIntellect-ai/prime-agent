@@ -1,0 +1,490 @@
+//! Mermaid diagram text drawn in the terminal: the subset the machine
+//! library actually carries — the `stateDiagram-v2` and `flowchart TB`
+//! graphs `rlm.factory`'s `spec_to_mermaid` writes for every machine, and
+//! the same shapes inside a `` ```mermaid `` fence in a node's Markdown. The
+//! parse feeds the block-diagram renderer's own graph, so mermaid is just
+//! another source for the one diagram renderer; diagram types it cannot
+//! draw (sequence, gantt, …) collapse to a one-line placeholder, and a
+//! block that carries no graph renders nothing. Mermaid source text never
+//! reaches the page.
+
+use super::blocks::block_diagram;
+use super::diagram::{FactoryState, FactoryTransition};
+use crate::theme::{Theme, ThemeColor};
+use crate::{Line, Span};
+
+/// One mermaid block: a graph the block-diagram renderer can draw, or a
+/// diagram type it cannot.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Mermaid {
+    Diagram {
+        states: Vec<FactoryState>,
+        transitions: Vec<FactoryTransition>,
+    },
+    /// A type the renderer does not draw, by its type word
+    /// (`sequenceDiagram`, `gantt`, …).
+    Unsupported(String),
+}
+
+/// The diagram's type word: the first word of the first line that is not
+/// blank or a `%%` comment (`stateDiagram-v2`'s `stateDiagram`,
+/// `flowchart TB`'s `flowchart`).
+fn kind_word(text: &str) -> Option<&str> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("%%"))
+        .and_then(|line| line.split_whitespace().next())
+}
+
+/// Parse one mermaid block. `stateDiagram` (v2 included) and
+/// `flowchart`/`graph` answer the graph the renderer draws; every other
+/// type answers [`Mermaid::Unsupported`] by its type word, and text with
+/// no type word answers `None` (an empty fence renders nothing).
+pub(super) fn parse_mermaid(text: &str) -> Option<Mermaid> {
+    let kind = kind_word(text)?;
+    if kind.starts_with("stateDiagram") {
+        return Some(parse_state_diagram(text));
+    }
+    if kind == "flowchart" || kind == "graph" {
+        return Some(parse_flowchart(text));
+    }
+    Some(Mermaid::Unsupported(kind.to_string()))
+}
+
+/// The parse's working shape: node ids in first-seen order, each id's
+/// display name, the entry ids, and the edges as read.
+#[derive(Default)]
+struct Graph {
+    ids: Vec<String>,
+    display: std::collections::HashMap<String, String>,
+    entry: std::collections::HashSet<String>,
+    edges: Vec<FactoryTransition>,
+}
+
+impl Graph {
+    /// One node sighting, in order: a new id joins the roster with its
+    /// display name (an earlier sighting keeps its own).
+    fn node(&mut self, id: &str, display: &str) {
+        if !self.ids.iter().any(|known| known == id) {
+            self.ids.push(id.to_string());
+            self.display.insert(id.to_string(), decode_label(display));
+        }
+    }
+
+    /// One edge sighting: both ends join the roster, and the edge records
+    /// the ids as read (`finish` maps them to display names).
+    fn edge(&mut self, from: &str, to: &str, label: Option<String>) {
+        self.node(from, from);
+        self.node(to, to);
+        self.edges.push(FactoryTransition {
+            from: vec![from.to_string()],
+            to: to.to_string(),
+            when: label.map(|label| decode_label(&label)),
+        });
+    }
+
+    /// The graph as the block-diagram renderer reads it: states in
+    /// sighting order with their display names (a mermaid node's second
+    /// line is its shape label, or empty — mermaid carries no model or
+    /// python detail), and edges with both ends displayed.
+    fn finish(self, labels: &std::collections::HashMap<String, String>) -> Mermaid {
+        let name = |id: &str| {
+            self.display
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| id.to_string())
+        };
+        let states = self
+            .ids
+            .iter()
+            .map(|id| FactoryState {
+                id: name(id),
+                entry: self.entry.contains(id),
+                lifecycle: "task".to_string(),
+                max_entries: 1,
+                subagent: None,
+                python: None,
+                model: None,
+                label: Some(decode_label(
+                    labels.get(id).map(String::as_str).unwrap_or_default(),
+                )),
+            })
+            .collect();
+        let transitions = self
+            .edges
+            .iter()
+            .map(|edge| FactoryTransition {
+                from: edge.from.iter().map(|id| name(id)).collect(),
+                to: name(&edge.to),
+                when: edge.when.clone(),
+            })
+            .collect();
+        Mermaid::Diagram {
+            states,
+            transitions,
+        }
+    }
+}
+
+/// `stateDiagram-v2`: `state "label" as id` gives an id its display name,
+/// `[*] --> id` marks the entry states, `a --> b` is an edge, and
+/// `a --> b: label` names it. `--> [*]` is the terminal marker (it draws
+/// no box); lines the subset does not know (composite states, notes)
+/// drop, the way mermaid's own grammar drops what it cannot place.
+fn parse_state_diagram(text: &str) -> Mermaid {
+    let mut graph = Graph::default();
+    let mut labels = std::collections::HashMap::new();
+    let mut past_header = false;
+    for line in text.lines().map(str::trim) {
+        if !past_header {
+            past_header = line.starts_with("stateDiagram");
+            continue;
+        }
+        if let Some((label, id)) = line
+            .strip_prefix("state ")
+            .and_then(split_state_declaration)
+        {
+            graph.node(&id, &label);
+            labels.insert(id.clone(), String::new());
+            continue;
+        }
+        let Some((from, rest)) = line.split_once("-->") else {
+            continue;
+        };
+        let (to, label) = split_edge_label(rest);
+        if from.trim() == "[*]" {
+            if let Some(to) = to {
+                graph.node(&to, &to);
+                graph.entry.insert(to);
+            }
+            continue;
+        }
+        let Some(from) = bare_id(from) else {
+            continue;
+        };
+        let Some(to) = to else {
+            continue;
+        };
+        graph.edge(&from, &to, label);
+    }
+    graph.finish(&labels)
+}
+
+/// `state "label" as id`: the quoted form `spec_to_mermaid` writes, and
+/// the bare `state label as id` reading of the same shape.
+fn split_state_declaration(rest: &str) -> Option<(String, String)> {
+    let rest = rest.trim();
+    let (label, tail) = if let Some(rest) = rest.strip_prefix('"') {
+        let (label, tail) = rest.split_once("\" ")?;
+        (label.to_string(), tail)
+    } else {
+        let (label, tail) = rest.split_once(' ')?;
+        (label.to_string(), tail)
+    };
+    let id = tail.strip_prefix("as ")?.trim();
+    (!id.is_empty() && !label.is_empty()).then(|| (label, id.to_string()))
+}
+
+/// A state-diagram node id: the first bare token (`[*` markers answer
+/// `None`, so a terminal edge drops).
+fn bare_id(token: &str) -> Option<String> {
+    let id = token.split_whitespace().next()?;
+    (id != "[*]").then(|| id.to_string())
+}
+
+/// Decode Mermaid's label escapes — `#34;` (numeric), `#x22;` (hex), and
+/// the named `#quot;`/`#amp;`/`#lt;`/`#gt;`/`#nbsp;` — so a generated guard
+/// label reads as its text instead of entity codes. A decoded control
+/// character becomes a space: the mermaid source is scrubbed at its seam,
+/// and an entity must not carry one past it.
+fn decode_label(text: &str) -> String {
+    // Generated foreach labels join their two lines with an HTML break;
+    // the terminal renderer reads text, so break to a space.
+    let text = text.replace("<br/>", " ");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find('#') {
+        out.push_str(&rest[..at]);
+        // The candidate ends at the next `;` or `#`: a hash before any
+        // semicolon is not an entity, and stopping there keeps the scan
+        // linear in the label length.
+        let Some(end) = rest[at + 1..]
+            .find([';', '#'])
+            .map(|offset| at + 1 + offset)
+        else {
+            out.push_str(&rest[at..]);
+            return out;
+        };
+        let code = &rest[at + 1..end];
+        let decoded = if !rest[end..].starts_with(';') {
+            None
+        } else if let Some(hex) = code.strip_prefix('x').or_else(|| code.strip_prefix('X')) {
+            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+        } else if !code.is_empty() && code.chars().all(|ch| ch.is_ascii_digit()) {
+            code.parse().ok().and_then(char::from_u32)
+        } else {
+            match code {
+                "quot" => Some('"'),
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "nbsp" => Some(' '),
+                _ => None,
+            }
+        };
+        if let Some(ch) = decoded {
+            out.push(if ch.is_control() { ' ' } else { ch });
+            rest = &rest[end + 1..];
+        } else {
+            // Not an entity: keep the hash and rescan from the next
+            // character, so an ordinary hash never eats a later entity.
+            out.push('#');
+            rest = &rest[at + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// An edge's right side: the target id and the `: label` that names the
+/// edge, when it carries one.
+fn split_edge_label(rest: &str) -> (Option<String>, Option<String>) {
+    let (to, label) = rest.split_once(':').map_or((rest, None), |(to, label)| {
+        (to, Some(label.trim().to_string()))
+    });
+    (bare_id(to), label)
+}
+
+/// `flowchart TB` (or `graph`): node lines (`id`, `id[label]`,
+/// `id(label)`, `id{label}`, `id([...)]`, quotes inside) and `-->` edges,
+/// chained across one line, with a `|label|` prefix naming the edge that
+/// ends at the token. The direction token is read but the block-diagram
+/// layout is top-down.
+fn parse_flowchart(text: &str) -> Mermaid {
+    let mut graph = Graph::default();
+    let mut labels = std::collections::HashMap::new();
+    let mut past_header = false;
+    for line in text.lines().map(str::trim) {
+        if !past_header {
+            past_header = line.starts_with("flowchart") || line.starts_with("graph");
+            continue;
+        }
+        let parts: Vec<&str> = line.split("-->").collect();
+        if parts.len() < 2 {
+            if let Some((id, label)) = parse_flow_node(line) {
+                graph.node(&id, &id);
+                labels.insert(id.clone(), label.unwrap_or_default());
+            }
+            continue;
+        }
+        for pair in parts.windows(2) {
+            // The left token's own `|label|` prefix belongs to the edge
+            // before it, which already read it as its right token.
+            let (_, left) = split_pipe_label(pair[0]);
+            let Some((from, from_label)) = parse_flow_node(left) else {
+                continue;
+            };
+            let (edge_label, right) = split_pipe_label(pair[1]);
+            let Some((to, to_label)) = parse_flow_node(right) else {
+                continue;
+            };
+            for (id, label) in [(&from, from_label), (&to, to_label)] {
+                if let Some(label) = label {
+                    labels.insert(id.clone(), label);
+                }
+            }
+            graph.edge(&from, &to, edge_label);
+        }
+    }
+    graph.finish(&labels)
+}
+
+/// One flowchart node token: its id and the label its shape carries
+/// (`notes["foreach: over outline (max 8)"]` is `notes` plus the quoted
+/// label; a bare token has no label). Junk after the token drops.
+fn parse_flow_node(token: &str) -> Option<(String, Option<String>)> {
+    let token = token.trim();
+    let mut id_end = token.len();
+    for (at, ch) in token.char_indices() {
+        if ch.is_whitespace() || matches!(ch, '[' | '(' | '{' | '>') {
+            id_end = at;
+            break;
+        }
+    }
+    let id = token[..id_end].trim();
+    if id.is_empty() || id == "[*]" {
+        return None;
+    }
+    let shape = token[id_end..].trim();
+    if shape.is_empty() {
+        return Some((id.to_string(), None));
+    }
+    // Compound shapes (`((circle))`, `([stadium])`, `[(cylinder)]`, `{{hexagon}}`) open with two
+    // characters; every other shape opens with one.
+    let (open, close) = [("((", "))"), ("([", "])"), ("[(", ")]"), ("{{", "}}")]
+        .into_iter()
+        .find(|(open, _)| shape.starts_with(open))
+        .or_else(|| match shape.chars().next()? {
+            '[' => Some(("[", "]")),
+            '>' => Some((">", "]")),
+            '(' => Some(("(", ")")),
+            '{' => Some(("{", "}")),
+            _ => None,
+        })?;
+    let rest = shape[open.len()..].trim();
+    let mut label = rest.rfind(close).map_or(rest, |end| &rest[..end]).trim();
+    if label.len() >= 2 && label.starts_with('"') && label.ends_with('"') {
+        label = &label[1..label.len() - 1];
+    }
+    Some((id.to_string(), Some(label.trim().to_string())))
+}
+
+/// One edge endpoint's leading `|label|` (it names the edge that ends at
+/// this token) and the token without it.
+fn split_pipe_label(token: &str) -> (Option<String>, &str) {
+    let token = token.trim();
+    if let Some(rest) = token.strip_prefix('|') {
+        if let Some(end) = rest.find('|') {
+            let label = rest[..end].trim();
+            if !label.is_empty() {
+                return (Some(label.to_string()), rest[end + 1..].trim());
+            }
+        }
+    }
+    (None, token)
+}
+
+/// One mermaid block's rows: the parsed graph drawn through the block
+/// diagram renderer (mermaid text reaches here already scrubbed — the
+/// detail parse and the file view scrub at their seams), the one-line
+/// placeholder for a type the renderer cannot draw, and nothing for a
+/// block with no graph. Mermaid source text never reaches the rows.
+pub(super) fn mermaid_block_lines(theme: &Theme, text: &str) -> Vec<Line> {
+    match parse_mermaid(text) {
+        Some(Mermaid::Diagram {
+            states,
+            transitions,
+        }) => block_diagram(theme, &states, &transitions, None, None).lines,
+        Some(Mermaid::Unsupported(kind)) => vec![vec![
+            Span::raw("  "),
+            theme.fg_span(ThemeColor::Muted, format!("[mermaid {kind} not rendered]")),
+        ]],
+        None => Vec::new(),
+    }
+}
+
+/// One rendered piece of a Markdown file: prose, or a `` ```mermaid `` fence.
+pub(super) enum FileSegment {
+    Text(String),
+    Mermaid(String),
+}
+
+/// Split a Markdown file on its `` ```mermaid `` blocks, read by the same
+/// block parse `render_markdown` renders the prose with: each block is one
+/// diagram, and the source around them is prose.
+pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut segments = Vec::new();
+    let mut prose_from = 0;
+    for (range, code) in crate::markdown::fenced_code_blocks(text, "mermaid") {
+        push_prose(&mut segments, &lines[prose_from..range.start]);
+        segments.push(FileSegment::Mermaid(code));
+        prose_from = range.end;
+    }
+    push_prose(&mut segments, &lines[prose_from..]);
+    segments
+}
+
+/// Prose lines join the split as one segment, unless they are all blank.
+fn push_prose(segments: &mut Vec<FileSegment>, lines: &[&str]) {
+    if lines.iter().all(|line| line.trim().is_empty()) {
+        return;
+    }
+    let mut prose = String::new();
+    for line in lines {
+        prose.push_str(line);
+        prose.push('\n');
+    }
+    segments.push(FileSegment::Text(prose));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mermaid;
+
+    #[test]
+    fn mermaid_examples_inside_markdown_fences_remain_text() {
+        let example = "~~~markdown\n```mermaid\nflowchart TB\nA --> B\n```\n~~~\n\n";
+        let text = format!("{example}```mermaid\nflowchart TB\nC --> D\n```\n");
+        let segments = super::split_mermaid_fences(&text);
+        assert!(
+            matches!(&segments[..], [super::FileSegment::Text(prose), super::FileSegment::Mermaid(graph)] if prose == example && graph == "flowchart TB\nC --> D\n"),
+            "{} segments",
+            segments.len()
+        );
+        let segments = super::split_mermaid_fences("~~~mermaid\nflowchart TB\nA --> B\n~~~\n");
+        assert!(
+            matches!(&segments[..], [super::FileSegment::Mermaid(graph)] if graph == "flowchart TB\nA --> B\n")
+        );
+    }
+
+    #[test]
+    fn label_entities_decode_to_their_text() {
+        let super::Mermaid::Diagram {
+            states,
+            transitions,
+        } = parse_mermaid(
+            "stateDiagram-v2\nstate \"Review#59; done\" as a\na --> b: verdict.approved eq #34;yes#34;\nb --> a: note#10;here\nc --> d: #x22;quoted#x22;\n",
+        )
+        .unwrap()
+        else {
+            panic!("expected diagram")
+        };
+        // The declaration names the state: its display name is the box title.
+        assert_eq!(states[0].id, "Review; done");
+        assert_eq!(
+            transitions[0].when.as_deref(),
+            Some("verdict.approved eq \"yes\"")
+        );
+        // A control entity decodes to a space, never to a control character.
+        assert_eq!(transitions[1].when.as_deref(), Some("note here"));
+        assert_eq!(transitions[2].when.as_deref(), Some("\"quoted\""));
+    }
+
+    #[test]
+    fn an_ordinary_hash_never_eats_a_later_entity() {
+        let super::Mermaid::Diagram { transitions, .. } =
+            parse_mermaid("stateDiagram-v2\na --> b: Issue #123: #quot;yes#quot;\n").unwrap()
+        else {
+            panic!("expected diagram")
+        };
+        assert_eq!(transitions[0].when.as_deref(), Some("Issue #123: \"yes\""));
+    }
+
+    #[test]
+    fn generated_foreach_labels_drop_the_break_tag() {
+        let super::Mermaid::Diagram { states, .. } =
+            parse_mermaid("flowchart TB\nplan[\"plan<br/>foreach: over items (max 2)\"]\n")
+                .unwrap()
+        else {
+            panic!("expected graph")
+        };
+        assert_eq!(
+            states[0].label.as_deref(),
+            Some("plan foreach: over items (max 2)")
+        );
+    }
+
+    #[test]
+    fn many_hashes_before_a_semicolon_decode_in_linear_time() {
+        let label = format!("{}{}", "#".repeat(200_000), ";#34;");
+        let started = std::time::Instant::now();
+        let decoded = super::decode_label(&label);
+        assert_eq!(&decoded[decoded.len() - 2..], ";\"");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "decode took {:?}",
+            started.elapsed()
+        );
+    }
+}
