@@ -405,11 +405,15 @@ impl SessionUi {
         Ok(())
     }
 
-    /// The expanded dock's heartbeat countdowns ride the run loop's 2s bash-activity poll (the
-    /// collapsed line carries no time label, so it skips the recount).
-    pub(crate) fn refresh_expanded_dock(&mut self, view: &mut AgentView) {
+    /// The heartbeat countdowns ride the run loop's 2s bash-activity poll: the expanded dock
+    /// recounts, and the open `/heartbeats` view repaints its next-run column (the collapsed line
+    /// carries no time label, so it skips both).
+    pub(crate) fn refresh_heartbeat_countdowns(&mut self, view: &mut AgentView) {
         if self.subagents_focused {
             self.sync_activity_dock(view);
+        }
+        if matches!(view.overlay, Some(Overlay::Heartbeats(_))) {
+            self.dirty = true;
         }
     }
 
