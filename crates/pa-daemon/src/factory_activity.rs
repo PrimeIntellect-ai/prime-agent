@@ -40,6 +40,50 @@ pub(crate) fn stored_factory_spec_count(session_artifact_dir: &Path) -> usize {
     })
 }
 
+/// The executor's run-registry directory under a session's artifact dir
+/// (`RUNS_DIR_NAME` in `prime-agent-runtime/src/rlm/factory.py`): one
+/// `<run id>.json` per durable run, retired when the run goes terminal,
+/// so the archive on disk holds only runs that are not finished.
+pub(crate) const FACTORY_RUNS_DIR_NAME: &str = "factory-runs";
+
+/// How long a durable run record still counts as an active run: the
+/// executor retires a record when its run goes terminal, but a record
+/// nothing has written for this long belongs to a run no live kernel
+/// drives (a frozen or abandoned run), so it stops counting before it
+/// can hold an idle session busy forever.
+pub(crate) const FACTORY_SAVED_RECORD_RETENTION: std::time::Duration =
+    std::time::Duration::from_hours(24);
+
+/// The session's durable factory run records that still count as active:
+/// the records under [`FACTORY_RUNS_DIR_NAME`] younger than
+/// [`FACTORY_SAVED_RECORD_RETENTION`]. A record whose mtime reads in the
+/// future (clock skew) counts as fresh.
+pub(crate) fn live_factory_run_count(session_artifact_dir: &Path) -> usize {
+    let runs_dir = session_artifact_dir.join(FACTORY_RUNS_DIR_NAME);
+    let Ok(entries) = std::fs::read_dir(&runs_dir) else {
+        return 0;
+    };
+    entries.flatten().filter(is_live_run_record).count()
+}
+
+/// Whether one directory entry is a run record the retention window still
+/// covers: a `.json` file (staging temporaries and the tombstone ledger
+/// never count) whose modification time is not older than the window. An
+/// unreadable record does not count; a future mtime (clock skew) does.
+fn is_live_run_record(entry: &std::fs::DirEntry) -> bool {
+    let path = entry.path();
+    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        return false;
+    }
+    let Ok(modified) = std::fs::metadata(&path).and_then(|metadata| metadata.modified()) else {
+        return false;
+    };
+    match modified.elapsed() {
+        Ok(age) => age <= FACTORY_SAVED_RECORD_RETENTION,
+        Err(_) => true,
+    }
+}
+
 /// The capabilities a hello advertises: the default set, minus the
 /// `factory_activity` lane while the factory stays disabled (the opt-in
 /// gate; the settings read is fresh per connection, so a `/factory on`
@@ -268,5 +312,49 @@ mod tests {
                 .any(|capability| capability == "factory_activity"),
             "the disabled factory lane leaves the advertisement: {disabled_again:?}"
         );
+    }
+
+    /// One run record under the session's artifact dir, with its
+    /// modification time pinned.
+    fn write_record(runs: &Path, name: &str, at: std::time::SystemTime) {
+        let path = runs.join(name);
+        std::fs::write(&path, "{}").expect("write record");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open record")
+            .set_modified(at)
+            .expect("set mtime");
+    }
+
+    /// The archive holds only runs that are not finished, so a record
+    /// counts as an active run until the executor retires it — and a
+    /// record no live kernel has written for the retention window stops
+    /// counting, so an abandoned one cannot hold a session busy forever.
+    #[test]
+    fn live_run_records_count_until_retirement() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let artifacts = dir.path().join("session-artifacts").join("s1");
+        // No runs directory: no runs, never an error.
+        assert_eq!(live_factory_run_count(&artifacts), 0);
+        let runs = artifacts.join(FACTORY_RUNS_DIR_NAME);
+        std::fs::create_dir_all(&runs).expect("runs dir");
+        let now = std::time::SystemTime::now();
+        let stale = now
+            .checked_sub(
+                FACTORY_SAVED_RECORD_RETENTION
+                    .checked_add(std::time::Duration::from_secs(1))
+                    .expect("retention plus margin"),
+            )
+            .expect("stale time");
+        write_record(&runs, "run-live.json", now);
+        write_record(&runs, "run-old.json", stale);
+        write_record(&runs, ".run-staging.json.tmp", now);
+        std::fs::write(runs.join("retired.jsonl"), "\n").expect("tombstones");
+        assert_eq!(live_factory_run_count(&artifacts), 1);
+        // The executor retires a terminal run's record: an empty archive
+        // counts nothing.
+        std::fs::remove_file(runs.join("run-live.json")).expect("retire the live record");
+        assert_eq!(live_factory_run_count(&artifacts), 0);
     }
 }

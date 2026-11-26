@@ -497,6 +497,8 @@ fn passivated_summary(summary: Value) -> Value {
         "hasRegisteredHeartbeat",
         "hasRegisteredCronJob",
         "hasRunningRlmChildren",
+        "hasBackgroundKernelWork",
+        "hasActiveFactoryRuns",
         "isBashRunning",
         "isRunningTools",
         "workerState",

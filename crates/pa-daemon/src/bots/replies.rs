@@ -108,7 +108,8 @@ pub(crate) fn settled_answer(
 }
 
 /// Whether the guest session runs anything: a turn, compaction, a shell,
-/// tools, children, or queued input.
+/// tools, children, queued input, background kernel work, or an active
+/// factory run.
 fn guest_busy_flags(state: &Value) -> bool {
     let flag = |name: &str| state[name].as_bool().unwrap_or(false);
     [
@@ -118,6 +119,8 @@ fn guest_busy_flags(state: &Value) -> bool {
         "isRunningTools",
         "hasRunningSubagents",
         "hasRunningRlmChildren",
+        "hasBackgroundKernelWork",
+        "hasActiveFactoryRuns",
     ]
     .into_iter()
     .any(flag)

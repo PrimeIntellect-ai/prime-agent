@@ -1,0 +1,2 @@
+- Fixed an always-on bot pausing mid-job: both idle-pause paths (the Mac follower and the guest self-pause) now count live background kernel work (a background `bash()` shell) and active factory runs as busy.
+- The session summary carries the two new flags (`hasBackgroundKernelWork`, `hasActiveFactoryRuns`); a passivated worker's row strips them like the other live-runtime fields.

@@ -9,6 +9,7 @@ fn inputs() -> SummaryInputs {
         bash_running: false,
         quota_parked: false,
         subagents_running: false,
+        background_kernel_work: false,
         progress_note: None,
     }
 }
@@ -129,6 +130,53 @@ fn summary_lifecycle_is_message_based() {
     session.rewrite().unwrap();
     let with_message = SessionCore::test_core(Some(session), "/tmp".to_string());
     assert_eq!(session_summary(&with_message, inputs()).lifecycle, "live");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The bot-pause busy flags reach the summary wire: background kernel
+/// work from the engine inputs, active factory runs from the session's
+/// durable run records (the archive the executor retires a finished run
+/// from).
+#[test]
+fn the_background_work_and_factory_run_flags_reach_the_summary() {
+    let core = SessionCore::test_core(None, "/tmp".to_string());
+    let plain = serde_json::to_value(session_summary(&core, inputs())).expect("wire");
+    assert_eq!(plain["hasBackgroundKernelWork"], json!(false));
+    assert_eq!(plain["hasActiveFactoryRuns"], json!(false));
+    let working = serde_json::to_value(session_summary(
+        &core,
+        SummaryInputs {
+            background_kernel_work: true,
+            ..inputs()
+        },
+    ))
+    .expect("wire");
+    assert_eq!(working["hasBackgroundKernelWork"], json!(true));
+
+    let dir = std::env::temp_dir().join(format!("pa-worker-fr-{}", uuid::Uuid::new_v4()));
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+    let session_id = session.session_id().to_string();
+    let path = sessions.join(crate::session_store::session_file_name(&session_id));
+    session.set_path(path);
+    session.append_message(&serde_json::json!({
+        "role": "user", "content": "hi", "timestamp": 1u64
+    }));
+    session.rewrite().unwrap();
+    let core = SessionCore::test_core(Some(session), "/tmp".to_string());
+    let wire = || serde_json::to_value(session_summary(&core, inputs())).expect("wire");
+    assert_eq!(wire()["hasActiveFactoryRuns"], json!(false));
+    let runs = dir
+        .join("session-artifacts")
+        .join(&session_id)
+        .join(crate::factory_activity::FACTORY_RUNS_DIR_NAME);
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::write(runs.join("run-1.json"), "{}").unwrap();
+    assert_eq!(wire()["hasActiveFactoryRuns"], json!(true));
+    // The executor retires a terminal run's record: the flag clears.
+    std::fs::remove_file(runs.join("run-1.json")).unwrap();
+    assert_eq!(wire()["hasActiveFactoryRuns"], json!(false));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

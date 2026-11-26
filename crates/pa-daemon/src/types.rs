@@ -85,6 +85,17 @@ pub struct SessionSummary {
     /// ended.
     #[serde(default)]
     pub has_running_subagents: bool,
+    /// The session's kernel runs live background work behind the settled
+    /// turn: a live background `bash()` handle awaiting its completion
+    /// notice. The bot pause paths read it: such work outlives the turn,
+    /// so the session is not idle.
+    #[serde(default)]
+    pub has_background_kernel_work: bool,
+    /// The session's factory runs that are not finished (a durable run
+    /// record the executor has not retired). The bot pause paths read it:
+    /// a running machine must not pause its sandbox mid-job.
+    #[serde(default)]
+    pub has_active_factory_runs: bool,
     pub attached_clients: u32,
     pub message_count: u32,
     pub session_actions: SessionActionSnapshot,
