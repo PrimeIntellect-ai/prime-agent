@@ -160,20 +160,39 @@ command -v prime-agent >/dev/null 2>&1 && prime-agent relay --probe >/dev/null 2
 /// retries: an uploaded tarball stays in place until an attempt succeeds
 /// (so a partially run attempt leaves it for the next one), and a rerun
 /// after a successful attempt skips straight to the post-install checks.
+/// That skip still preserves a local tarball for nested spawns, because
+/// the version probe reports a mismatch when only the guest tools are
+/// missing, so a guest can land here without ever having kept one.
 pub const INSTALL_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 # A retried install (a recovered gateway stream reruns this script through
 # `exec_ready`) may have installed this version already and retired the
 # uploaded tarball. Nothing is left to install then; only the checks at the
-# end of this script remain.
+# end of this script remain. The version probe also folds the guest tools
+# into its answer, so a guest that runs this version but lacks node or gh
+# reports a mismatch and lands here with nothing to install.
 if command -v prime-agent >/dev/null 2>&1 \
   && [ "$(prime-agent --version 2>/dev/null)" = "$PA_VERSION" ]; then
   installed_already=1
 else
   installed_already=""
 fi
-if [ -z "$installed_already" ]; then
+if [ -n "$installed_already" ]; then
+  # Preserve the local archive for nested spawns anyway: a guest that
+  # already runs this version may never have kept one (the prebuilt image,
+  # or an install from a published release).
+  preserve="/root/.prime-agent-bot-tarball/prime-agent-${PA_VERSION}-linux-x64.tar.gz"
+  if [ -n "${PA_TARBALL_PATH:-}" ] && [ -f "$PA_TARBALL_PATH" ]; then
+    echo "${PA_TARBALL_SHA256}  $PA_TARBALL_PATH" | sha256sum -c - >/dev/null
+    mkdir -p /root/.prime-agent-bot-tarball
+    cp "$PA_TARBALL_PATH" "$preserve"
+  elif [ -n "${PA_TARBALL_BYTES:-}" ]; then
+    mkdir -p /root/.prime-agent-bot-tarball
+    head -c "$PA_TARBALL_BYTES" > "$preserve"
+    echo "${PA_TARBALL_SHA256}  $preserve" | sha256sum -c - >/dev/null
+  fi
+else
   asset="prime-agent-${PA_VERSION}-linux-x64.tar.gz"
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' EXIT

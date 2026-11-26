@@ -82,7 +82,9 @@ if [[ -n "$id" ]]; then
   # not just the last pipeline.
   probe='set -euo pipefail; export PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin; prime-agent --version; prime-agent relay --probe; node --version; gh --version | head -1'
   ok=0
-  for _ in $(seq 1 20); do
+  # A first create converts the image to its VM artifact, which Prime
+  # documents can take minutes; 60 x 6s covers a cold conversion.
+  for _ in $(seq 1 60); do
     if prime sandbox run "$id" --plain -- bash -c "$probe"; then ok=1; break; fi
     sleep 6
   done
