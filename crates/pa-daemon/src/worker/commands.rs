@@ -757,7 +757,13 @@ impl Worker {
         }
         let goal = match &self.agent_engine {
             Some(engine) => engine.retire_continuations().await,
-            None => None,
+            None => Ok(None),
+        };
+        let goal = match goal {
+            Ok(goal) => goal,
+            Err(error) => {
+                return response_failure(None, "retire_continuations", &format!("{error:#}"), None)
+            }
         };
         if let Some(goal) = goal {
             super::persist_and_emit_goal_update(&self.core, &self.events, &goal);

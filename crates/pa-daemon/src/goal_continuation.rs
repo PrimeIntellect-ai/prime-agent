@@ -78,26 +78,27 @@ impl AgentSessionEngine {
     /// Retire the session's continuations: clear the autonomous one, drop
     /// the queued goal contexts, and pause an active goal. Returns the paused
     /// goal's state for the caller to persist and publish.
-    pub(crate) async fn retire_continuations(&self) -> Option<serde_json::Value> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the goal pause cannot be recorded.
+    pub(crate) async fn retire_continuations(&self) -> anyhow::Result<Option<serde_json::Value>> {
         use crate::engine::SessionEngine as _;
         self.clear_autonomous_continuations();
         self.purge_queued_goal_contexts();
-        let live = self.live_handles()?;
+        let Some(live) = self.live_handles() else {
+            return Ok(None);
+        };
         let state = {
             let mut driver = live.goal.driver.lock().await;
             if driver.state().status != pa_core::goals::GoalStatus::Active {
-                return None;
+                return Ok(None);
             }
             let mut session = live.goal.session.lock().await;
-            if let Err(error) =
-                driver.pause(&mut session, "Paused because its A2A task was canceled")
-            {
-                eprintln!("pa-daemon: goal pause persist failed: {error:#}");
-                return None;
-            }
+            driver.pause(&mut session, "Paused because its A2A task was canceled")?;
             driver.state_with_creation_elapsed()
         };
-        live.publish_goal(&state)
+        Ok(live.publish_goal(&state))
     }
 
     /// An error assistant message fails an active goal (an abort keeps
