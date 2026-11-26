@@ -292,7 +292,7 @@ fn check_state_fields(
             {
                 if python.contains_key("path")
                     && !nonempty_str(python.get("path"))
-                        .is_some_and(|path| std::path::Path::new(path).is_absolute())
+                        .is_some_and(|path| std::path::Path::new(path).has_root())
                 {
                     errors.push(format!(
                         "{noun} {id} python path must be an absolute directory when provided"
@@ -439,6 +439,8 @@ fn check_state_fields(
     {
         errors.push(format!("{noun} {id} inputs must be a list"));
     }
+    // One output-type map per source state, however many inputs read it.
+    let mut output_types_by_source: BTreeMap<&str, BTreeMap<String, String>> = BTreeMap::new();
     let mut seen_inputs = HashSet::new();
     let mut reported_inputs = HashSet::new();
     for (index, input) in port_list(state, "inputs").iter().enumerate() {
@@ -503,7 +505,9 @@ fn check_state_fields(
             ));
             continue;
         }
-        let src_types = declared_port_types(src, "outputs");
+        let src_types = output_types_by_source
+            .entry(src_id)
+            .or_insert_with(|| declared_port_types(src, "outputs"));
         match src_types.get(src_output) {
             None => errors.push(format!(
                 "{noun} {id} input {name_repr} references output {} that {noun} {} does not declare",

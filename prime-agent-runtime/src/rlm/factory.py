@@ -132,8 +132,18 @@ FACTORY_SESSION_REQUIRED = "factory entries need a Prime Agent session (the spec
 _UNSET: Any = object()
 
 
+def _is_json_data(value: Any) -> bool:
+    """True when ``value`` survives a JSON round trip unchanged (no tuples,
+    non-string keys, or non-finite floats), so the spec the host checks is
+    the spec that runs."""
+    try:
+        return json.loads(json.dumps(value, allow_nan=False)) == value
+    except (TypeError, ValueError):
+        return False
+
+
 def check_factory_spec(
-    spec: Any = _UNSET, *, name: str | None = None, description: str | None = None
+    spec: Any = _UNSET, *, name: Any = _UNSET, description: Any = _UNSET
 ) -> list[str]:
     """The errors of a factory spec, then of a machine ``name`` and
     ``description`` when given, from the host's validator
@@ -141,13 +151,12 @@ def check_factory_spec(
     harness writes and exports; raises ``ValueError`` without a host."""
     from . import host_request_sync
 
+    if spec is not _UNSET and not _is_json_data(spec):
+        return ["factory spec must be JSON data: lists, objects with string keys, strings, finite numbers, booleans, null"]
     payload: dict[str, Any] = {}
-    if spec is not _UNSET:
-        payload["spec"] = spec
-    if name is not None:
-        payload["name"] = name
-    if description is not None:
-        payload["description"] = description
+    for key, value in (("spec", spec), ("name", name), ("description", description)):
+        if value is not _UNSET:
+            payload[key] = value
     try:
         return host_request_sync("factory.validate", payload)["errors"]
     except RuntimeError as error:

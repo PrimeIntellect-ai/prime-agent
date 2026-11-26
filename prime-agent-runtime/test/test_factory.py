@@ -8313,6 +8313,25 @@ class ExportMachineTest(unittest.TestCase):
         export_factory_spec(valid_machine(), out, name="sweep", description="Overwrite.", overwrite=True)
         self.assertIn("Overwrite.", out.read_text(encoding="utf-8"))
 
+    def test_a_spec_that_is_not_json_data_is_refused_before_the_host(self) -> None:
+        calls = len(FACTORY_VALIDATOR.calls)
+        tuple_dep = {"nodes": [node("a"), node("b", depends_on=("a",))]}
+        self.assertEqual(
+            factory_module.check_factory_spec(tuple_dep),
+            ["factory spec must be JSON data: lists, objects with string keys, strings, finite numbers, booleans, null"],
+        )
+        self.assertEqual(len(FACTORY_VALIDATOR.calls), calls)
+
+    def test_a_missing_export_name_reaches_the_validator(self) -> None:
+        export_factory_spec_name_none = lambda: export_factory_spec(  # noqa: E731
+            valid_machine(), self.out_dir / "n.MACHINE.md", name=None, description=None
+        )
+        FACTORY_VALIDATOR.errors = ["machine name must be a non-empty string"]
+        self.addCleanup(setattr, FACTORY_VALIDATOR, "errors", [])
+        with self.assertRaisesRegex(ValueError, "machine name must be a non-empty string"):
+            export_factory_spec_name_none()
+        self.assertEqual(FACTORY_VALIDATOR.calls[-1], {"spec": valid_machine(), "name": None, "description": None})
+
     def test_spec_export_refuses_with_the_validator_errors(self) -> None:
         # The spec, name, and description go to the host's validator together.
         FACTORY_VALIDATOR.errors = ["frontmatter description must be a single line"]

@@ -307,6 +307,8 @@ def _fail_pending_sync_host_requests() -> None:
     global _host_sync_closed
     _host_sync_closed = True
     for slot in list(_pending_host_sync.values()):
+        if slot[0].is_set():
+            continue  # its reply already arrived
         slot[1] = {"status": "error", "error": "host connection closed; host_request cannot be answered"}
         slot[0].set()
 
