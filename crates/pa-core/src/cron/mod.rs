@@ -877,6 +877,13 @@ mod tests {
     const BASE: u64 = 1_700_000_000_000; // 2023-11-14T22:13:20Z
 
     #[test]
+    fn malformed_timestamps_parse_to_none() {
+        assert!(parse_iso_millis("2026-11-25T").is_none());
+        assert!(parse_iso_millis("").is_none());
+        assert!(parse_iso_millis("not-a-time").is_none());
+    }
+
+    #[test]
     fn parse_one_shot_and_interval_schedules() {
         let (schedule, next) = parse_agent_cron_schedule("in 10m", BASE).unwrap();
         assert_eq!(schedule.kind, ScheduleKind::Once);

@@ -1566,6 +1566,55 @@ async fn a_pending_head_still_records_an_unrecorded_durable_checkpoint() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_pending_snapshot_keeps_its_place_when_a_winner_is_recorded() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a durable checkpoint, then two local
+    // pauses freeze pending ones on both sides of it in time: the older
+    // list is [durable, pending] when the winner is recorded.
+    let external = platform.external_checkpoint(&sandbox_id, true);
+    platform.state().pause_checkpoints_pending = true;
+    let pending = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let newest = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str()),
+        "the newest durable one restores"
+    );
+    assert!(
+        platform.state().checkpoints.contains_key(&pending),
+        "the time-newer pending snapshot survives the prune"
+    );
+    let record = manager.get("bot-a").unwrap();
+    let older = &record.older_checkpoint_ids;
+    let external_at = older
+        .iter()
+        .position(|id| id == &external)
+        .expect("the winner is recorded");
+    let pending_at = older
+        .iter()
+        .position(|id| id == &pending)
+        .expect("the pending snapshot stays recorded");
+    assert!(
+        external_at < pending_at,
+        "the winner sits before the time-newer pending snapshot"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_failed_install_fails_spawn_and_cleans_up() {
     for exit_code in [version::UNPUBLISHED_EXIT_CODE, version::NO_GUEST_EXIT_CODE] {
         let (_dir, platform, manager) = setup();
