@@ -432,7 +432,7 @@ async fn a_failed_print_run_still_drains_an_in_flight_refine() {
         messages: vec!["/refine".to_string(), "next".to_string()],
         file_args: Vec::new(),
         daemon_socket: None,
-        a2a_bind: crate::args::A2aBind::default(),
+        a2a: crate::args::A2aArgs::default(),
         list_models: None,
         initial_message: None,
         initial_images: Vec::new(),

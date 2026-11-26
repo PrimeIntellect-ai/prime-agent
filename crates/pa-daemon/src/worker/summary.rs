@@ -271,6 +271,30 @@ pub(crate) fn broadcast_custom_row_locked(
     }
 }
 
+/// Persist a goal state change made outside a turn, then announce it
+/// (`goal_update`): durable before the announcement.
+pub(crate) fn persist_and_emit_goal_update(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    goal: &Value,
+) {
+    let mut core = core.lock().unwrap();
+    if let Some(store) = core.store.as_mut() {
+        let _ = store.persist_entry(
+            "custom",
+            json!({
+                "customType": pa_core::goals::GOAL_STATE_CUSTOM_TYPE,
+                "data": goal,
+            }),
+        );
+    }
+    emit_worker_event_locked(
+        &mut core,
+        events,
+        json!({ "type": "goal_update", "goal": goal }),
+    );
+}
+
 pub(crate) fn emit_worker_event_with(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,

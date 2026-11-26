@@ -67,7 +67,6 @@ impl crate::mode::Runtime for PrintRuntime {
                     Ok(1)
                 }
             },
-            // A2A mode: an A2A JSON-RPC server over daemon sessions.
             AppMode::A2a => match run_a2a_mode(options) {
                 Ok(code) => Ok(code),
                 Err(error) => {
@@ -155,20 +154,6 @@ fn run_a2a_mode(options: &RunOptions) -> Result<i32, String> {
             Some(options.config.agent_dir.clone()),
         ),
     };
-    let bind_host = options
-        .a2a_bind
-        .host
-        .clone()
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    if !bind_host
-        .parse::<std::net::IpAddr>()
-        .is_ok_and(|ip| ip.is_loopback())
-        && bind_host != "localhost"
-    {
-        eprintln!(
-            "Warning: --mode a2a is binding {bind_host}: the bearer token authenticates but does not encrypt; put TLS in front of it."
-        );
-    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -183,12 +168,16 @@ fn run_a2a_mode(options: &RunOptions) -> Result<i32, String> {
         let (_, create) = headless_daemon_create(options)?;
         pa_daemon::a2a::run_daemon_attached_a2a_mode(pa_daemon::a2a::A2aOptions {
             socket_path,
-            bind_host,
-            bind_port: options.a2a_bind.port.unwrap_or(7800),
+            bind_host: options
+                .a2a
+                .host
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+            bind_port: options.a2a.port.unwrap_or(7800),
             bearer_token,
             minted_token_dir,
-            max_contexts: options.a2a_bind.max_contexts.unwrap_or(64),
-            public_url: options.a2a_bind.public_url.clone(),
+            max_contexts: options.a2a.max_contexts.unwrap_or(64),
+            public_url: options.a2a.public_url.clone(),
             product_version: crate::config::version().to_string(),
             create,
         })
@@ -202,7 +191,7 @@ fn run_a2a_mode(options: &RunOptions) -> Result<i32, String> {
 /// select, plus the session's cwd. The worker opens and leases the selected file
 /// itself. TS `isClientOwnedDaemonSession`: an ACP session is client-owned
 /// only for `--no-session`; a print session always is, so it ends with
-/// the run. An A2A context session follows the ACP rule.
+/// the run.
 pub(crate) fn headless_daemon_create(
     options: &RunOptions,
 ) -> Result<(std::path::PathBuf, pa_types::daemon::DaemonCommand), String> {

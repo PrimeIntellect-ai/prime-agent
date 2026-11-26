@@ -66,10 +66,10 @@ impl Mode {
     }
 }
 
-/// The `--mode a2a` bind flags (`--a2a-host`, `--a2a-port`). The bearer
-/// token is never a flag, so it stays out of process listings.
+/// The `--mode a2a` flags. The bearer token is never a flag, so it stays
+/// out of process listings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct A2aBind {
+pub struct A2aArgs {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub max_contexts: Option<usize>,
@@ -159,7 +159,7 @@ pub struct Args {
     pub version: bool,
     pub mode: Option<Mode>,
     pub daemon_socket: Option<String>,
-    pub a2a_bind: A2aBind,
+    pub a2a: A2aArgs,
     pub no_session: bool,
     pub fork: Option<String>,
     pub session_dir: Option<String>,
@@ -284,20 +284,20 @@ pub fn parse_args(args: &[String]) -> Args {
             "--daemon-socket" => {
                 result.daemon_socket = Some(require_value!(arg));
             }
-            "--a2a-host" => result.a2a_bind.host = Some(require_value!(arg)),
+            "--a2a-host" => result.a2a.host = Some(require_value!(arg)),
             "--a2a-port" => match require_value!(arg).parse::<u16>() {
-                Ok(port) => result.a2a_bind.port = Some(port),
+                Ok(port) => result.a2a.port = Some(port),
                 Err(_) => result
                     .diagnostics
                     .push(Diagnostic::error("--a2a-port must be a port number")),
             },
             "--a2a-max-contexts" => match require_value!(arg).parse::<usize>() {
-                Ok(max) if max > 0 => result.a2a_bind.max_contexts = Some(max),
+                Ok(max) if max > 0 => result.a2a.max_contexts = Some(max),
                 _ => result.diagnostics.push(Diagnostic::error(
                     "--a2a-max-contexts must be a positive number",
                 )),
             },
-            "--a2a-public-url" => result.a2a_bind.public_url = Some(require_value!(arg)),
+            "--a2a-public-url" => result.a2a.public_url = Some(require_value!(arg)),
             "--continue" | "-c" => result.continue_ = true,
             "--resume" | "-r" => match args.get(i + 1) {
                 Some(next)

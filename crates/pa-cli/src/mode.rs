@@ -119,7 +119,7 @@ pub struct RunOptions {
     pub messages: Vec<String>,
     pub file_args: Vec<String>,
     pub daemon_socket: Option<String>,
-    pub a2a_bind: crate::args::A2aBind,
+    pub a2a: crate::args::A2aArgs,
     pub list_models: Option<Option<String>>,
     /// The combined first prompt (stdin + @file text + first message).
     pub initial_message: Option<String>,

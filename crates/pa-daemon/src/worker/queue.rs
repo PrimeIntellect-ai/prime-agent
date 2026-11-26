@@ -2,8 +2,8 @@
 //! and queue recovery.
 use super::inbox_router::{delivered_notice_text, notice_text, shown_items, wake_delay};
 use super::{
-    emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Result, SessionCore,
-    Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE, AUTONOMOUS_QUEUE_KEY,
+    json, oneshot, Arc, Duration, EventPump, Mutex, Result, SessionCore, Value, VecDeque,
+    WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE, AUTONOMOUS_QUEUE_KEY,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -474,19 +474,7 @@ pub(crate) fn admit_goal_follow_up(
         crate::engine::GoalTurnEndWork::Continuation(follow_up) => (Lane::FollowUp, follow_up),
     };
     if let Some(goal) = &follow_up.goal_update {
-        {
-            let mut guard = core.lock().unwrap();
-            if let Some(store) = guard.store.as_mut() {
-                let _ = store.persist_entry(
-                    "custom",
-                    json!({
-                        "customType": pa_core::goals::GOAL_STATE_CUSTOM_TYPE,
-                        "data": goal,
-                    }),
-                );
-            }
-        }
-        emit_worker_event_with(core, events, json!({ "type": "goal_update", "goal": goal }));
+        super::persist_and_emit_goal_update(core, events, goal);
     }
     {
         let mut core = core.lock().unwrap();

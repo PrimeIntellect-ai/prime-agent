@@ -390,17 +390,22 @@ impl TurnRunner {
 
     /// The run's `agent_start`, tagged with its anchor row: the client's
     /// own admission id for an admitted prompt, or `continuation` for a row
-    /// that continues the session's own work. Clients that attribute runs
-    /// to their requests (the A2A mode) read the tags.
+    /// that continues the session's own work. An inbox wake that shows an
+    /// agent message brings a new delivery, so it is no continuation.
     fn agent_start_frame(&self, first: &QueuedItem) -> Value {
         let mut frame = json!({ "type": "agent_start" });
+        let agent_message_wake =
+            first.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY)
+                && self.inbox_arrivals.lock().unwrap().iter().any(|message| {
+                    message.class == pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE
+                });
         if let Some(client_id) = first
             .admission_id
             .as_deref()
             .and_then(|id| self.prompt_admissions.client_id(id))
         {
             frame["clientAdmissionId"] = json!(client_id);
-        } else if super::continues_session_work(first) {
+        } else if super::continues_session_work(first) && !agent_message_wake {
             frame["continuation"] = json!(true);
         }
         frame
@@ -1002,8 +1007,6 @@ impl TurnRunner {
                     // original `toolUse` turn_end, so the marker is the one
                     // wire fact that separates the aborted settle from a
                     // normal one.
-                    // A retried or continued run of the same delivery
-                    // carries the delivery's tags too.
                     EngineEvent::AgentStart => vec![agent_start.clone()],
                     EngineEvent::AgentEnd { messages, aborted } => {
                         let mut frame = json!({

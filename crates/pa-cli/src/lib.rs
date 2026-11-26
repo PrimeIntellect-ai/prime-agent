@@ -324,7 +324,7 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         initial_images,
         file_args: parsed.file_args.clone(),
         daemon_socket: parsed.daemon_socket.clone(),
-        a2a_bind: parsed.a2a_bind.clone(),
+        a2a: parsed.a2a.clone(),
         list_models: parsed.list_models,
         verbose: parsed.verbose,
         offline: parsed.offline,

@@ -3,13 +3,8 @@
 //! turn, then the idle wait with RLM quiescence, so the follow-up turns of
 //! the task's child agents and background cells belong to the task.
 //!
-//! The worker tags each run's `agent_start` with its anchor: the client's
-//! own admission id for a prompt, or `continuation` for a row that continues
-//! the session's own work (goal and autonomous continuations, notices about
-//! the session's own children and jobs). A run counts toward the running
-//! task when it carries the task's admission id or is a continuation; other
-//! runs (another client's prompt, an agent message, a scheduled fire) never
-//! reach the task's reply.
+//! Only runs whose `agent_start` carries the task's admission id or the
+//! `continuation` tag reach the task.
 //!
 //! Between tasks the server detaches from the session, so the daemon's idle
 //! passivation can reclaim the worker; the next task re-opens the session
@@ -34,12 +29,10 @@ use crate::acp::daemon::{
     release_session_input_pause, stop_session_work, summary_str, DaemonLink, LinkFrame,
 };
 
-/// The launch options of `--mode a2a`.
 pub struct A2aOptions {
     pub socket_path: PathBuf,
     pub bind_host: String,
     pub bind_port: u16,
-    /// Required on every route except the public agent card.
     pub bearer_token: String,
     /// Set when the token was minted for this run: the agent dir its
     /// owner-only token file is written to once the listener binds.
@@ -55,7 +48,6 @@ pub struct A2aOptions {
     pub create: DaemonCommand,
 }
 
-/// One served request's answer.
 pub(crate) enum Reply {
     Json(Value),
     /// An SSE stream: the request id, the task snapshot that opens it, and
@@ -63,7 +55,6 @@ pub(crate) enum Reply {
     Stream(Value, Box<Task>, broadcast::Receiver<StreamResponse>),
 }
 
-/// The running task of a context.
 struct Running {
     task_id: String,
     admission_id: String,
@@ -72,6 +63,9 @@ struct Running {
     /// The failure of the task's latest run (a failed goal or autonomous
     /// continuation fails the task).
     run_error: Option<String>,
+    /// The task's own prompt run has started: continuations before it
+    /// belong to whatever ran ahead of the task.
+    started: bool,
 }
 
 struct Context {
@@ -94,7 +88,6 @@ struct State {
     contexts: HashMap<String, Context>,
     /// Daemon active session id -> context id (the event routing).
     sessions: HashMap<String, String>,
-    /// The server is exiting: no new task is admitted.
     shutting_down: bool,
 }
 
@@ -103,6 +96,8 @@ pub(crate) struct Server {
     state: Mutex<State>,
     create: DaemonCommand,
     max_contexts: usize,
+    /// Held while a new context is counted against the cap and admitted.
+    new_contexts: tokio::sync::Mutex<()>,
 }
 
 impl Server {
@@ -116,6 +111,7 @@ impl Server {
             state: Mutex::new(State::default()),
             create,
             max_contexts,
+            new_contexts: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -160,10 +156,7 @@ impl Server {
         });
     }
 
-    /// Map one session event onto the running task of its context: assistant
-    /// text deltas stream as artifact chunks, finished assistant messages
-    /// build the reply, and a failed run is recorded. Only runs that count
-    /// toward the task (see the module docs) reach it.
+    /// Only runs that count toward the running task reach it.
     fn on_session_event(&self, frame: &Value) {
         let session = frame
             .get("activeSessionId")
@@ -189,9 +182,12 @@ impl Server {
         };
         match event.get("type").and_then(Value::as_str) {
             Some("agent_start") => {
-                context.crediting = event.get("clientAdmissionId").and_then(Value::as_str)
-                    == Some(running.admission_id.as_str())
-                    || event.get("continuation").and_then(Value::as_bool) == Some(true);
+                let own = event.get("clientAdmissionId").and_then(Value::as_str)
+                    == Some(running.admission_id.as_str());
+                running.started |= own;
+                context.crediting = own
+                    || running.started
+                        && event.get("continuation").and_then(Value::as_bool) == Some(true);
                 if context.crediting {
                     running.run_error = None;
                 }
@@ -253,7 +249,6 @@ impl Server {
         }
     }
 
-    /// One JSON-RPC request.
     pub(crate) async fn dispatch(self: &Arc<Self>, request: jsonrpc::Request) -> Reply {
         let jsonrpc::Request { id, method, params } = request;
         match method.as_str() {
@@ -320,9 +315,8 @@ impl Server {
         }
     }
 
-    /// `SendMessage` / `SendStreamingMessage`: admit a task on the message's
-    /// context (a new context when it names none) and run it detached
-    /// from the HTTP request, so a client disconnect never strands it.
+    /// The task runs detached from the HTTP request, so a client disconnect
+    /// never strands it.
     async fn send_message(self: &Arc<Self>, id: Value, params: Value, streaming: bool) -> Reply {
         let request = match parse::<SendMessageRequest>(&id, params) {
             Ok(request) => request,
@@ -369,8 +363,17 @@ impl Server {
             .context_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let new_context = !self.state().contexts.contains_key(&context_id);
-        if new_context && self.live_contexts().await >= self.max_contexts {
+        // New contexts are admitted one at a time, so the count and the
+        // admission cannot interleave with another new context's.
+        let new_context_gate = if self.state().contexts.contains_key(&context_id) {
+            None
+        } else {
+            Some(self.new_contexts.lock().await)
+        };
+        if new_context_gate.is_some()
+            && !self.state().contexts.contains_key(&context_id)
+            && self.live_contexts().await >= self.max_contexts
+        {
             return Reply::Json(server_error(
                 &id,
                 "CONTEXT_LIMIT_REACHED",
@@ -410,6 +413,7 @@ impl Server {
             let terminal = state.tasks.terminal_watch(&task_id).expect("admitted");
             (first, frames, terminal)
         };
+        drop(new_context_gate);
         tokio::spawn(Arc::clone(self).run_task(task_id.clone(), context_id, text));
         if streaming {
             return Reply::Stream(id, Box::new(first), frames);
@@ -424,7 +428,7 @@ impl Server {
         })
     }
 
-    /// A message naming a `taskId` (spec 3.4.3). Its context is the task's;
+    /// A message naming a `taskId`. Its context is the task's;
     /// a different `contextId` is rejected. A task is one turn here, so
     /// continuing one is refused: a terminal task takes no more messages,
     /// and a running one has no mid-turn input surface.
@@ -460,7 +464,7 @@ impl Server {
             .link
             .request(DaemonCommand::List {
                 id: None,
-                all: Some(true),
+                all: None,
                 cwd: None,
                 session_dir: None,
                 include_client_owned: Some(true),
@@ -497,14 +501,7 @@ impl Server {
     /// One task's flow: wait for the context's turn, run the prompt, and
     /// settle, unless `CancelTask` took the verdict.
     async fn run_task(self: Arc<Self>, task_id: String, context_id: String, text: String) {
-        let Some(turn) = self
-            .state()
-            .contexts
-            .get(&context_id)
-            .map(|context| Arc::clone(&context.turn))
-        else {
-            return;
-        };
+        let turn = Arc::clone(&self.state().contexts[&context_id].turn);
         let _turn = turn.lock().await;
         let Some(mut terminal) = self.state().tasks.terminal_watch(&task_id) else {
             return;
@@ -544,19 +541,15 @@ impl Server {
                 })
                 .await;
         }
-        if let Some(context) = self.state().contexts.get_mut(&context_id) {
-            context.running = None;
-            context.crediting = false;
-        }
+        let mut state = self.state();
+        let context = state.contexts.get_mut(&context_id).expect("contexts stay");
+        context.running = None;
+        context.crediting = false;
     }
 
     /// The context's current daemon session id (a worker re-host moves it).
     fn current_session(&self, context_id: &str) -> String {
-        self.state()
-            .contexts
-            .get(context_id)
-            .map(|context| context.active_session_id.clone())
-            .unwrap_or_default()
+        self.state().contexts[context_id].active_session_id.clone()
     }
 
     /// Host the session, send the prompt, and wait for the run to settle.
@@ -582,6 +575,7 @@ impl Server {
                 admission_id: admission_id.clone(),
                 cancel_requested: false,
                 run_error: None,
+                started: false,
             });
             // Queued under the lock: a cancel that sees the task running
             // sends its stop after this prompt.
@@ -653,9 +647,9 @@ impl Server {
     }
 
     /// `CancelTask`: a queued task settles CANCELED at once. A running one
-    /// gets its session stopped (see [`stop_task_work`]) and settles
-    /// CANCELED, or FAILED when the stop failed. A repeated cancel while the
-    /// stop runs waits for it and answers the same task (spec 3.3.1).
+    /// gets its session stopped and settles CANCELED, or FAILED when the
+    /// stop failed. A repeated cancel while the stop runs waits for it and
+    /// answers the same task.
     async fn cancel_task(self: &Arc<Self>, task_id: &str) -> Result<Task, A2aError> {
         let stop = {
             let mut guard = self.state();
@@ -733,12 +727,8 @@ impl Server {
     }
 }
 
-/// Stop a canceled task's work on its session: retire the goal and
-/// autonomous loops, then, under an input pause (so notices that arrive
-/// meanwhile cannot hold the idle wait or start a turn), the ACP mode's stop
-/// (abort and clear the queue, cancel the owned admission, wait for idle,
-/// cancel the child agents); then wait for the children to settle and drop
-/// the notices they queued.
+/// Runs under an input pause, so notices that arrive meanwhile cannot hold
+/// the idle wait or start a turn.
 async fn stop_task_work(
     link: &Arc<DaemonLink>,
     session: &str,
@@ -861,6 +851,11 @@ pub async fn run_daemon_attached_a2a_mode(options: A2aOptions) -> anyhow::Result
     let listener =
         tokio::net::TcpListener::bind((options.bind_host.as_str(), options.bind_port)).await?;
     let bound = listener.local_addr()?;
+    if !bound.ip().is_loopback() {
+        eprintln!(
+            "Warning: --mode a2a is listening on {bound}: the bearer token authenticates but does not encrypt; put TLS in front of it."
+        );
+    }
     // Written only once this run owns the address, named for it, and
     // removed at every graceful exit.
     let token_file = options.minted_token_dir.map(|dir| {

@@ -1,11 +1,6 @@
-//! The HTTP surface of the JSON-RPC binding (spec section 9): the public
-//! agent card at `/.well-known/agent-card.json`, one JSON-RPC request per
-//! `POST /`, and SSE for the streaming methods.
-//!
-//! Every route but the card requires the bearer token (a 401 carries the
-//! `WWW-Authenticate: Bearer` challenge). A request with an `Origin` header
-//! is refused on every bind (no browser client exists; no CORS is served),
-//! and a loopback bind refuses a non-loopback `Host` (DNS rebinding).
+//! Every route but the agent card needs the bearer token. `Origin` is
+//! refused (no browser client, no CORS), and a loopback bind refuses a
+//! foreign `Host` (DNS rebinding).
 
 use std::sync::Arc;
 
@@ -21,7 +16,6 @@ use super::jsonrpc::{self, A2aError};
 use super::server::{Reply, Server};
 use super::types::{StreamResponse, Task};
 
-/// The media types of the card: text in, markdown out.
 pub(crate) const INPUT_MODE: &str = "text/plain";
 const OUTPUT_MODE: &str = "text/markdown";
 const CARD_PATH: &str = "/.well-known/agent-card.json";
@@ -29,7 +23,7 @@ const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 type Body = BoxBody<Bytes, std::io::Error>;
 
-/// Accept connections until the listener fails.
+/// Serve forever; a failed accept backs off and retries.
 pub(crate) async fn serve(
     listener: tokio::net::TcpListener,
     server: Arc<Server>,
@@ -139,7 +133,6 @@ async fn handle(
         return Ok(plain(StatusCode::NOT_FOUND, "not found"));
     }
     let content_type = header(hyper::header::CONTENT_TYPE);
-    // The version service parameter: a header, or a query parameter.
     let version = Some(header(hyper::header::HeaderName::from_static(
         "a2a-version",
     )))
@@ -182,7 +175,7 @@ async fn handle(
             Some(json!({ "supported": "application/json" })),
         )));
     }
-    // Major.Minor only; a missing version means 0.3 (spec 3.6).
+    // A missing version means 0.3, which is not served.
     let mut parts = version.split('.');
     if (parts.next(), parts.next()) != (Some("1"), Some("0")) {
         return Ok(json_response(&jsonrpc::a2a_error(
@@ -271,8 +264,6 @@ fn digest(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
 }
 
-/// The agent card (spec 8): what this server implements and nothing more.
-/// Its interface URL is the public URL, or else follows the client's `Host`.
 fn agent_card(url: &str, product_version: &str) -> Value {
     json!({
         "name": "Prime Agent",
@@ -303,7 +294,6 @@ fn agent_card(url: &str, product_version: &str) -> Value {
     })
 }
 
-/// The card with an `ETag`, answering a matching `If-None-Match` with 304.
 fn card_response(url: &str, product_version: &str, if_none_match: &str) -> Response<Body> {
     let body = agent_card(url, product_version).to_string();
     let hash = u64::from_be_bytes(digest(&body)[..8].try_into().expect("eight bytes"));

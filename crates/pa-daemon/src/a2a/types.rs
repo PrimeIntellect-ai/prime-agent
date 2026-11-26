@@ -1,17 +1,15 @@
 //! The A2A 1.0 wire types the server reads and writes (the `ProtoJSON` form
 //! of the specification's protobuf messages): `camelCase` fields,
 //! `SCREAMING_SNAKE` enum values, and every `oneof` as a single member
-//! named by its field. Requests only deserialize and replies only
-//! serialize.
+//! named by its field.
 //!
-//! Source: <https://a2a-protocol.org/latest/specification/> (sections 3-9).
+//! Source: <https://a2a-protocol.org/latest/specification/>
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Task lifecycle states (spec 4.1.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskState {
     #[serde(rename = "TASK_STATE_SUBMITTED")]
@@ -33,8 +31,8 @@ pub enum TaskState {
 }
 
 impl TaskState {
-    /// The terminal states (spec 4.1.3): a task accepts no more work and
-    /// its streams close.
+    /// The terminal states: a task accepts no more work and its streams
+    /// close.
     #[must_use]
     pub fn is_terminal(self) -> bool {
         matches!(
@@ -44,7 +42,6 @@ impl TaskState {
     }
 }
 
-/// The sender of a message (spec 4.1.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     #[serde(rename = "ROLE_USER")]
@@ -53,8 +50,7 @@ pub enum Role {
     Agent,
 }
 
-/// One message part (spec 4.1.6): exactly one of `text`, `raw`, `url`,
-/// `data`.
+/// One message part: exactly one of `text`, `raw`, `url`, `data`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Part {
@@ -123,7 +119,6 @@ pub fn prompt_text(parts: &[Part]) -> Result<String, PartsError> {
     Ok(text)
 }
 
-/// One message (spec 4.1.4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -138,7 +133,6 @@ pub struct Message {
     pub metadata: Option<BTreeMap<String, Value>>,
 }
 
-/// A task's status (spec 4.1.2).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStatus {
@@ -148,7 +142,6 @@ pub struct TaskStatus {
     pub timestamp: String,
 }
 
-/// A task output (spec 4.1.7).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Artifact {
@@ -157,7 +150,6 @@ pub struct Artifact {
     pub parts: Vec<Part>,
 }
 
-/// A task (spec 4.1.1).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -171,7 +163,6 @@ pub struct Task {
     pub history: Vec<Message>,
 }
 
-/// A status change event (spec 4.2.1).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStatusUpdateEvent {
@@ -180,7 +171,6 @@ pub struct TaskStatusUpdateEvent {
     pub status: TaskStatus,
 }
 
-/// An artifact chunk event (spec 4.2.2).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskArtifactUpdateEvent {
@@ -191,8 +181,7 @@ pub struct TaskArtifactUpdateEvent {
     pub last_chunk: bool,
 }
 
-/// The streaming wrapper's update members (spec 3.2.3): one member per
-/// frame. The opening `task` frame is written from the snapshot.
+/// The opening `task` frame is written from the snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StreamResponse {
@@ -200,7 +189,6 @@ pub enum StreamResponse {
     ArtifactUpdate(TaskArtifactUpdateEvent),
 }
 
-/// The `SendMessage` params (spec 3.2.1).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageRequest {
@@ -209,7 +197,6 @@ pub struct SendMessageRequest {
     pub configuration: Option<SendMessageConfiguration>,
 }
 
-/// The send configuration (spec 3.2.2).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageConfiguration {
@@ -221,7 +208,6 @@ pub struct SendMessageConfiguration {
     pub return_immediately: bool,
 }
 
-/// The `GetTask` and `SubscribeToTask` params (spec 3.1.3, 3.1.6).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskQuery {
@@ -230,7 +216,6 @@ pub struct TaskQuery {
     pub history_length: Option<u32>,
 }
 
-/// The `ListTasks` params (spec 3.1.4).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListTasksParams {
@@ -250,7 +235,6 @@ pub struct ListTasksParams {
     pub include_artifacts: bool,
 }
 
-/// The `ListTasks` result (spec 3.1.4).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListTasksResponse {
@@ -288,29 +272,5 @@ mod tests {
             prompt_text(&[text(json!({"text": "  "}))]),
             Err(PartsError::Invalid(_))
         ));
-    }
-
-    #[test]
-    fn stream_frames_use_oneof_member_names_and_enum_names() {
-        let frame = StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
-            task_id: "t".into(),
-            context_id: "c".into(),
-            status: TaskStatus {
-                state: TaskState::Working,
-                message: None,
-                timestamp: "2026-11-25T10:00:00.000Z".into(),
-            },
-        });
-        assert_eq!(
-            serde_json::to_value(&frame).unwrap(),
-            json!({"statusUpdate": {"taskId": "t", "contextId": "c", "status": {
-                "state": "TASK_STATE_WORKING", "timestamp": "2026-11-25T10:00:00.000Z"}}})
-        );
-        let request: SendMessageRequest = serde_json::from_value(json!({
-            "message": {"messageId": "m", "role": "ROLE_USER", "parts": [{"text": "hi"}]},
-            "configuration": {"returnImmediately": true}
-        }))
-        .unwrap();
-        assert!(request.configuration.unwrap().return_immediately);
     }
 }

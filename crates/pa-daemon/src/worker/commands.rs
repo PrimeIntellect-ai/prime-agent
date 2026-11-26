@@ -749,9 +749,8 @@ impl Worker {
         response_success(None, "abort_and_clear_queue", cleared.data)
     }
 
-    /// `retire_continuations`: pause an active goal (durably) and drop the
-    /// queued goal and autonomous continuations. The A2A cancel sends it so
-    /// a stopped task's loop does not resume on the context's next task.
+    /// The A2A cancel sends it so a stopped task's loop does not resume on
+    /// the context's next task.
     async fn handle_retire_continuations(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("retire_continuations") {
             return response;
@@ -761,16 +760,7 @@ impl Worker {
             None => None,
         };
         if let Some(goal) = goal {
-            if let Some(store) = self.core.lock().unwrap().store.as_mut() {
-                let _ = store.persist_entry(
-                    "custom",
-                    json!({
-                        "customType": pa_core::goals::GOAL_STATE_CUSTOM_TYPE,
-                        "data": goal,
-                    }),
-                );
-            }
-            self.emit_worker_event(json!({ "type": "goal_update", "goal": goal }));
+            super::persist_and_emit_goal_update(&self.core, &self.events, &goal);
         }
         response_success(None, "retire_continuations", None)
     }

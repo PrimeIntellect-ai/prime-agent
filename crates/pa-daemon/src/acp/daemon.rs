@@ -58,7 +58,7 @@ pub(crate) enum LinkFrame {
     /// re-broadcasts to every client (`heartbeats_changed`).
     HeartbeatsChanged,
     /// A worker re-host moved an attached session to a new active id
-    /// (`session_binding`); the client re-attaches under the new id.
+    /// (`session_binding`).
     SessionBinding(Value),
 }
 
@@ -247,10 +247,7 @@ impl DaemonLink {
     /// link close ends the wait (turn-long commands — declared
     /// divergence, TS caps them at 24 h; the link-close signal is the
     /// liveness bound here, not a timer).
-    pub(crate) async fn request_until_close(
-        &self,
-        command: DaemonCommand,
-    ) -> anyhow::Result<DaemonResponse> {
+    async fn request_until_close(&self, command: DaemonCommand) -> anyhow::Result<DaemonResponse> {
         self.exchange(command, None).await
     }
 
@@ -1000,8 +997,7 @@ async fn run_cancel_stop(
 
 /// TS `stopSessionWork`: abort the worker's running and queued work, stop
 /// the owned admission (a prompt sent before the stop but committed after
-/// the abort), wait the idle, then cancel the RLM children. The A2A mode's
-/// `CancelTask` runs the same stop.
+/// the abort), wait the idle, then cancel the RLM children.
 pub(crate) async fn stop_session_work(
     link: &Arc<DaemonLink>,
     daemon_session_id: &str,

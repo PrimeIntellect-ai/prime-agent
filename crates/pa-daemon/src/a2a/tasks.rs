@@ -122,7 +122,6 @@ impl TaskEntry {
     }
 }
 
-/// Why a subscription was refused.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SubscribeError {
     NotFound,
@@ -195,7 +194,6 @@ impl Tasks {
         self.entries.get(id).map(|entry| entry.terminal.subscribe())
     }
 
-    /// An assistant message started.
     pub fn assistant_message_start(&mut self, id: &str) {
         if let Some(entry) = self.live(id) {
             entry.separator = !entry.streamed.is_empty();
@@ -303,7 +301,6 @@ impl Tasks {
         ))
     }
 
-    /// The live (non-terminal) tasks.
     pub fn live_ids(&self) -> Vec<String> {
         self.entries
             .iter()

@@ -482,15 +482,17 @@ impl Supervisor {
 }
 
 /// The worker's admission registry: admission id -> status (the TS
-/// daemon-mode `promptAdmissions` map). Shared with the turn runner,
-/// which clears an admitted prompt when its turn settles.
+/// daemon-mode `promptAdmissions` map), plus the client's own admission id
+/// behind a supervisor-assigned one (the run's `agent_start` echoes it).
+/// Shared with the turn runner, which clears an admitted prompt when its
+/// turn settles.
 #[derive(Default, Clone)]
 pub(crate) struct WorkerAdmissions {
-    admissions: Arc<Mutex<HashMap<String, AdmissionStatus>>>,
-    /// The client's own admission id behind each supervisor-assigned one:
-    /// the run's `agent_start` echoes it to the client that sent the prompt.
-    client_ids: Arc<Mutex<HashMap<String, String>>>,
+    admissions: Arc<Mutex<HashMap<String, WorkerAdmission>>>,
 }
+
+/// One admission's status and the client's own id behind it.
+type WorkerAdmission = (AdmissionStatus, Option<String>);
 
 impl WorkerAdmissions {
     pub(crate) fn new() -> Self {
@@ -501,22 +503,19 @@ impl WorkerAdmissions {
         self.admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(admission_id.to_string(), AdmissionStatus::Waiting);
-        if let Some(client_id) = client_id {
-            self.client_ids
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(admission_id.to_string(), client_id.to_string());
-        }
+            .insert(
+                admission_id.to_string(),
+                (AdmissionStatus::Waiting, client_id.map(str::to_string)),
+            );
     }
 
     /// The client's own id for one admission, when its prompt named one.
     pub(crate) fn client_id(&self, admission_id: &str) -> Option<String> {
-        self.client_ids
+        self.admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(admission_id)
-            .cloned()
+            .and_then(|(_, client_id)| client_id.clone())
     }
 
     /// Admission at prompt enqueue: a waiting id becomes owned. A cancelled
@@ -527,22 +526,18 @@ impl WorkerAdmissions {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match admissions.get_mut(admission_id) {
-            Some(status @ AdmissionStatus::Waiting) => {
+            Some((status @ AdmissionStatus::Waiting, _)) => {
                 *status = AdmissionStatus::Owned;
                 true
             }
-            Some(AdmissionStatus::Owned) => true,
-            Some(AdmissionStatus::Cancelled) | None => false,
+            Some((AdmissionStatus::Owned, _)) => true,
+            Some((AdmissionStatus::Cancelled, _)) | None => false,
         }
     }
 
     /// The prompt settled: its admission clears (TS `clearAdmission`).
     pub(crate) fn clear(&self, admission_id: &str) {
         self.admissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(admission_id);
-        self.client_ids
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(admission_id);
@@ -558,7 +553,7 @@ impl WorkerAdmissions {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match admissions.get_mut(admission_id) {
             None => None,
-            Some(status) => {
+            Some((status, _)) => {
                 if *status == AdmissionStatus::Waiting {
                     *status = AdmissionStatus::Cancelled;
                 }

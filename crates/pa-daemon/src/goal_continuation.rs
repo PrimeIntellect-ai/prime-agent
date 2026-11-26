@@ -76,8 +76,8 @@ impl AgentSessionEngine {
     }
 
     /// Retire the session's continuations: clear the autonomous one, drop
-    /// the queued goal contexts, and pause an active goal. Returns the
-    /// changed goal state for the caller to persist and publish.
+    /// the queued goal contexts, and pause an active goal. Returns the paused
+    /// goal's state for the caller to persist and publish.
     pub(crate) async fn retire_continuations(&self) -> Option<serde_json::Value> {
         use crate::engine::SessionEngine as _;
         self.clear_autonomous_continuations();
@@ -85,6 +85,9 @@ impl AgentSessionEngine {
         let live = self.live_handles()?;
         let state = {
             let mut driver = live.goal.driver.lock().await;
+            if driver.state().status != pa_core::goals::GoalStatus::Active {
+                return None;
+            }
             let mut session = live.goal.session.lock().await;
             if let Err(error) =
                 driver.pause(&mut session, "Paused because its A2A task was canceled")

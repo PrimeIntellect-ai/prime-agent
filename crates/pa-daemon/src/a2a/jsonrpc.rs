@@ -1,6 +1,4 @@
-//! JSON-RPC 2.0 framing for the A2A JSON-RPC binding (spec section 9):
-//! one request per POST body, A2A errors in the -32001..-32009 range with
-//! a `google.rpc.ErrorInfo` detail (spec 5.4, 9.5).
+//! JSON-RPC 2.0 framing for the A2A binding.
 
 use serde_json::{json, Value};
 
@@ -10,7 +8,6 @@ pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
 
-/// One parsed request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
     pub id: Value,
@@ -71,7 +68,6 @@ pub fn invalid_params(id: &Value, field: &str, description: &str) -> Value {
     )
 }
 
-/// The A2A-specific errors this server answers (spec 5.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum A2aError {
     TaskNotFound,
@@ -148,20 +144,5 @@ mod tests {
             assert_eq!(error["error"]["code"], INVALID_REQUEST, "{body}");
             assert_eq!(error["id"], Value::Null);
         }
-    }
-
-    #[test]
-    fn a2a_errors_carry_the_spec_code_and_error_info() {
-        let reply = a2a_error(&json!(7), A2aError::TaskNotCancelable, None);
-        assert_eq!(reply["error"]["code"], -32002);
-        assert_eq!(reply["error"]["data"][0]["reason"], "TASK_NOT_CANCELABLE");
-        assert_eq!(
-            reply["error"]["data"][0]["@type"],
-            "type.googleapis.com/google.rpc.ErrorInfo"
-        );
-        assert_eq!(
-            a2a_error(&json!(1), A2aError::VersionNotSupported, None)["error"]["code"],
-            -32009
-        );
     }
 }

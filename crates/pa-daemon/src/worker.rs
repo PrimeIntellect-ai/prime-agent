@@ -51,8 +51,8 @@ use create::{active_session_id_of, worker_server_capabilities};
 #[allow(unused_imports)]
 pub(crate) use summary::{
     broadcast_custom_row_locked, compact_action_label, emit_worker_event_locked,
-    emit_worker_event_with, persist_custom_row, push_roster_delta, session_snapshot,
-    session_summary, RosterPushContext, SummaryInputs,
+    emit_worker_event_with, persist_and_emit_goal_update, persist_custom_row, push_roster_delta,
+    session_snapshot, session_summary, RosterPushContext, SummaryInputs,
 };
 use turn::TurnRunner;
 
