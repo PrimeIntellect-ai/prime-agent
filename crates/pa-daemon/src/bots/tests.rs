@@ -3124,8 +3124,8 @@ async fn the_follow_sync_adopts_the_guests_model() {
         "the file on disk carries the model"
     );
 
-    // An unchanged summary writes nothing new; one without a model keeps
-    // the record's.
+    // An unchanged summary writes nothing new; a "default" (unset) level
+    // keeps the record's thinking; one without a model keeps the model.
     manager
         .adopt_guest_model(
             "bot-a",
@@ -3135,9 +3135,12 @@ async fn the_follow_sync_adopts_the_guests_model() {
             }),
         )
         .unwrap();
+    let record = manager.get("bot-a").unwrap();
+    assert_eq!(record.model.as_deref(), Some("openai/model-b"));
     assert_eq!(
-        manager.get("bot-a").unwrap().model.as_deref(),
-        Some("openai/model-b")
+        record.thinking.as_deref(),
+        Some("high"),
+        "a default level keeps the record's thinking"
     );
     manager
         .adopt_guest_model("bot-a", &serde_json::json!({ "model": null }))
@@ -3147,4 +3150,30 @@ async fn the_follow_sync_adopts_the_guests_model() {
         Some("openai/model-b"),
         "a summary without a model leaves the record alone"
     );
+}
+
+/// A lifecycle save of a snapshot taken before a model adoption keeps the
+/// adopted model: the save merges the registry's current model and thinking
+/// (only the adoption changes them, under the registry lock), so a stale
+/// snapshot cannot revert the guest's live choice.
+#[tokio::test(start_paused = true)]
+async fn a_stale_lifecycle_save_keeps_the_adopted_model() {
+    let (_dir, _platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+
+    // The snapshot a lifecycle operation took before the adoption.
+    let stale = manager.get("bot-a").unwrap();
+    manager
+        .adopt_guest_model(
+            "bot-a",
+            &serde_json::json!({
+                "model": { "id": "model-b", "provider": "openai" },
+                "thinkingLevel": "high",
+            }),
+        )
+        .unwrap();
+    manager.save(stale).unwrap();
+    let record = manager.get("bot-a").unwrap();
+    assert_eq!(record.model.as_deref(), Some("openai/model-b"));
+    assert_eq!(record.thinking.as_deref(), Some("high"));
 }

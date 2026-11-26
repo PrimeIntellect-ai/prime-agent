@@ -645,6 +645,10 @@ impl BotManager {
         let Some(record) = registry.get(bot_id) else {
             return Ok(());
         };
+        // A `"default"` (unset) level keeps the record's thinking: the
+        // summary cannot tell a deliberate clear from never-set, and the
+        // record's seeds a new session.
+        let thinking = thinking.or_else(|| record.thinking.clone());
         if record.model == model && record.thinking == thinking {
             return Ok(());
         }
@@ -1181,8 +1185,11 @@ impl BotManager {
     /// Persist `record`. A lifecycle operation saves a snapshot taken before
     /// its awaits, so a newer settled-turn time from [`Self::record_turn`] wins.
     /// A status change stamps `status_since`, and a running interval that ends
-    /// adds to `running_ms`.
-    fn save(&self, record: BotRecord) -> Result<()> {
+    /// adds to `running_ms`. The model and thinking merge from the current
+    /// record: only the guest-model adoption changes them, under the registry
+    /// lock, so a stale snapshot never reverts an adopted choice. The bots
+    /// tests drive a stale snapshot through it.
+    pub(super) fn save(&self, record: BotRecord) -> Result<()> {
         self.save_closing(record, false)
     }
 
@@ -1200,6 +1207,12 @@ impl BotManager {
         let current = registry.get(&record.bot_id);
         if let Some(current) = current {
             record.last_turn_at = record.last_turn_at.max(current.last_turn_at);
+            // The model and thinking change only through the guest-model
+            // adoption, which writes under this lock: a lifecycle snapshot
+            // taken before an adoption must not overwrite the adopted
+            // choice with the stale one.
+            record.model = current.model.clone();
+            record.thinking = current.thinking.clone();
         }
         (record.status_since, record.running_ms) = match current {
             // A record from before the stamp counts from its first save.
