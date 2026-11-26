@@ -254,6 +254,7 @@ async def spawn(
     kind: str | None = None,
     target: str | None = None,
     github: bool | None = None,
+    bots: bool | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -275,6 +276,9 @@ async def spawn(
     ``target`` sends the byte-identical wire payload.
     ``github`` (sandbox targets only) turns the bot's GitHub access on or off;
     when omitted, the ``bots.github`` setting decides (default on).
+    ``bots`` (sandbox targets only, default false) lets the bot spawn its own
+    bots; the owner's daemon injects its sandbox API key through a platform
+    header rule, and the bots nest two levels deep.
     """
     return await _spawn(
         prompt,
@@ -285,6 +289,7 @@ async def spawn(
         kind=kind,
         target=target,
         github=github,
+        bots=bots,
     )
 
 
@@ -299,6 +304,7 @@ async def _spawn(
     factory: dict[str, str] | None = None,
     kind: str | None = None,
     github: bool | None = None,
+    bots: bool | None = None,
 ) -> RLMSpawnHandle:
     """``spawn`` plus the factory executor's run tag (``{runId, specId,
     stateId}``), which the host records on the child's ledger spawn edge."""
@@ -308,6 +314,8 @@ async def _spawn(
         raise TypeError(f"target must be str, got {type(target).__name__}")
     if github is not None and not isinstance(github, bool):
         raise TypeError(f"github must be bool, got {type(github).__name__}")
+    if bots is not None and not isinstance(bots, bool):
+        raise TypeError(f"bots must be bool, got {type(bots).__name__}")
     kwargs: dict[str, Any] = {"name": name}
     if model is not None:
         kwargs["model"] = model
@@ -323,6 +331,8 @@ async def _spawn(
         kwargs["kind"] = kind
     if github is not None:
         kwargs["github"] = github
+    if bots is not None:
+        kwargs["bots"] = bots
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     handle = _spawn_handle_from_payload(payload)

@@ -88,7 +88,7 @@ The following programmatic tools are available in the REPL for a2a communication
 
 ## Bots
 
-A bot is a standing subagent in its own Prime sandbox, at the owner's prime-agent version. Spawn one with `target="sandbox"` only after the user runs `/bots on`; never change that setting. Use it like a child. Delivery is at most once; an uncertain send is not resent. It pauses 2 minutes after a settled turn. Its git and `gh` act as the owner unless spawned with `github=False`. `rlm.delete_subagent` also deletes its sandbox.
+A bot is a standing subagent in its own Prime sandbox, at the owner's prime-agent version. Spawn one with `target="sandbox"` only after the user runs `/bots on`; never change that setting. Use it like a child. Delivery is at most once; an uncertain send is not resent. It pauses 2 minutes after a settled turn. Its git and `gh` act as the owner unless spawned with `github=False`. Spawn with `bots=True` to let a bot spawn bots (two levels deep). `rlm.delete_subagent` also deletes its sandbox.
 
 ## Continual Harness
 

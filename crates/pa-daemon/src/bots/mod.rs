@@ -16,6 +16,7 @@ pub mod ledger;
 pub mod link;
 pub mod logins;
 pub mod manager;
+pub mod nested;
 pub mod platform;
 pub mod registry;
 pub mod relay;
@@ -52,6 +53,11 @@ pub const BOT_IMAGE_ENV: &str = "PRIME_AGENT_BOT_IMAGE";
 pub const BOT_LABEL: &str = "prime-agent-bot";
 /// The label of a bot with GitHub access.
 pub const GITHUB_LABEL: &str = "prime-agent-bot-github";
+/// The label of a bot that may spawn its own bots.
+pub const BOTS_LABEL: &str = "prime-agent-bot-spawns";
+/// The prefix of a relay pause token's platform secret name: a rule that
+/// names one is a bot's own pause rule, never a child's to inherit.
+pub const PAUSE_SECRET_MARK: &str = "PRIME_AGENT_BOT_PAUSE_";
 /// The label prefix that names each owner login a bot carries.
 pub const LOGIN_LABEL_PREFIX: &str = "prime-agent-bot-login:";
 /// The guest daemon's socket.
@@ -71,6 +77,16 @@ pub fn bot_label(bot_id: &str) -> String {
 pub fn owner_label(owner_session_id: &str) -> String {
     format!("{BOT_LABEL}-owner:{owner_session_id}")
 }
+
+/// The label that names the bot a bot was spawned by.
+#[must_use]
+pub fn parent_label(bot_id: &str) -> String {
+    format!("{BOT_LABEL}-parent:{bot_id}")
+}
+
+/// How deep bots nest: owner -> bot -> bot. A bot at the maximum depth
+/// cannot spawn another one.
+pub const MAX_BOT_DEPTH: u32 = 2;
 
 /// The label that names one owner login a bot carries.
 #[must_use]
@@ -95,6 +111,8 @@ pub struct BotSpec {
     pub github: bool,
     /// The git author the bot commits as.
     pub git_identity: Option<BotGitIdentity>,
+    /// The bot may spawn its own bots (`rlm.spawn(..., bots=True)`).
+    pub bots: bool,
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {

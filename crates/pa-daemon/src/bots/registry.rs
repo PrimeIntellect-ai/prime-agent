@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// A bot's lifecycle state, mapped from the sandbox status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BotStatus {
     /// The sandbox is pending or provisioning.
@@ -20,6 +20,7 @@ pub enum BotStatus {
     /// The sandbox is paused.
     Paused,
     /// No sandbox runs (terminated or timed out); a checkpoint may restore it.
+    #[default]
     Stopped,
     /// The sandbox failed.
     Error,
@@ -46,7 +47,7 @@ impl BotStatus {
 }
 
 /// One bot, as the Mac daemon knows it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotRecord {
     pub bot_id: String,
@@ -107,6 +108,17 @@ pub struct BotRecord {
     /// no relay rule. A wake whose relay host differs pushes fresh rules.
     #[serde(default)]
     pub pause_rule_host: Option<String>,
+    /// The bot may spawn its own bots (the `bots=True` spawn flag).
+    #[serde(default)]
+    pub bots: bool,
+    /// The bot that spawned this one, when a bot did; `None` for the
+    /// owner's own bots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_bot_id: Option<String>,
+    /// When this daemon pauses the idle bot, from the bot's own daemon
+    /// (a merged child row); `None` for this daemon's own bots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_at: Option<i64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

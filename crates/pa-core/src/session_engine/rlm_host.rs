@@ -184,6 +184,10 @@ pub struct RlmSpawnRequest {
     /// A bot's GitHub access (`github` kwarg, sandbox targets only):
     /// `None` follows the `bots.github` setting.
     pub github: Option<bool>,
+    /// The `bots` kwarg (sandbox targets only): the bot may spawn its own
+    /// bots. `None` and `false` are the same: a bot spawns bots only when
+    /// asked to.
+    pub bots: bool,
 }
 
 /// The factory executor's run tag on a spawned child (`rlm.spawn`'s
@@ -720,7 +724,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         &kwargs,
         OPERATION,
         &[
-            "name", "model", "thinking", "cwd", "factory", "kind", "target", "github",
+            "name", "model", "thinking", "cwd", "factory", "kind", "target", "github", "bots",
         ],
     )?;
     let kind = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
@@ -747,6 +751,14 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     };
     if github.is_some() && target != RlmSpawnTarget::Sandbox {
         anyhow::bail!("{OPERATION} github applies only to target=\"sandbox\" (a bot).");
+    }
+    let bots = match kwargs.get("bots") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(bots)) => *bots,
+        Some(_) => anyhow::bail!("{OPERATION} bots must be a bool"),
+    };
+    if bots && target != RlmSpawnTarget::Sandbox {
+        anyhow::bail!("{OPERATION} bots applies only to target=\"sandbox\" (a bot).");
     }
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
@@ -784,6 +796,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         kind,
         cwd,
         github,
+        bots,
         spawned_by_request_id: None,
         factory,
         target,
@@ -1658,6 +1671,59 @@ mod tests {
             "rlm.spawn target must be one of: local, sandbox"
         );
         assert_eq!(spawn_requests.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn spawn_bots_kwarg_parse() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = RecordingHost::new();
+        let spawn_requests = Arc::clone(&host.spawn_requests);
+        let wiring = wired(dir.path(), Some(host));
+
+        // The bots flag parses onto a sandbox target.
+        let admitted = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p",
+                    "kwargs": { "name": "w1", "target": "sandbox", "bots": true } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(admitted["rlm_child_id"], "sub-1");
+        assert!(spawn_requests.lock().await[0].bots);
+
+        // Omitted stays false.
+        call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p",
+                    "kwargs": { "name": "w2", "target": "sandbox" } }),
+        )
+        .await
+        .unwrap();
+        assert!(!spawn_requests.lock().await[1].bots);
+
+        // The flag applies only to a sandbox target, and must be a bool.
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p", "kwargs": { "name": "w3", "bots": true } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.spawn bots applies only to target=\"sandbox\" (a bot)."
+        );
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p",
+                    "kwargs": { "name": "w4", "target": "sandbox", "bots": "yes" } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "rlm.spawn bots must be a bool");
     }
 
     #[tokio::test]

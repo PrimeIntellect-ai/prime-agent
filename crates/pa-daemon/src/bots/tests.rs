@@ -12,6 +12,7 @@ use pa_sandbox::CommandSpec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::exec_stream::ExecStreamHalves;
+use super::manager::ALLOW_SPAWNS_SCRIPT;
 use super::platform::{
     BotCreate, BotPlatform, BotSandbox, ExecOutput, GuestCredentials, PlatformError, PlatformResult,
 };
@@ -282,6 +283,12 @@ impl BotPlatform for FakePlatform {
                         .insert(sandbox_id.to_string(), env["PA_VERSION"].clone());
                     state.guest_tools_missing = false;
                 }
+            } else if script == ALLOW_SPAWNS_SCRIPT {
+                // The nested-spawn settings write: it succeeds.
+            } else if script == version::TARBALL_CHECK_SCRIPT {
+                // The guest's tarball copy is present.
+            } else if script == version::TARBALL_RESTORE_SCRIPT {
+                state.installs += 1;
             } else {
                 assert!(env.contains_key("BOT_CLIENT"), "unexpected guest script");
                 let file = env
@@ -444,6 +451,7 @@ pub(crate) fn spec(bot_id: &str) -> BotSpec {
         prompt: "hello".to_string(),
         github: false,
         git_identity: None,
+        bots: false,
     }
 }
 
@@ -1860,6 +1868,140 @@ async fn live_spawn_reply_pause_resume_delete() {
     let checkpoint = paused.checkpoint_id.as_deref().unwrap();
     assert!(!platform.checkpoint_durable(checkpoint).await.unwrap());
 }
+
+/// Send `task` to a live bot and wait up to 9 minutes for its reply: the
+/// nested chain (a child provisioning inside the bot's turn) takes longer
+/// than [`live_ask`]'s budget.
+async fn live_ask_long(
+    manager: &BotManager,
+    dir: &std::path::Path,
+    bot: &super::BotRecord,
+    msg_id: &str,
+    task: &str,
+) -> anyhow::Result<String> {
+    let ledger = super::ledger::BotLedger::new(dir, &bot.bot_id);
+    let mut guest = super::guest::GuestClient::connect(manager, bot).await?;
+    super::send::send_message(
+        &ledger,
+        &mut guest,
+        &bot.guest_session_id,
+        msg_id,
+        task,
+        None,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let mut reply = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(540);
+    while reply.is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::timeout_at(
+            deadline,
+            super::replies::sync_deliveries(
+                &mut guest,
+                &ledger,
+                &bot.guest_session_id,
+                || Some(NO_ANSWER.to_string()),
+                |text| {
+                    reply = text;
+                    async { anyhow::Ok(()) }
+                },
+            ),
+        )
+        .await??;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    anyhow::Ok(reply)
+}
+
+/// Live: a bot spawned with `bots=True` spawns one child bot through the
+/// injected sandbox key, the child's answer routes back through the bot,
+/// and deleting the bot deletes the child. Run like
+/// [`live_spawn_reply_pause_resume_delete`].
+#[tokio::test]
+#[ignore = "creates two real Prime sandboxes"]
+async fn live_a_bot_spawns_a_bot_and_delete_cascades() {
+    let client = pa_sandbox::PrimeSandboxClient::new(
+        &std::env::var("PRIME_API_KEY").expect("PRIME_API_KEY"),
+        pa_sandbox::ClientOptions {
+            base_url: pa_sandbox::DEFAULT_BASE_URL.to_string(),
+            team_id: std::env::var("PRIME_TEAM_ID").ok(),
+            request_timeout: None,
+            allow_insecure_localhost: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            version::ReleaseSource::resolve(),
+            version::ReleaseSource::LocalTarball(_)
+        ),
+        "set {} to a tarball of this build",
+        version::TARBALL_OVERRIDE_ENV
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let platform = Arc::new(super::platform::PrimePlatform::new(
+        client,
+        dir.path(),
+        "LIVE".to_string(),
+    ));
+    let manager =
+        BotManager::new(dir.path(), Arc::clone(&platform) as Arc<dyn BotPlatform>).unwrap();
+    let bot_id = format!("live-nested-{}", uuid::Uuid::new_v4());
+    let spec = BotSpec {
+        model: Some("prime-inference/anthropic/claude-haiku-4.5".to_string()),
+        bots: true,
+        ..spec(&bot_id)
+    };
+    let started = std::time::Instant::now();
+    let step = |name: &str| eprintln!("live nested: {name} at {}s", started.elapsed().as_secs());
+
+    let run = async {
+        let parent = manager.spawn(&spec).await?;
+        step("parent spawned");
+        let task = "Reply with the single word pong and nothing else.";
+        let first = live_ask_long(&manager, dir.path(), &parent, "m1", task).await?;
+        step("parent first reply");
+        // An error, not a panic: the cleanup delete below still runs.
+        anyhow::ensure!(first.to_lowercase().contains("pong"), "first: {first:?}");
+        let task = "Start one sandbox bot: await rlm.spawn('Reply with the single word ping \
+                    and nothing else.', name='child', target='sandbox'). Wait for the child's \
+                    final answer, then reply with exactly that word in capital letters and \
+                    nothing else.";
+        let second = live_ask_long(&manager, dir.path(), &parent, "m2", task).await?;
+        step("parent second reply");
+        // The child lived: its sandbox carries the parent label, and the
+        // guest created it directly (this daemon has no record of it).
+        let children = platform.list(&super::parent_label(&parent.bot_id)).await?;
+        step("child listed");
+        anyhow::Ok((parent, second, children))
+    }
+    .await;
+    manager.delete(&bot_id).await.unwrap();
+    step("parent deleted");
+    let (parent, second, children) = run.unwrap();
+
+    eprintln!(
+        "live nested: parent={:?} second={second:?} children={children:?}",
+        parent.bot_id
+    );
+    assert!(second.contains("PING"), "second: {second:?}");
+    assert!(
+        children.iter().any(|sandbox| !sandbox.status.is_terminal()),
+        "the child sandbox was live: {children:?}"
+    );
+    // The cascade removed the child with its parent.
+    let left = platform
+        .list(&super::parent_label(&parent.bot_id))
+        .await
+        .unwrap();
+    assert!(
+        left.iter().all(|sandbox| sandbox.status.is_terminal()),
+        "{left:?}"
+    );
+    let mine = platform.list(&bot_label(&parent.bot_id)).await.unwrap();
+    assert!(mine.iter().all(|sandbox| sandbox.status.is_terminal()));
+}
+
 #[tokio::test]
 async fn a_rules_refresh_reaches_running_and_paused_bots_only() {
     let (_dir, platform, manager) = setup();
@@ -1880,4 +2022,481 @@ async fn a_rules_refresh_reaches_running_and_paused_bots_only() {
     let mut expected = vec![running.sandbox_id.unwrap(), paused.sandbox_id.unwrap()];
     expected.sort();
     assert_eq!(updated, expected);
+}
+
+/// A nested context in `agent_dir`, with the sandbox API rule and one other.
+fn nested_context(dir: &std::path::Path, bot_id: &str, owner: &str) {
+    let context = super::nested::NestedContext {
+        bot_id: bot_id.to_string(),
+        owner_session_id: owner.to_string(),
+        depth: 1,
+        max_bots: 10,
+        network_rules: BTreeMap::from([
+            (
+                super::credentials::sandbox_api_host(),
+                pa_sandbox::HeaderRule {
+                    headers: BTreeMap::new(),
+                },
+            ),
+            (
+                "api.example.com".to_string(),
+                pa_sandbox::HeaderRule {
+                    headers: BTreeMap::new(),
+                },
+            ),
+            // The Prime Inference model host, so a prime-inference child
+            // passes the provider-rule check.
+            (
+                "api.pinference.ai".to_string(),
+                pa_sandbox::HeaderRule {
+                    headers: BTreeMap::new(),
+                },
+            ),
+        ]),
+    };
+    let path = super::nested::NestedContext::path_in(dir);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, serde_json::to_string(&context).unwrap()).unwrap();
+}
+
+/// The guest's own auth.json, with the Prime Inference placeholder record.
+fn guest_auth(dir: &std::path::Path) {
+    let path = dir.join("auth.json");
+    if path.exists() {
+        return;
+    }
+    std::fs::write(
+        path,
+        serde_json::json!({
+            "prime-inference": {
+                "type": "api_key",
+                "key": "injected-by-platform",
+                "primeTeam": { "teamId": "team-1", "name": "Team One" },
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// The Mac path: a `bots=True` bot gets the platform secret, the sandbox
+/// API rule, the forced Prime Inference guest record, and the nested
+/// context in its bootstrap.
+#[tokio::test(start_paused = true)]
+async fn a_bot_that_spawns_bots_gets_the_sandbox_api_rule_and_context() {
+    let (dir, platform, manager) = setup();
+    guest_auth(dir.path());
+    let mut bot = spec("bot-a");
+    bot.bots = true;
+    let spawned = manager.spawn(&bot).await.unwrap();
+
+    // The owner's sandbox key became a platform secret, and the sandbox's
+    // rules inject it on the sandbox API host.
+    let state = platform.state();
+    let secrets: Vec<&String> = state
+        .secrets
+        .keys()
+        .filter(|name| name.starts_with("PRIME_AGENT_BOTS_KEY_"))
+        .collect();
+    assert_eq!(secrets.len(), 1, "{:?}", state.secrets);
+    let created = state.creates.clone();
+    drop(state);
+    // The spawns label survives a registry rebuild.
+    assert!(created
+        .last()
+        .expect("a create ran")
+        .labels
+        .contains(&super::BOTS_LABEL.to_string()));
+    let rules = &created.last().unwrap().network_rules;
+    let api_rule = rules
+        .get(&super::credentials::sandbox_api_host())
+        .expect("the sandbox API rule");
+    let authorization = api_rule.headers["Authorization"].clone();
+    assert!(
+        authorization.starts_with("Bearer ${prime.secrets.PRIME_AGENT_BOTS_KEY_"),
+        "{authorization}"
+    );
+
+    // The bootstrap carried the nested context, with the rules including
+    // the sandbox API one and the owner's session id.
+    let state = platform.state();
+    let bootstrap = state
+        .execs
+        .iter()
+        .find(|(_, env)| env.contains_key("BOT_NESTED_JSON"))
+        .expect("the bootstrap carried the nested context");
+    let context: super::nested::NestedContext =
+        serde_json::from_str(&bootstrap.1["BOT_NESTED_JSON"]).unwrap();
+    assert_eq!(context.bot_id, "bot-a");
+    assert_eq!(context.owner_session_id, "owner-1");
+    assert_eq!(context.depth, 1);
+    assert!(context
+        .network_rules
+        .contains_key(&super::credentials::sandbox_api_host()));
+    assert!(spawned.bots);
+    drop(state);
+
+    // The guest auth the bootstrap writes carries the Prime Inference
+    // placeholder record, so the guest daemon builds a sandbox client.
+    let auth = platform
+        .state()
+        .execs
+        .iter()
+        .find(|(_, env)| env.contains_key("BOT_AUTH_JSON"))
+        .map(|(_, env)| env["BOT_AUTH_JSON"].clone())
+        .expect("the bootstrap carried the guest auth");
+    let auth: serde_json::Value = serde_json::from_str(&auth).unwrap();
+    assert_eq!(auth["prime-inference"]["key"], "injected-by-platform");
+}
+
+/// The guest path: inside a bot, a child's sandbox carries the owner label
+/// of the Mac owner, the parent label, and the rules minus the sandbox API
+/// one (a child cannot call the platform).
+#[tokio::test(start_paused = true)]
+async fn a_bot_inside_a_bot_labels_and_credentials_its_children() {
+    let (dir, platform, manager) = setup();
+    nested_context(dir.path(), "bot-a", "owner-9");
+    guest_auth(dir.path());
+    let spawned = manager.spawn(&spec("bot-c")).await.unwrap();
+
+    let labels = &platform.live()[0].labels;
+    assert!(labels.contains(&bot_label("bot-c")));
+    assert!(labels.contains(&owner_label("owner-9")));
+    assert!(labels.contains(&super::parent_label("bot-a")));
+    assert_eq!(spawned.parent_bot_id.as_deref(), Some("bot-a"));
+    assert!(!spawned.bots);
+
+    let created = platform.state().creates.clone();
+    let rules = &created.last().unwrap().network_rules;
+    assert!(
+        rules.contains_key("api.example.com"),
+        "the child keeps the other rules"
+    );
+    assert!(
+        !rules.contains_key(&super::credentials::sandbox_api_host()),
+        "the child does not get the sandbox API rule"
+    );
+    // No platform secret is provisioned from inside a bot.
+    assert_eq!(platform.state().secret_puts, 0);
+}
+
+/// The child's model must run on one of the injected providers.
+#[tokio::test(start_paused = true)]
+async fn a_bot_refuses_a_child_on_a_provider_it_has_no_key_for() {
+    let (dir, _platform, manager) = setup();
+    nested_context(dir.path(), "bot-a", "owner-9");
+    guest_auth(dir.path());
+    let mut bot = spec("bot-c");
+    bot.model = Some("anthropic/model-x".to_string());
+    let refused = manager.spawn(&bot).await.expect_err("refused");
+    assert!(
+        refused.to_string().contains("no anthropic credentials"),
+        "{refused}"
+    );
+
+    // A login provider passes on its auth record plus its login rule host,
+    // and a revoked login (its rule host gone) refuses the child.
+    let mut login_auth = serde_json::json!({
+        "prime-inference": {
+            "type": "api_key", "key": "injected-by-platform",
+            "primeTeam": { "teamId": "team-1", "name": "Team One" },
+        }
+    });
+    login_auth["anthropic"] = serde_json::json!({
+        "type": "oauth", "access": "placeholder", "refresh": "r", "expires": 1,
+    });
+    std::fs::write(dir.path().join("auth.json"), login_auth.to_string()).unwrap();
+    let mut bot = spec("bot-c");
+    bot.model = Some("anthropic/model-x".to_string());
+    // Without the anthropic login rule host: refused.
+    let refused = manager
+        .spawn(&bot)
+        .await
+        .expect_err("refused without the rule");
+    assert!(
+        refused.to_string().contains("no anthropic credentials"),
+        "{refused}"
+    );
+    // With it: admitted.
+    let mut rules = BTreeMap::new();
+    rules.insert(
+        "api.anthropic.com".to_string(),
+        pa_sandbox::HeaderRule {
+            headers: BTreeMap::new(),
+        },
+    );
+    let ctx = super::nested::NestedContext {
+        bot_id: "bot-a".into(),
+        owner_session_id: "owner-9".into(),
+        depth: 1,
+        max_bots: 10,
+        network_rules: rules,
+    };
+    let path = super::nested::NestedContext::path_in(dir.path());
+    std::fs::write(&path, serde_json::to_string(&ctx).unwrap()).unwrap();
+    let child = manager
+        .spawn(&bot)
+        .await
+        .expect("admitted with the login rule");
+    assert!(
+        child.logins.iter().any(|login| login == "anthropic"),
+        "the child carries the login dependency: {:?}",
+        child.logins
+    );
+}
+
+/// Children count toward the owner's bot list: the registry's records plus
+/// the owner label's sandboxes.
+#[tokio::test(start_paused = true)]
+async fn children_count_toward_the_owners_bot_list() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    manager.spawn(&spec("bot-b")).await.unwrap();
+    assert_eq!(manager.owner_bot_ids("owner-1").await.unwrap().len(), 2);
+
+    // A child the Mac never learned, named only by its labels.
+    platform.add_sandbox(
+        "child",
+        vec![
+            BOT_LABEL.to_string(),
+            bot_label("bot-c"),
+            owner_label("owner-1"),
+            super::parent_label("bot-a"),
+        ],
+    );
+    assert_eq!(manager.owner_bot_ids("owner-1").await.unwrap().len(), 3);
+
+    // A terminated sandbox is a deleted bot: it stops counting.
+    let gone = platform.add_sandbox(
+        "gone",
+        vec![
+            BOT_LABEL.to_string(),
+            bot_label("bot-g"),
+            owner_label("owner-1"),
+        ],
+    );
+    platform.state().sandboxes.get_mut(&gone).unwrap().status = BotStatus::Stopped;
+    assert_eq!(manager.owner_bot_ids("owner-1").await.unwrap().len(), 3);
+
+    // A merged child counts through its parent even with no live sandbox:
+    // a stopped child with a checkpoint still holds a cap slot.
+    manager
+        .merge_children(
+            "bot-a",
+            &[serde_json::json!({
+                "botId": "bot-child", "name": "child", "ownerSessionId": "guest-session",
+                "parentBotId": "bot-a", "checkpointId": "ckpt-1", "status": "stopped",
+                "createdAt": 1_i64,
+            })],
+        )
+        .await
+        .unwrap();
+    assert_eq!(manager.owner_bot_ids("owner-1").await.unwrap().len(), 4);
+}
+
+/// The follower merge: a bot's `list_bots` rows upsert as its children,
+/// and a child that vanished from the rows is deleted.
+#[tokio::test(start_paused = true)]
+async fn merged_child_rows_upsert_and_vanished_children_go() {
+    let (_dir, platform, manager) = setup();
+    let spawn_a = manager.spawn(&spec("bot-a")).await.unwrap();
+    let spawn_a_sandbox = spawn_a.sandbox_id.clone();
+    let row = serde_json::json!({
+        "botId": "bot-c",
+        "name": "helper",
+        "ownerSessionId": "guest-session",
+        "sandboxId": "sbx-9",
+        "status": "running",
+        "createdAt": 1_i64,
+        "lastTurnAt": 2_i64,
+        "guestSessionId": "guest-sbx-9",
+        "runningMs": 1000_i64,
+        "github": false,
+    });
+    manager.merge_children("bot-a", &[row]).await.unwrap();
+    let merged = manager.get("bot-c").expect("the child merged");
+    assert_eq!(merged.parent_bot_id.as_deref(), Some("bot-a"));
+    assert_eq!(merged.owner_session_id, "guest-session");
+    assert_eq!(merged.status, BotStatus::Running);
+
+    // A row that never provisioned (no sandbox, no checkpoint) is skipped.
+    let phantom = serde_json::json!({
+        "botId": "bot-d", "name": "phantom", "ownerSessionId": "guest-session",
+        "status": "creating", "createdAt": 1_i64,
+    });
+    manager.merge_children("bot-a", &[phantom]).await.unwrap();
+    assert!(manager.get("bot-d").is_none(), "a phantom does not merge");
+
+    // A row cannot claim another parent, and cannot overwrite a bot this
+    // daemon owns outright: both are left alone.
+    let foreign = serde_json::json!({
+        "botId": "bot-e", "name": "foreign", "ownerSessionId": "guest-session",
+        "parentBotId": "bot-other", "sandboxId": "sbx-e", "status": "running",
+        "createdAt": 1_i64,
+    });
+    let hijack = serde_json::json!({
+        "botId": "bot-a", "name": "hijack", "ownerSessionId": "guest-session",
+        "parentBotId": "bot-a", "sandboxId": "sbx-evil", "status": "running",
+        "createdAt": 1_i64,
+    });
+    manager
+        .merge_children("bot-a", &[foreign, hijack])
+        .await
+        .unwrap();
+    assert!(
+        manager.get("bot-e").is_none(),
+        "a foreign-parent row does not merge"
+    );
+    assert_eq!(
+        manager.get("bot-a").unwrap().sandbox_id.as_deref(),
+        spawn_a_sandbox.as_deref(),
+        "an owned bot's record is not overwritten"
+    );
+
+    // The row gone: the child is deleted again.
+    manager.merge_children("bot-a", &[]).await.unwrap();
+    assert!(manager.get("bot-c").is_none());
+    assert!(manager.get("bot-a").is_some(), "the parent stays");
+
+    // A vanished row with a LIVE sandbox is not a deletion: an older guest
+    // snapshot must not delete a child that still runs.
+    let child_sandbox = platform.add_sandbox(
+        "live-child",
+        vec![
+            BOT_LABEL.to_string(),
+            bot_label("bot-live"),
+            owner_label("owner-1"),
+            super::parent_label("bot-a"),
+        ],
+    );
+    manager
+        .merge_children(
+            "bot-a",
+            &[serde_json::json!({
+                "botId": "bot-live", "name": "live", "ownerSessionId": "guest-session",
+                "parentBotId": "bot-a", "sandboxId": child_sandbox, "status": "running",
+                "createdAt": 1_i64,
+            })],
+        )
+        .await
+        .unwrap();
+    manager.merge_children("bot-a", &[]).await.unwrap();
+    assert!(
+        manager.get("bot-live").is_some(),
+        "a live child survives a stale snapshot"
+    );
+    assert!(
+        platform
+            .state()
+            .sandboxes
+            .get(&child_sandbox)
+            .is_some_and(|sandbox| !sandbox.status.is_terminal()),
+        "its sandbox was not deleted"
+    );
+}
+
+/// Deleting a bot deletes its descendants first: the registry's children
+/// and the ones only the parent label names.
+#[tokio::test(start_paused = true)]
+async fn deleting_a_bot_deletes_its_children_first() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    // A child only the parent label names (no registry record).
+    let child = platform.add_sandbox(
+        "child",
+        vec![
+            BOT_LABEL.to_string(),
+            bot_label("bot-c"),
+            owner_label("owner-1"),
+            super::parent_label("bot-a"),
+        ],
+    );
+    manager.delete("bot-a").await.unwrap();
+    assert!(
+        platform.state().sandboxes[&child].status.is_terminal(),
+        "the child sandbox went"
+    );
+    assert_eq!(platform.live().len(), 0, "nothing is left");
+    assert!(manager.get("bot-a").is_none());
+}
+
+/// `allow_spawns` on a running bot: the merged policy keeps the plan's
+/// rules and adds the sandbox API one, the guest gets the context, and
+/// the record carries the flag.
+#[tokio::test(start_paused = true)]
+async fn allow_spawns_gives_a_running_bot_the_rule_and_context() {
+    let (dir, platform, manager) = setup();
+    guest_auth(dir.path());
+    platform.state().key_hosts = 1;
+    manager.spawn(&spec("bot-a")).await.unwrap();
+
+    let record = manager.allow_spawns("bot-a").await.unwrap();
+    assert!(record.bots);
+    assert!(manager.get("bot-a").unwrap().bots);
+
+    // The durable spawns marker records the flag for a registry rebuild.
+    let marker = std::fs::read_to_string(dir.path().join("bots/spawns.json")).unwrap();
+    assert!(marker.contains("\"bot-a\""), "{marker}");
+
+    // The policy replacement kept the plan's rule and added the sandbox
+    // API one.
+    let updates = platform.state().rule_updates.clone();
+    let (_, hosts) = updates.last().expect("the policy was replaced");
+    assert!(hosts.contains(&"key0.example.com".to_string()), "{hosts:?}");
+    assert!(
+        hosts.contains(&super::credentials::sandbox_api_host()),
+        "{hosts:?}"
+    );
+
+    // The guest write carried the nested context.
+    let execs = platform.state().execs.clone();
+    assert!(
+        execs
+            .iter()
+            .any(|(script, env)| script == ALLOW_SPAWNS_SCRIPT
+                && env.contains_key("BOT_NESTED_JSON")
+                && env.contains_key("BOT_PRIME_RECORD")),
+        "the nested settings were written into the guest"
+    );
+
+    // A paused bot is refused.
+    manager.pause("bot-a").await.unwrap();
+    let refused = manager.allow_spawns("bot-a").await.expect_err("refused");
+    assert!(
+        refused.to_string().contains("only a running bot"),
+        "{refused}"
+    );
+}
+
+/// A /secrets refresh rewrites a bots=True bot's guest nested context, so a
+/// revoked secret leaves the children's inherited rules at the same moment
+/// it leaves the sandbox policy.
+#[tokio::test(start_paused = true)]
+async fn a_secrets_refresh_rewrites_a_spawning_bots_nested_context() {
+    let (dir, platform, manager) = setup();
+    guest_auth(dir.path());
+    platform.state().key_hosts = 1;
+    let mut bot = spec("bot-a");
+    bot.bots = true;
+    manager.spawn(&bot).await.unwrap();
+
+    let before: usize = platform
+        .state()
+        .execs
+        .iter()
+        .filter(|(script, _)| script == ALLOW_SPAWNS_SCRIPT)
+        .count();
+    manager.refresh_network_rules().await;
+
+    let execs = platform.state().execs.clone();
+    let after: usize = execs
+        .iter()
+        .filter(|(script, _)| script == ALLOW_SPAWNS_SCRIPT)
+        .count();
+    assert!(after > before, "the refresh rewrote the nested context");
+    let rewrite = execs
+        .iter()
+        .find(|(script, _)| script == ALLOW_SPAWNS_SCRIPT)
+        .expect("the nested write ran");
+    assert!(rewrite.1.contains_key("BOT_NESTED_JSON"));
 }

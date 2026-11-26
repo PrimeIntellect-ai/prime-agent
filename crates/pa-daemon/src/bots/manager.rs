@@ -28,6 +28,9 @@ use super::{
 
 /// The budget for one wake, create, or pause.
 const OPERATION_BUDGET: Duration = Duration::from_mins(15);
+/// Delete-cascade sweeps: a child the guest creates mid-delete is caught
+/// by the next listing; the delete ends once a sweep finds nothing left.
+const DESCENDANT_SWEEPS: usize = 3;
 /// The relay registration call's deadline.
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
 /// Attempts for one platform call that answers 409, 429, 5xx, or a network
@@ -85,15 +88,31 @@ def locked_update(path, update):
 
 
 def settings_update(settings):
-    if settings is None:
+    if not isinstance(settings, dict):
         settings = {}
     settings.setdefault("factory", {})["enabled"] = os.environ["BOT_FACTORY_ENABLED"] == "true"
     if os.environ.get("BOT_MCP_SERVERS"):
         settings.setdefault("mcpServers", {}).update(json.loads(os.environ["BOT_MCP_SERVERS"]))
+    if os.environ.get("BOT_NESTED_JSON"):
+        # This bot may spawn bots: the guest spawn gate opens. An explicit
+        # non-object "bots" value is normalized, not trusted.
+        bots = settings.get("bots")
+        if not isinstance(bots, dict):
+            bots = {}
+            settings["bots"] = bots
+        bots["enabled"] = True
     return settings
 
 
 locked_update(os.path.join(os.environ["HOME"], ".prime/agent/settings.json"), settings_update)
+
+if os.environ.get("BOT_NESTED_JSON"):
+    # The nested-spawn context lands next to the guest registry, where the
+    # daemon reads it fresh at every spawn.
+    nested = os.path.join(os.environ["HOME"], ".prime/agent/bots/nested.json")
+    os.makedirs(os.path.dirname(nested), exist_ok=True)
+    with open(nested, "w") as file:
+        file.write(os.environ["BOT_NESTED_JSON"])
 
 
 def connections_update(store):
@@ -212,6 +231,83 @@ if data.get("sessionFile"):
         out.write(data["sessionFile"])
 print(json.dumps({"activeSessionId": data.get("activeSessionId") or data.get("id"),
                   "sessionFile": data.get("sessionFile")}))
+"#;
+
+/// Writes a running bot's nested-spawn settings: the nested context next
+/// to the guest registry, the guest spawn gate, and the Prime Inference
+/// placeholder record (merged, keeping the guest's other records).
+pub(super) const ALLOW_SPAWNS_SCRIPT: &str = r#"set -euo pipefail
+export HOME="${HOME:-/root}"
+python3 - <<'PY'
+import json, os, time
+
+
+def locked_update(path, update):
+    """Read-modify-write under the daemon's {file}.lock protocol."""
+    lock = path + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    while True:
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            try:
+                stale = time.time() - os.stat(lock).st_mtime > 10
+            except OSError:
+                stale = False
+            if stale:
+                try:
+                    os.rmdir(lock)
+                except OSError:
+                    pass
+            else:
+                time.sleep(0.02)
+    try:
+        try:
+            document = json.load(open(path))
+        except (OSError, ValueError):
+            document = None
+        document = update(document)
+        temp = path + ".tmp" + str(os.getpid())
+        handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w") as file:
+            json.dump(document, file)
+        os.replace(temp, path)
+    finally:
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+
+
+def settings_update(settings):
+    if not isinstance(settings, dict):
+        settings = {}
+    bots = settings.get("bots")
+    if not isinstance(bots, dict):
+        bots = {}
+        settings["bots"] = bots
+    bots["enabled"] = True
+    return settings
+
+
+def auth_update(auth):
+    if not isinstance(auth, dict):
+        auth = {}
+    auth["prime-inference"] = json.loads(os.environ["BOT_PRIME_RECORD"])
+    return auth
+
+
+home = os.environ["HOME"]
+locked_update(os.path.join(home, ".prime/agent/settings.json"), settings_update)
+locked_update(os.path.join(home, ".prime/agent/auth.json"), auth_update)
+# The nested context lands next to the guest registry, where the daemon
+# reads it fresh at every spawn.
+nested = os.path.join(home, ".prime/agent/bots/nested.json")
+os.makedirs(os.path.dirname(nested), exist_ok=True)
+with open(nested, "w") as file:
+    file.write(os.environ["BOT_NESTED_JSON"])
+PY
 "#;
 
 /// Holds one attach open; dropping it detaches.
@@ -336,6 +432,12 @@ impl BotManager {
         if record.logins.is_empty() {
             return;
         }
+        // Inside a bot the guest's auth holds placeholders, never
+        // refreshable tokens: the owner's Mac refreshes the login secrets
+        // the child's rules reference.
+        if super::nested::NestedContext::read(&self.agent_dir).is_some() {
+            return;
+        }
         self.logins
             .tick(&record.logins.iter().cloned().collect())
             .await;
@@ -404,18 +506,22 @@ impl BotManager {
                     .platform
                     .set_network_rules(&sandbox_id, &credentials.network_rules)
                     .await
-                    .map(|()| (logins, relay_host))
+                    .map(|()| (credentials.network_rules, logins, relay_host))
                     .map_err(anyhow::Error::from),
                 Err(error) => Err(error),
             };
+            let mut credentials_rules = None;
             match outcome {
-                Ok((logins, relay_host)) => {
+                Ok((rules, logins, relay_host)) => {
                     // The refresher follows the logins the new rules carry,
                     // and the relay host they now carry.
                     record.logins = logins;
                     record.pause_rule_host = relay_host;
                     let running = record.status == BotStatus::Running;
                     let watch = running && !record.logins.is_empty();
+                    if record.bots {
+                        credentials_rules = Some(rules);
+                    }
                     if let Err(error) = self.save(record.clone()) {
                         failures.push(format!("{}: {error:#}", record.name));
                     } else if watch {
@@ -424,8 +530,67 @@ impl BotManager {
                 }
                 Err(error) => failures.push(format!("{}: {error:#}", record.name)),
             }
+            // A bot that spawns bots hands its children the rules this
+            // refresh just computed; a revoked secret must leave the guest's
+            // nested context the same moment it leaves the sandbox policy.
+            if let (Some(rules), true) = (credentials_rules, record.status == BotStatus::Running) {
+                if let Err(error) = self
+                    .rewrite_nested_context(&record, &sandbox_id, rules)
+                    .await
+                {
+                    failures.push(format!("{}: {error:#}", record.name));
+                }
+            }
         }
         failures
+    }
+
+    /// Rewrite a running bot's guest nested context from `rules`: the same
+    /// write `allow_spawns` performs, so the children see the current
+    /// credentials, not the bootstrap-time snapshot.
+    async fn rewrite_nested_context(
+        &self,
+        record: &BotRecord,
+        sandbox_id: &str,
+        rules: BTreeMap<String, pa_sandbox::HeaderRule>,
+    ) -> Result<()> {
+        let agent_dir = self.agent_dir.clone();
+        let max_bots = tokio::task::spawn_blocking(move || {
+            pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir).get_bots_max_bots()
+                as usize
+        })
+        .await
+        .context("the bots.maxBots read failed")?;
+        let context = super::nested::NestedContext {
+            bot_id: record.bot_id.clone(),
+            owner_session_id: record.owner_session_id.clone(),
+            depth: 1,
+            max_bots,
+            network_rules: rules,
+        };
+        let team = self.sandbox_key_and_team().await?.1;
+        let prime = serde_json::to_value(pa_core::auth::AuthCredential::ApiKey {
+            key: super::credentials::GUEST_API_KEY_PLACEHOLDER.to_string(),
+            prime_team: team,
+        })?;
+        let env = BTreeMap::from([
+            (
+                "BOT_NESTED_JSON".to_string(),
+                serde_json::to_string(&context)?,
+            ),
+            ("BOT_PRIME_RECORD".to_string(), prime.to_string()),
+        ]);
+        let output = self
+            .exec_ready(
+                sandbox_id,
+                ALLOW_SPAWNS_SCRIPT,
+                &env,
+                None,
+                Instant::now() + OPERATION_BUDGET,
+            )
+            .await?;
+        check_exit("refresh the bot's nested context", &output)?;
+        Ok(())
     }
 
     /// Whether `bots.inject.<name>` gives bots the secret `name`.
@@ -495,7 +660,16 @@ impl BotManager {
             logins: Vec::new(),
             pause_token: Some(uuid::Uuid::new_v4().simple().to_string()),
             pause_rule_host: None,
+            bots: spec.bots,
+            parent_bot_id: super::nested::NestedContext::read(&self.agent_dir)
+                .map(|context| context.bot_id),
+            pause_at: None,
         })?;
+        if spec.bots {
+            let mut spawns = read_spawns_marker(&self.agent_dir);
+            spawns.insert(spec.bot_id.clone());
+            write_spawns_marker(&self.agent_dir, &spawns)?;
+        }
         match self.ensure_running_locked(&spec.bot_id).await {
             Ok(record) => Ok(record),
             Err(error) => {
@@ -573,13 +747,272 @@ impl BotManager {
     /// Delete every sandbox the bot's label names and its checkpoints, then
     /// forget the bot. A checkpoint that fails to delete is kept in the
     /// registry, and boot reconcile tries it again. Deleting an unknown bot succeeds.
+    /// The bot's descendants go first, deepest first.
     ///
     /// # Errors
     /// Returns an error when a sandbox delete fails.
     pub async fn delete(&self, bot_id: &str) -> Result<()> {
         let bot_lock = self.lock_for(bot_id);
         let _held = bot_lock.lock().await;
+        self.delete_descendants_locked(bot_id).await?;
         self.delete_locked(bot_id).await
+    }
+
+    /// Delete the bots `bot_id` spawned: the registry's children plus every
+    /// sandbox the parent label names, so children this daemon never
+    /// learned go too. Called with the parent's lock held; each child is
+    /// settled under its own lock, so a concurrent delete of the child
+    /// cannot interleave.
+    async fn delete_descendants_locked(&self, bot_id: &str) -> Result<()> {
+        // The guest can create a child while this delete runs, so the
+        // sweep repeats until the parent label names nothing live: one
+        // pass can miss a create that landed after its listing.
+        for _ in 0..DESCENDANT_SWEEPS {
+            let mut children: Vec<String> = lock(&self.registry)
+                .all()
+                .into_iter()
+                .filter(|record| record.parent_bot_id.as_deref() == Some(bot_id))
+                .map(|record| record.bot_id)
+                .collect();
+            let parent = super::parent_label(bot_id);
+            for sandbox in retry(|| self.platform.list(&parent)).await? {
+                if let Some(child) = label_value(&sandbox.labels, &format!("{BOT_LABEL}:")) {
+                    children.push(child);
+                }
+            }
+            children.sort();
+            children.dedup();
+            if children.is_empty() {
+                return Ok(());
+            }
+            for child in children {
+                let child_lock = self.lock_for(&child);
+                let _held = child_lock.lock().await;
+                Box::pin(self.delete_descendants_locked(&child)).await?;
+                self.delete_locked(&child).await?;
+            }
+        }
+        let parent = super::parent_label(bot_id);
+        let left = retry(|| self.platform.list(&parent))
+            .await?
+            .into_iter()
+            .filter(|sandbox| !sandbox.status.is_terminal())
+            .count();
+        if left > 0 {
+            bail!(
+                "bot {bot_id}: {left} descendant sandboxes survived the delete sweeps; \
+                 retry the delete"
+            );
+        }
+        Ok(())
+    }
+
+    /// The bots of `owner_session_id` this daemon can see: its registry's
+    /// records plus every sandbox the owner label names (children another
+    /// daemon spawned).
+    ///
+    /// # Errors
+    /// Returns an error when the label listing fails.
+    pub async fn owner_bot_ids(&self, owner_session_id: &str) -> Result<BTreeSet<String>> {
+        // A merged child's record names its parent bot's guest session as
+        // the owner; the parent's record names this owner. Both count, so
+        // a stopped child with a checkpoint still holds a cap slot.
+        let records = lock(&self.registry).all();
+        let owners: BTreeMap<String, String> = records
+            .iter()
+            .map(|record| (record.bot_id.clone(), record.owner_session_id.clone()))
+            .collect();
+        let mut bot_ids: BTreeSet<String> = records
+            .into_iter()
+            .filter(|record| {
+                record.owner_session_id == owner_session_id
+                    || record
+                        .parent_bot_id
+                        .as_deref()
+                        .and_then(|parent| owners.get(parent))
+                        .is_some_and(|owner| *owner == owner_session_id)
+            })
+            .map(|record| record.bot_id)
+            .collect();
+        let label = owner_label(owner_session_id);
+        for sandbox in retry(|| self.platform.list(&label)).await? {
+            // A terminated sandbox is a deleted bot: it must not keep
+            // counting against the owner's bots.maxBots cap.
+            if sandbox.status.is_terminal() {
+                continue;
+            }
+            if let Some(bot_id) = label_value(&sandbox.labels, &format!("{BOT_LABEL}:")) {
+                bot_ids.insert(bot_id);
+            }
+        }
+        Ok(bot_ids)
+    }
+
+    /// Merge a bot's children (its daemon's `list_bots` rows) into this
+    /// registry: each row upserts, a child that vanished from the rows is
+    /// deleted (the bot deleted it itself). A row without a sandbox or
+    /// checkpoint never provisioned and is skipped.
+    ///
+    /// # Errors
+    /// Returns an error when a vanished child cannot be deleted or the
+    /// registry cannot be written.
+    pub async fn merge_children(&self, parent_bot_id: &str, rows: &[Value]) -> Result<()> {
+        // Under the parent's lifecycle lock, in lock order with the delete
+        // cascade, and never for a parent that is already gone: a stale
+        // guest snapshot must not resurrect children the cascade removed.
+        let parent_lock = self.lock_for(parent_bot_id);
+        let _held = parent_lock.lock().await;
+        if self.get(parent_bot_id).is_none() {
+            return Ok(());
+        }
+        let mut seen = BTreeSet::new();
+        for row in rows {
+            // A row names this parent's child only when it says so, and
+            // only when its bot id is not already another bot's record:
+            // the rows come from the guest, so they never get to claim a
+            // bot this daemon owns outright.
+            let claims_parent = row
+                .get("parentBotId")
+                .and_then(Value::as_str)
+                .is_none_or(|parent| parent == parent_bot_id);
+            let existing = self.get_from_row(row);
+            let foreign = existing
+                .as_ref()
+                .is_some_and(|record| record.parent_bot_id.as_deref() != Some(parent_bot_id));
+            if !claims_parent || foreign {
+                continue;
+            }
+            let Some(record) = child_record(row, parent_bot_id, existing) else {
+                continue;
+            };
+            seen.insert(record.bot_id.clone());
+            lock(&self.registry).put(record)?;
+        }
+        let vanished: Vec<String> = lock(&self.registry)
+            .all()
+            .into_iter()
+            .filter(|record| {
+                record.parent_bot_id.as_deref() == Some(parent_bot_id)
+                    && !seen.contains(&record.bot_id)
+            })
+            .map(|record| record.bot_id)
+            .collect();
+        for bot_id in vanished {
+            // An older guest snapshot omits a child that still runs; the
+            // platform listing is the truth, so a live child is kept and
+            // only its stale registry row waits for the next sync.
+            let label = bot_label(&bot_id);
+            let live = retry(|| self.platform.list(&label))
+                .await?
+                .into_iter()
+                .any(|sandbox| !sandbox.status.is_terminal());
+            if live {
+                continue;
+            }
+            let bot_lock = self.lock_for(&bot_id);
+            let _held = bot_lock.lock().await;
+            self.delete_locked(&bot_id).await?;
+        }
+        Ok(())
+    }
+
+    /// The registry record a row's bot id already has, when it does.
+    fn get_from_row(&self, row: &Value) -> Option<BotRecord> {
+        lock(&self.registry)
+            .get(row.get("botId")?.as_str()?)
+            .cloned()
+    }
+
+    /// Give a running bot the ability to spawn bots without a respawn: the
+    /// platform secret and header rule that inject the owner's sandbox API
+    /// key, the guest settings and nested context, and the record flag.
+    /// The whole network policy is replaced, so the current plan's rules
+    /// are rebuilt and kept, with the sandbox API rule added.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown or not running bot, or when the
+    /// rule, the guest write, or the registry write fails.
+    pub async fn allow_spawns(&self, bot_id: &str) -> Result<BotRecord> {
+        let bot_lock = self.lock_for(bot_id);
+        let _held = bot_lock.lock().await;
+        let mut record = self.record(bot_id)?;
+        let sandbox_id = record
+            .sandbox_id
+            .clone()
+            .context("the bot has no sandbox")?;
+        if record.status != BotStatus::Running {
+            bail!(
+                "the bot {} is {}; only a running bot can be given bot spawns",
+                record.name,
+                record.status.as_str()
+            );
+        }
+        if record.parent_bot_id.is_some() {
+            bail!(
+                "the bot {} is itself a bot's child; bots nest two levels deep \
+                 (owner -> bot -> bot), so it cannot be given bot spawns",
+                record.name
+            );
+        }
+        record.bots = true;
+        // The platform labels are fixed at create, so the durable marker
+        // next to the registry carries the flag for a rebuild.
+        let mut spawns = read_spawns_marker(&self.agent_dir);
+        spawns.insert(bot_id.to_string());
+        write_spawns_marker(&self.agent_dir, &spawns)?;
+        // The merged policy: the current plan's rules plus the sandbox API
+        // rule (the plan is what every /secrets refresh would set).
+        let (credentials, logins, _) = self.guest_credentials(&record, record.github).await?;
+        retry(|| {
+            self.platform
+                .set_network_rules(&sandbox_id, &credentials.network_rules)
+        })
+        .await?;
+        // The refresher follows the logins the new rules carry, so a newly
+        // injected login keeps refreshing (as `refresh_network_rules` does).
+        record.logins = logins;
+        if !record.logins.is_empty() {
+            self.refresh_logins(&record).await;
+            self.watch_logins();
+        }
+        let agent_dir = self.agent_dir.clone();
+        let max_bots = tokio::task::spawn_blocking(move || {
+            pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir).get_bots_max_bots()
+                as usize
+        })
+        .await
+        .context("the bots.maxBots read failed")?;
+        let context = super::nested::NestedContext {
+            bot_id: record.bot_id.clone(),
+            owner_session_id: record.owner_session_id.clone(),
+            depth: 1,
+            max_bots,
+            network_rules: credentials.network_rules.clone(),
+        };
+        let team = self.sandbox_key_and_team().await?.1;
+        let prime = serde_json::to_value(pa_core::auth::AuthCredential::ApiKey {
+            key: super::credentials::GUEST_API_KEY_PLACEHOLDER.to_string(),
+            prime_team: team,
+        })?;
+        let env = BTreeMap::from([
+            (
+                "BOT_NESTED_JSON".to_string(),
+                serde_json::to_string(&context)?,
+            ),
+            ("BOT_PRIME_RECORD".to_string(), prime.to_string()),
+        ]);
+        let output = self
+            .exec_ready(
+                &sandbox_id,
+                ALLOW_SPAWNS_SCRIPT,
+                &env,
+                None,
+                Instant::now() + OPERATION_BUDGET,
+            )
+            .await?;
+        check_exit("write the bot's spawn settings", &output)?;
+        self.save(record.clone())?;
+        Ok(record)
     }
 
     /// Rebuild the cache from labels: newest live sandbox per bot wins, the
@@ -597,7 +1030,14 @@ impl BotManager {
             .await
             .context("read this agent dir's sessions")?;
         let mut bot_ids = BTreeSet::new();
-        for sandbox in retry(|| self.platform.list(BOT_LABEL)).await? {
+        // Inside a bot, the listing scope is this bot's children only: the
+        // owner's own bots belong to another daemon's registry.
+        let nested = super::nested::NestedContext::read(&self.agent_dir);
+        let scope = nested.as_ref().map_or_else(
+            || BOT_LABEL.to_string(),
+            |context| super::parent_label(&context.bot_id),
+        );
+        for sandbox in retry(|| self.platform.list(&scope)).await? {
             if sandbox.status.is_terminal() {
                 continue;
             }
@@ -607,10 +1047,18 @@ impl BotManager {
             // A bot this registry never held is adopted only when its owner
             // label names a session of this agent dir. Another agent dir's
             // bot on the same team, or one without an owner label, is left
-            // entirely alone: never adopted, paused, or deleted.
+            // entirely alone: never adopted, paused, or deleted. Inside a
+            // bot, the nested context names the owner its children's labels
+            // carry: that match is trusted without a provable session.
             if self.get(&bot_id).is_none()
-                && !label_value(&sandbox.labels, &format!("{BOT_LABEL}-owner:"))
-                    .is_some_and(|owner| owned_sessions.contains(&owner))
+                && !label_value(&sandbox.labels, &format!("{BOT_LABEL}-owner:")).is_some_and(
+                    |owner| {
+                        nested
+                            .as_ref()
+                            .is_some_and(|context| context.owner_session_id == owner)
+                            || owned_sessions.contains(&owner)
+                    },
+                )
             {
                 continue;
             }
@@ -642,6 +1090,11 @@ impl BotManager {
             let mut record = self
                 .get(&bot_id)
                 .unwrap_or_else(|| rebuilt_record(&bot_id, chosen));
+            if record.parent_bot_id.is_none()
+                && read_spawns_marker(&self.agent_dir).contains(&bot_id)
+            {
+                record.bots = true;
+            }
             record.sandbox_id = Some(chosen.id.clone());
             record.status = chosen.status;
             self.save(record)?;
@@ -946,11 +1399,24 @@ impl BotManager {
         // the relay host they carry, so a later wake pushes only when
         // the relay changes.
         record.pause_rule_host = relay_host;
+        // Inside a bot, the labels name the Mac owner (so its bot list and
+        // bots.maxBots count the children) and the spawning bot (so the
+        // tree and the delete cascade find them).
+        let nested = super::nested::NestedContext::read(&self.agent_dir);
+        let owner = nested.as_ref().map_or(&record.owner_session_id, |context| {
+            &context.owner_session_id
+        });
         let mut labels = vec![
             BOT_LABEL.to_string(),
             bot_label(&record.bot_id),
-            owner_label(&record.owner_session_id),
+            owner_label(owner),
         ];
+        if let Some(context) = &nested {
+            labels.push(super::parent_label(&context.bot_id));
+        }
+        if record.bots {
+            labels.push(super::BOTS_LABEL.to_string());
+        }
         if record.github {
             labels.push(GITHUB_LABEL.to_string());
         }
@@ -985,6 +1451,9 @@ impl BotManager {
     async fn install_and_bootstrap(&self, record: &mut BotRecord, deadline: Instant) -> Result<()> {
         let sandbox_id = record.sandbox_id.clone().context("bot has no sandbox")?;
         let local = version::local_version();
+        // Resolved per install, not cached at manager creation: a tarball
+        // placed next to the binary after the daemon started is used.
+        let source = ReleaseSource::resolve();
         let no_env = BTreeMap::new();
         let guest = self
             .exec_ready(
@@ -996,8 +1465,7 @@ impl BotManager {
             )
             .await?;
         if guest.stdout.trim() != local {
-            // A tarball placed next to the binary after the daemon started is still picked up.
-            let install = Install::prepare(local, &ReleaseSource::resolve())?;
+            let install = Install::prepare(local, &source)?;
             let mut env: BTreeMap<String, String> = install.env.into_iter().collect();
             // The install stops a guest daemon that runs another version.
             env.insert(
@@ -1019,26 +1487,28 @@ impl BotManager {
             check_exit("install prime-agent in the bot", &output)?;
         }
         record.version = local.to_string();
-        // The relay self-pause settings ride the same blocking read as
-        // the factory gate.
+        let guest_already_local = guest.stdout.trim() == local;
         let agent_dir = self.agent_dir.clone();
         // A record rebuilt from labels carries no git author: fall back to
         // the owner's (`bots.gitIdentity`, else this machine's git author)
-        // so a cold boot still commits as the owner.
+        // so a cold boot still commits as the owner. The relay self-pause
+        // settings and the bot-list cap ride the same blocking read.
         let missing_identity = record.git_identity.is_none();
-        let (factory_enabled, identity, self_pause) = tokio::task::spawn_blocking(move || {
-            let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
-            let identity = missing_identity
-                .then(|| super::github::git_identity(&agent_dir))
-                .flatten();
-            (
-                settings.get_factory_enabled(),
-                identity,
-                SelfPauseSettings::read(&agent_dir),
-            )
-        })
-        .await
-        .context("the factory settings read failed")?;
+        let (factory_enabled, identity, self_pause, max_bots) =
+            tokio::task::spawn_blocking(move || {
+                let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
+                let identity = missing_identity
+                    .then(|| super::github::git_identity(&agent_dir))
+                    .flatten();
+                (
+                    settings.get_factory_enabled(),
+                    identity,
+                    SelfPauseSettings::read(&agent_dir),
+                    settings.get_bots_max_bots() as usize,
+                )
+            })
+            .await
+            .context("the factory settings read failed")?;
         if record.git_identity.is_none() {
             record.git_identity = identity;
         }
@@ -1067,15 +1537,78 @@ impl BotManager {
                 }
                 Some(guest)
             }
-            // Best effort: the sandbox's rules are already set.
+            // Best effort: the sandbox's rules are already set. The bot's
+            // own GitHub flag decides its rules, so a reused bot's nested
+            // context keeps the GitHub rules its children inherit.
             None => self
-                .guest_credentials(record, false)
+                .guest_credentials(record, record.github)
                 .await
                 .ok()
                 .map(|(credentials, _, _)| credentials),
         };
         if let Some(auth) = guest.as_ref().and_then(|guest| guest.auth_json.as_ref()) {
             env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
+        }
+        if record.bots {
+            // The nested-spawn context: the guest writes it next to its
+            // registry, so its daemon can hand it to spawns and
+            // `bots allow-spawns` can add it to a running bot.
+            if let Some(guest) = guest.as_ref() {
+                let context = super::nested::NestedContext {
+                    bot_id: record.bot_id.clone(),
+                    owner_session_id: record.owner_session_id.clone(),
+                    depth: 1,
+                    max_bots,
+                    network_rules: guest.network_rules.clone(),
+                };
+                env.insert(
+                    "BOT_NESTED_JSON".to_string(),
+                    serde_json::to_string(&context)?,
+                );
+            }
+        }
+        // A local tarball install keeps its copy in the guest, so a bot
+        // that spawns bots installs the same build into its children. A
+        // wake that skipped the install (the guest already runs this
+        // version) still verifies the copy exists: a sandbox restored
+        // from an older checkpoint may have lost it.
+        if let ReleaseSource::LocalTarball(path) = &source {
+            let installed = guest_already_local;
+            let guest_path = version::guest_tarball_path(local);
+            if installed {
+                let check_env =
+                    BTreeMap::from([("PA_GUEST_TARBALL".to_string(), guest_path.clone())]);
+                let check = self
+                    .exec_ready(
+                        &sandbox_id,
+                        version::TARBALL_CHECK_SCRIPT,
+                        &check_env,
+                        None,
+                        deadline,
+                    )
+                    .await;
+                if !matches!(&check, Ok(output) if output.exit_code == 0) {
+                    let bytes = std::fs::read(path)?;
+                    let restore_env = BTreeMap::from([
+                        ("PA_GUEST_TARBALL".to_string(), guest_path.clone()),
+                        ("PA_TARBALL_BYTES".to_string(), bytes.len().to_string()),
+                    ]);
+                    let output = self
+                        .exec_ready(
+                            &sandbox_id,
+                            version::TARBALL_RESTORE_SCRIPT,
+                            &restore_env,
+                            Some(&bytes),
+                            deadline,
+                        )
+                        .await?;
+                    check_exit("restore the bot tarball in the guest", &output)?;
+                }
+            }
+            env.insert(
+                version::TARBALL_OVERRIDE_ENV.to_string(),
+                version::guest_tarball_path(local),
+            );
         }
         let output = self
             .exec_ready(&sandbox_id, BOOTSTRAP_SCRIPT, &env, None, deadline)
@@ -1205,12 +1738,18 @@ impl BotManager {
 
     /// The header rules and guest auth for a new sandbox of `record`: its
     /// API keys, its GitHub access, and the owner's logins. Also returns
-    /// the logins and the relay host the rules carry.
+    /// the logins and the relay host the rules carry. Inside a bot that
+    /// spawns bots, the children instead inherit this sandbox's rules and
+    /// guest auth, and no platform secret is provisioned from inside a bot.
     async fn guest_credentials(
         &self,
         record: &BotRecord,
         github: bool,
     ) -> Result<(GuestCredentials, Vec<String>, Option<String>)> {
+        if let Some(context) = super::nested::NestedContext::read(&self.agent_dir) {
+            let (credentials, logins) = self.nested_credentials(&context, record, github)?;
+            return Ok((credentials, logins, None));
+        }
         self.credentials_for(record, Some(guest_provider(record)), github)
             .await
     }
@@ -1326,7 +1865,127 @@ impl BotManager {
             }
             credentials.auth_json = Some(Value::Object(auth));
         }
+        if record.bots {
+            let (key, team) = self.sandbox_key_and_team().await?;
+            self.platform
+                .put_secret(
+                    &super::credentials::bots_secret_name(&key),
+                    &key,
+                    "Prime Agent bot sandbox credential (nested bots)",
+                )
+                .await?;
+            let rules = std::mem::take(&mut credentials.network_rules);
+            credentials.network_rules = super::credentials::with_bots_rule(rules, &key);
+            credentials.auth_json = Some(super::credentials::ensure_prime_inference(
+                credentials.auth_json,
+                team.as_ref(),
+            ));
+        }
         Ok((credentials, providers, relay_rule_host))
+    }
+
+    /// The credentials a bot passes its children: this sandbox's rules
+    /// minus the sandbox API rule, and this guest's own auth and MCP
+    /// settings. The child's model must run on one of the injected
+    /// providers.
+    fn nested_credentials(
+        &self,
+        context: &super::nested::NestedContext,
+        record: &BotRecord,
+        github: bool,
+    ) -> Result<(GuestCredentials, Vec<String>)> {
+        let auth_json = read_guest_json(&self.agent_dir, "auth.json");
+        // The login dependencies the children carry: the guest auth's
+        // non-API-key records are the injected logins, so the owner-side
+        // refresher keeps their secrets fresh for the children too.
+        let logins: Vec<String> = auth_json
+            .as_ref()
+            .and_then(Value::as_object)
+            .map(|auth| {
+                auth.iter()
+                    .filter(|(_, record)| {
+                        record.get("type").and_then(Value::as_str) != Some("api_key")
+                    })
+                    .map(|(provider, _)| provider.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let provider = guest_provider(record);
+        let mut network_rules = context.child_rules();
+        if !github {
+            // Both GitHub hosts go: the git smart-HTTP host and the REST
+            // host the `gh` CLI and API clients use.
+            network_rules.remove(super::github::GIT_HOST);
+            network_rules.remove(super::github::API_HOST);
+        }
+        // The child's provider needs credentials this sandbox actually
+        // holds: an auth record, and — for a provider whose models ride an
+        // API-key rule — a rule host in the inherited set. The Prime
+        // Inference placeholder is always present (it carries the billing
+        // team), so the record alone proves nothing there; a login-only
+        // provider (Copilot, Codex) has no API-key host, so its record is
+        // the whole proof. The spawn fails here, before anything is billed.
+        let injected: Vec<&str> = auth_json
+            .as_ref()
+            .and_then(Value::as_object)
+            .map(|auth| auth.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        let mut hosts = super::credentials::provider_rule_hosts(provider);
+        if hosts.is_empty() {
+            // A subscription login has no API-key host; its login rule host
+            // is the proof, so a revoked login (its rule dropped from the
+            // inherited set) refuses the child.
+            hosts = super::logins::login_rule_hosts(provider)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+        }
+        let credible = injected.contains(&provider)
+            && (hosts.is_empty() || hosts.iter().any(|host| network_rules.contains_key(host)));
+        if !credible {
+            let known = if injected.is_empty() {
+                "none are".to_string()
+            } else {
+                injected.join(", ")
+            };
+            bail!(
+                "this bot cannot spawn a bot on {provider}: its sandbox holds no {provider} \
+                 credentials; the injected providers are: {known}"
+            );
+        }
+        Ok((
+            GuestCredentials {
+                network_rules,
+                mcp_servers: read_guest_json(&self.agent_dir, "settings.json")
+                    .as_ref()
+                    .and_then(|settings| settings.get("mcpServers").cloned())
+                    .filter(|servers| !servers.as_object().is_some_and(serde_json::Map::is_empty)),
+                mcp_connections: read_guest_json(&self.agent_dir, "mcp-connections.json"),
+                auth_json,
+            },
+            logins,
+        ))
+    }
+
+    /// The owner's sandbox API key and its team, read off the runtime.
+    async fn sandbox_key_and_team(
+        &self,
+    ) -> Result<(String, Option<pa_core::auth::PrimeTeamCredential>)> {
+        let agent_dir = self.agent_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+            let key = auth
+                .get_api_key(pa_core::auth::PRIME_INFERENCE_PROVIDER_ID)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Bots need a Prime API key. Log in to Prime Inference or set \
+                         PRIME_API_KEY."
+                    )
+                })?;
+            Ok((key, super::credentials::effective_prime_team_of(&mut auth)))
+        })
+        .await
+        .context("the Prime credential read failed")?
     }
 
     /// Run a guest command once the sandbox gateway answers: retries
@@ -1438,8 +2097,39 @@ impl BotManager {
             registry.add_orphans(&checkpoints)?;
             registry.remove(bot_id)?;
         }
+        let mut spawns = read_spawns_marker(&self.agent_dir);
+        if spawns.remove(bot_id) {
+            let _ = write_spawns_marker(&self.agent_dir, &spawns);
+        }
         self.delete_orphans(checkpoints).await
     }
+}
+
+/// One JSON file of this daemon's agent dir, when it parses.
+fn read_guest_json(agent_dir: &Path, name: &str) -> Option<Value> {
+    serde_json::from_str(&std::fs::read_to_string(agent_dir.join(name)).ok()?).ok()
+}
+
+/// The bot ids that may spawn bots, durably recorded next to the registry:
+/// the platform labels are set at create only, so `allow_spawns` marks a
+/// running bot here, where a registry rebuild still finds the flag.
+fn spawns_marker_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("bots").join("spawns.json")
+}
+
+fn read_spawns_marker(agent_dir: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(spawns_marker_path(agent_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_spawns_marker(agent_dir: &Path, ids: &BTreeSet<String>) -> Result<()> {
+    let path = spawns_marker_path(agent_dir);
+    if let Some(dir) = path.parent() {
+        pa_core::platform::perms::create_dir_all_private(dir)?;
+    }
+    crate::descriptor::write_file_atomic(&path, &serde_json::to_string(ids)?)
 }
 
 fn is_transient(error: &anyhow::Error) -> bool {
@@ -1622,6 +2312,55 @@ fn sort_newest_first(sandboxes: &mut [BotSandbox]) {
     sandboxes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 }
 
+/// One `list_bots` row of a bot's daemon, as this daemon's record for the
+/// child: the row's facts over an existing record's, the fields the row
+/// does not carry kept from it. `None` for a row without identity, or one
+/// whose bot never provisioned (no sandbox and no checkpoint).
+fn child_record(
+    row: &Value,
+    parent_bot_id: &str,
+    existing: Option<BotRecord>,
+) -> Option<BotRecord> {
+    let text = |key: &str| row.get(key).and_then(Value::as_str);
+    let bot_id = text("botId")?;
+    if row.get("sandboxId").and_then(Value::as_str).is_none()
+        && row.get("checkpointId").and_then(Value::as_str).is_none()
+    {
+        return None;
+    }
+    let existing = existing.unwrap_or_default();
+    let field = |key: &str| row.get(key).cloned().unwrap_or(Value::Null);
+    Some(BotRecord {
+        bot_id: bot_id.to_string(),
+        name: text("name").unwrap_or_default().to_string(),
+        owner_session_id: text("ownerSessionId").unwrap_or_default().to_string(),
+        owner_active_session_id: None,
+        sandbox_id: text("sandboxId").map(str::to_string),
+        status: serde_json::from_value(field("status")).unwrap_or(BotStatus::Stopped),
+        checkpoint_id: text("checkpointId").map(str::to_string),
+        older_checkpoint_ids: existing.older_checkpoint_ids,
+        version: text("version").unwrap_or_default().to_string(),
+        model: text("model").map(str::to_string),
+        thinking: existing.thinking,
+        created_at: field("createdAt").as_i64().unwrap_or_default(),
+        last_turn_at: field("lastTurnAt").as_i64(),
+        guest_session_id: text("guestSessionId").unwrap_or_default().to_string(),
+        guest_session_file: existing.guest_session_file,
+        generation: existing.generation,
+        github: row.get("github").and_then(Value::as_bool).unwrap_or(false),
+        git_identity: existing.git_identity,
+        logins: existing.logins,
+        // Host-side fields the guest rows never carry: keep what the
+        // registry already holds, so a sync does not drop the child's
+        // relay authentication.
+        pause_rule_host: existing.pause_rule_host,
+        bots: false,
+        parent_bot_id: Some(parent_bot_id.to_string()),
+        pause_at: field("pauseAt").as_i64(),
+        pause_token: existing.pause_token,
+    })
+}
+
 /// A registry record rebuilt from a live sandbox's labels.
 fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
     BotRecord {
@@ -1645,6 +2384,10 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         // every generation the bot used, so no old idempotency key repeats.
         generation: u32::try_from(now_ms() / 1000).unwrap_or(u32::MAX),
         github: sandbox.labels.iter().any(|label| label == GITHUB_LABEL),
+        bots: sandbox
+            .labels
+            .iter()
+            .any(|label| label == super::BOTS_LABEL),
         // The guest's git config already holds it.
         git_identity: None,
         logins: sandbox
@@ -1656,6 +2399,8 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         // A rebuilt record gets a fresh one at its next wake.
         pause_token: None,
         pause_rule_host: None,
+        parent_bot_id: label_value(&sandbox.labels, &format!("{BOT_LABEL}-parent:")),
+        pause_at: None,
     }
 }
 

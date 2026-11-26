@@ -21,7 +21,7 @@ use super::ledger::{BotLedger, DeliveryState};
 use super::platform::PlatformError;
 use super::registry::BotRegistry;
 use super::remote_parent::RemoteParentEntry;
-use super::{manager_for, BotRecord, BotStatus};
+use super::{manager_for, BotManager, BotRecord, BotStatus};
 use pa_core::session_engine::agent_messaging::DEFAULT_AGENT_MESSAGE_MAX_CHARS;
 
 use crate::backpressure::RouteAdmission;
@@ -504,7 +504,42 @@ impl Supervisor {
         if settled > 0 {
             manager.record_turn(bot_id)?;
         }
+        // The bot's children land in this registry, so the /bots tree and
+        // the delete cascade know them; a child the bot deleted itself goes
+        // again. A bot without children answers an empty list.
+        if let Err(error) = self.sync_child_bots(&manager, record, &mut client).await {
+            eprintln!("pa-daemon: bots: {bot_id}: child bot sync failed: {error:#}");
+        }
         Ok(())
+    }
+
+    /// Pull the bot's children (its own daemon's `list_bots` rows) into
+    /// this registry.
+    async fn sync_child_bots(
+        self: &Arc<Self>,
+        manager: &BotManager,
+        record: &BotRecord,
+        client: &mut GuestClient,
+    ) -> Result<()> {
+        let reply = client
+            .command(&DaemonCommand::ListBots {
+                id: None,
+                owner_session_id: None,
+                rest: Map::default(),
+            })
+            .await
+            .map_err(|error| anyhow!("the bot did not list its children: {error}"))?;
+        // A guest without a registry answers an empty, marked list: that is
+        // not "the children are gone", so the merged records stay.
+        if reply.get("registry").and_then(Value::as_bool) == Some(false) {
+            return Ok(());
+        }
+        let rows = reply
+            .get("bots")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        manager.merge_children(&record.bot_id, &rows).await
     }
 
     /// Route one bot message into the owner session, waking it by its

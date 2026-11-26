@@ -60,6 +60,25 @@ pub fn tarball_name(version: &str) -> String {
     format!("prime-agent-{version}-linux-x64.tar.gz")
 }
 
+/// Checks the guest still holds the tarball copy (`$PA_GUEST_TARBALL`).
+/// A fixed script, so tests recognize it next to the other guest scripts.
+pub const TARBALL_CHECK_SCRIPT: &str = r#"test -s "$PA_GUEST_TARBALL""#;
+
+/// Restores the guest's tarball copy from stdin (`$PA_GUEST_TARBALL`,
+/// `$PA_TARBALL_BYTES`).
+pub const TARBALL_RESTORE_SCRIPT: &str = r#"mkdir -p "$(dirname "$PA_GUEST_TARBALL")" && head -c "$PA_TARBALL_BYTES" > "$PA_GUEST_TARBALL""#;
+
+/// Where [`INSTALL_SCRIPT`] keeps a local tarball inside the guest, so a
+/// bot that spawns bots can install the same build into its children.
+pub const GUEST_TARBALL_DIR: &str = "/root/.prime-agent-bot-tarball";
+
+/// The tarball a bot's own daemon installs its children from, when this
+/// machine installs from a local tarball.
+#[must_use]
+pub fn guest_tarball_path(version: &str) -> String {
+    format!("{GUEST_TARBALL_DIR}/{}", tarball_name(version))
+}
+
 /// One install run: the script env and the optional stdin payload.
 #[derive(Debug, Clone)]
 pub struct Install {
@@ -145,6 +164,9 @@ if [ -n "${PA_TARBALL_BYTES:-}" ]; then
     echo "the bot tarball is prime-agent ${tarball_version}, not ${PA_VERSION}" >&2
     exit 4
   fi
+  # A bot that spawns bots installs its children from this same tarball.
+  mkdir -p /root/.prime-agent-bot-tarball
+  cp "$asset" /root/.prime-agent-bot-tarball/
 else
   base="https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${PA_VERSION}"
   status="$(curl -sSL --retry 3 -o SHA256SUMS -w '%{http_code}' "$base/SHA256SUMS" || true)"

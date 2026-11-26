@@ -283,6 +283,8 @@ pub struct FactorySettings {
 /// git author the bots commit as. `bots.inject.<name>` (default on)
 /// turns off one credential's injection into new bots; `<name>` is its
 /// auth storage id (a provider id or `mcp:<server>`).
+/// `bots.maxBots` (default 10) caps the owner's bot list, the bots a bot
+/// spawns included.
 /// `bots.secrets` holds the custom secrets' hosts and headers (their
 /// values stay in the auth storage). `bots.selfPauseMinutes` (default
 /// 10, `0` disables) is how long a bot's guest daemon stays idle before
@@ -295,6 +297,9 @@ pub struct FactorySettings {
 pub struct BotsSettings {
     pub enabled: Option<bool>,
     pub github: Option<bool>,
+    /// The owner's bot list size cap; kept raw so a malformed value never
+    /// fails the whole settings file.
+    pub max_bots: Option<serde_json::Value>,
     /// A [`BotGitIdentity`]; kept raw so a malformed value never fails
     /// the whole settings file.
     pub git_identity: Option<serde_json::Value>,
@@ -350,6 +355,9 @@ pub struct TelemetrySettings {
 
 /// The default time limit for user `python_repl` cells: 60 seconds.
 pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
+
+/// The default `bots.maxBots`: the owner's bot list size cap.
+pub const DEFAULT_BOTS_MAX_BOTS: usize = 10;
 
 /// The default inbox reminder repeat interval: 10 minutes.
 pub const DEFAULT_AGENT_INBOX_REMINDER_INTERVAL_MS: u64 = 600_000;

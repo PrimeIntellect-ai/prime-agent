@@ -257,6 +257,7 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
     RlmSpawnRequest {
         target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
         github: None,
+        bots: false,
         prompt: prompt.to_string(),
         name: Some(name.to_string()),
         model: None,
@@ -770,6 +771,7 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
         factory: None,
         target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
         github: None,
+        bots: false,
     };
     let handle = children
         .spawn(request)
@@ -1030,6 +1032,7 @@ async fn a_passivated_decision_child_revives_as_a_decision_child_and_answers() {
         factory: None,
         target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
         github: None,
+        bots: false,
     };
     let handle = children
         .spawn(request)

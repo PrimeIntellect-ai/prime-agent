@@ -634,6 +634,20 @@ pub enum DaemonCommand {
         /// The bot's GitHub access; `None` follows the `bots.github` setting.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         github: Option<bool>,
+        /// The bot may spawn its own bots (the nested-spawn flag).
+        #[serde(default)]
+        bots: bool,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// `allow_bot_spawns`: give one running bot the ability to spawn bots
+    /// (the `prime-agent bots allow-spawns` path; the daemon owns the
+    /// registry, so the grant cannot race a daemon write).
+    AllowBotSpawns {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// The bot's id, or its name when only one bot carries it.
+        bot: String,
         #[serde(flatten)]
         rest: JsonMap,
     },

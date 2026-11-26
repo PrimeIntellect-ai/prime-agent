@@ -54,6 +54,26 @@ pub fn expired_message(provider: &str) -> String {
     format!("the owner's {provider} login expired; log in again on the Mac")
 }
 
+/// The rule hosts a subscription login rides: a nested child's provider
+/// check requires one of them in the inherited rules, so a login the owner
+/// revoked (its rule left the sandbox policy) refuses the child even
+/// though the guest's stale auth record remains. Copilot enterprise URLs
+/// differ; the standard host still proves the standard login.
+#[must_use]
+pub fn login_rule_hosts(provider: &str) -> &'static [&'static str] {
+    match provider {
+        ANTHROPIC_PROVIDER_ID => &["api.anthropic.com"],
+        OPENAI_CODEX_PROVIDER_ID => &["chatgpt.com"],
+        GITHUB_COPILOT_PROVIDER_ID => &[
+            "api.individual.githubcopilot.com",
+            "api.business.githubcopilot.com",
+            "api.githubcopilot.com",
+        ],
+        XAI_PROVIDER_ID => &["api.x.ai"],
+        _ => &[],
+    }
+}
+
 /// One login's secrets (name, value), header rules, and guest record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoginInjection {

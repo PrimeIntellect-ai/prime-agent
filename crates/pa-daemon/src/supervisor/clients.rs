@@ -781,6 +781,12 @@ impl Supervisor {
                 )],
                 false,
             ),
+            DaemonCommand::AllowBotSpawns { .. } => (
+                vec![response_line(
+                    &self.handle_allow_bot_spawns(&command_id, command).await,
+                )],
+                false,
+            ),
             DaemonCommand::DeleteBot { .. } => (
                 vec![response_line(
                     &self.handle_delete_bot(&command_id, command).await,

@@ -8,7 +8,11 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-use super::commands::{admit_bot_spawn, BOTS_DISABLED_MESSAGE};
+use std::collections::BTreeMap;
+
+use super::commands::{
+    admit_bot_spawn, admit_nested_spawn, BOTS_DISABLED_MESSAGE, BOT_MAY_NOT_SPAWN_MESSAGE,
+};
 use super::guest::GuestClient;
 use super::ledger::{recover_all, BotLedger, MessageState};
 use super::send::{send_message, send_task, send_within, SendError};
@@ -26,17 +30,65 @@ async fn a_bot_spawn_is_refused_until_the_user_opts_in() {
         if let Some(document) = document {
             std::fs::write(&settings, document).unwrap();
         }
-        let refused = admit_bot_spawn(dir.path())
+        let refused = admit_bot_spawn(dir.path(), false)
             .await
             .expect_err("the gate refuses");
         assert_eq!(refused.to_string(), BOTS_DISABLED_MESSAGE);
     }
     std::fs::write(&settings, r#"{"bots": {"enabled": true}}"#).unwrap();
-    admit_bot_spawn(dir.path())
+    admit_bot_spawn(dir.path(), false)
         .await
         .expect("the opt-in admits");
     // The refusals moved no bot state.
     assert!(!dir.path().join("bots").exists());
+}
+
+/// Inside a bot, the nested context decides: without it the spawn fails
+/// with the bot refusal (never a platform call), and the `bots=True` flag
+/// cannot pass the depth cap on.
+#[tokio::test]
+async fn a_bot_without_the_nested_context_may_not_spawn_bots() {
+    let dir = tempfile::tempdir().unwrap();
+    // The guest settings opt in; the nested context is what is missing.
+    let refused = admit_nested_spawn(dir.path(), false)
+        .await
+        .expect_err("a bot without the context refuses");
+    assert_eq!(refused.to_string(), BOT_MAY_NOT_SPAWN_MESSAGE);
+
+    // With the context at the depth cap, both the spawn and the flag refuse.
+    let context = super::nested::NestedContext {
+        bot_id: "bot-a".into(),
+        owner_session_id: "owner-1".into(),
+        depth: super::MAX_BOT_DEPTH,
+        max_bots: 10,
+        network_rules: BTreeMap::default(),
+    };
+    let path = super::nested::NestedContext::path_in(dir.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_string(&context).unwrap()).unwrap();
+    let refused = admit_nested_spawn(dir.path(), false)
+        .await
+        .expect_err("the depth cap refuses");
+    assert!(refused.to_string().contains("two levels"), "{refused}");
+    // The depth cap answer comes first for a flagged spawn too.
+    let refused = admit_nested_spawn(dir.path(), true)
+        .await
+        .expect_err("the depth cap refuses a flagged spawn");
+    assert!(refused.to_string().contains("two levels"), "{refused}");
+
+    // One level up, the plain spawn admits and the flag cannot pass on.
+    let context = super::nested::NestedContext {
+        depth: 1,
+        ..context
+    };
+    std::fs::write(&path, serde_json::to_string(&context).unwrap()).unwrap();
+    admit_nested_spawn(dir.path(), false)
+        .await
+        .expect("a bot with the context admits");
+    let refused = admit_nested_spawn(dir.path(), true)
+        .await
+        .expect_err("the flag cannot pass on");
+    assert!(refused.to_string().contains("bots=True"), "{refused}");
 }
 
 /// What the fake guest does with one `send_message`.

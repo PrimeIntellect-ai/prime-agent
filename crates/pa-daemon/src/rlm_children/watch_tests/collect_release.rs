@@ -103,6 +103,7 @@ async fn a_blocking_collect_releases_all_selected_prompts_before_waiting() {
             factory: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
+            bots: false,
         })
         .await
         .expect("spawn first child");
@@ -118,6 +119,7 @@ async fn a_blocking_collect_releases_all_selected_prompts_before_waiting() {
             factory: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
+            bots: false,
         })
         .await
         .expect("spawn second child");

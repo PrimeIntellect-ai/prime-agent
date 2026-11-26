@@ -9,7 +9,8 @@ use pa_daemon::bots::github;
 
 use crate::config::get_agent_dir;
 
-const USAGE: &str = "Usage: prime-agent bots github <set|clear|status>";
+const USAGE: &str =
+    "Usage: prime-agent bots github <set|clear|status> | prime-agent bots allow-spawns <bot>";
 
 /// Run the `bots` command; returns the process exit code.
 pub fn run_bots_command(args: &[String]) -> i32 {
@@ -22,6 +23,7 @@ pub fn run_bots_command(args: &[String]) -> i32 {
             status(&agent_dir);
             Ok(())
         }
+        ["allow-spawns", bot] => allow_spawns(bot),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -125,6 +127,46 @@ fn delete_platform_secrets(agent_dir: &Path) -> anyhow::Result<usize> {
         .enable_all()
         .build()?
         .block_on(github::delete_secrets(&client))
+}
+
+/// Give one running bot the ability to spawn bots without a respawn: the
+/// platform rule that injects the owner's sandbox API key, the guest
+/// settings and nested context, and the record flag.
+fn allow_spawns(bot: &str) -> Result<(), String> {
+    // The daemon owns the bots registry: the grant goes through it, so it
+    // can never race a daemon write or be overwritten by one.
+    use crate::daemon_client::DaemonClient;
+    let socket = crate::config::resolve_daemon_socket_path(None);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime
+        .block_on(async {
+            let mut client = DaemonClient::connect(&socket).map_err(|error| error.to_string())?;
+            let response = client
+                .request_with_timeout(
+                    pa_types::daemon::DaemonCommand::AllowBotSpawns {
+                        id: None,
+                        bot: bot.to_string(),
+                        rest: serde_json::Map::default(),
+                    },
+                    16 * 60 * 1000,
+                )
+                .map_err(|error| error.to_string())?;
+            if !response.success {
+                return Err(response
+                    .error
+                    .unwrap_or_else(|| "the daemon refused".to_string()));
+            }
+            Ok(())
+        })
+        .map_err(|error: String| error)?;
+    println!(
+        "{bot} may now spawn bots. With this, any code in that bot can call the whole \
+         Prime sandbox API as the owner; prefer a dedicated, sandbox-scoped API key."
+    );
+    Ok(())
 }
 
 fn status(agent_dir: &Path) {

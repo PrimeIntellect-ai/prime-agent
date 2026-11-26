@@ -442,6 +442,17 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
+    /// `bots.maxBots` (default 10): the owner's bot list size cap, children
+    /// included. Unset, malformed, and non-positive values read as the
+    /// default.
+    #[must_use]
+    pub fn get_bots_max_bots(&self) -> u64 {
+        self.global_raw()
+            .and_then(|document| document.get("bots")?.get("maxBots")?.as_u64())
+            .filter(|max| *max >= 1)
+            .unwrap_or(crate::settings::types::DEFAULT_BOTS_MAX_BOTS as u64)
+    }
+
     /// `bots.gitIdentity`: the git author the bots commit as, when the
     /// global settings name both a name and an email.
     #[must_use]

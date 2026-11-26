@@ -29,6 +29,49 @@ use super::secrets::{Candidate, Planned, SecretKind, SecretStatus};
 /// rides in with the real key, outside the sandbox.
 pub const GUEST_API_KEY_PLACEHOLDER: &str = "injected-by-platform";
 
+/// The host the sandbox API lives on: the host a nested bot's header rule
+/// targets. The key value the rule injects never enters the sandbox.
+#[must_use]
+pub fn sandbox_api_host() -> String {
+    base_url_host(pa_sandbox::DEFAULT_BASE_URL).unwrap_or_else(|| "api.primeintellect.ai".into())
+}
+
+/// The platform secret that holds the owner's sandbox API key for a bot
+/// that spawns bots. Fingerprinted, so a rotated key gets a new secret.
+#[must_use]
+pub fn bots_secret_name(key: &str) -> String {
+    format!("PRIME_AGENT_BOTS_KEY_{}", key_fingerprint(key))
+}
+
+/// The sandbox API rule added to a bot's current rules: every rule the
+/// policy already has is kept, and the sandbox API host's entry becomes
+/// the injected key (a bot that already had a rule there is upgraded, not
+/// widened).
+#[must_use]
+pub fn with_bots_rule(
+    mut rules: BTreeMap<String, HeaderRule>,
+    key: &str,
+) -> BTreeMap<String, HeaderRule> {
+    let (host, rule) = bots_rule(key);
+    rules.insert(host, rule);
+    rules
+}
+
+/// The header rule that puts the owner's sandbox API key on the sandbox
+/// API host's requests from inside a bot that spawns bots.
+#[must_use]
+pub fn bots_rule(key: &str) -> (String, HeaderRule) {
+    (
+        sandbox_api_host(),
+        HeaderRule {
+            headers: BTreeMap::from([(
+                "Authorization".to_string(),
+                format!("Bearer ${{prime.secrets.{}}}", bots_secret_name(key)),
+            )]),
+        },
+    )
+}
+
 /// The platform root certificate inside the sandbox. The platform
 /// terminates TLS for the rule hosts to set their headers, so the guest's
 /// clients must trust it.
@@ -127,6 +170,13 @@ pub(super) fn base_url_host(base_url: &str) -> Option<String> {
     let authority = rest.split(['/', '?', '#']).next()?;
     let host = authority.split(':').next()?;
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// The API hosts `provider`'s rules would cover: the hosts a child needs
+/// to see in its inherited rules to run on `provider`.
+#[must_use]
+pub fn provider_rule_hosts(provider: &str) -> Vec<String> {
+    provider_rules(provider, "").keys().cloned().collect()
 }
 
 /// The rules that set `secret` in `provider`'s auth header on each API
@@ -524,6 +574,41 @@ async fn secret_names(
         .collect())
 }
 
+/// Put the Prime Inference placeholder record (with `prime_team`) into a
+/// guest auth document, keeping every other record: a bot that spawns bots
+/// needs a Prime record so its daemon builds a sandbox client whose
+/// Authorization the platform replaces. `None` becomes the prime-inference
+/// document.
+///
+/// # Panics
+///
+/// Panics when the record cannot serialize; it is a plain data struct, so
+/// it always can.
+#[must_use]
+pub fn ensure_prime_inference(
+    auth_json: Option<serde_json::Value>,
+    prime_team: Option<&PrimeTeamCredential>,
+) -> serde_json::Value {
+    let record = AuthCredential::ApiKey {
+        key: GUEST_API_KEY_PLACEHOLDER.to_string(),
+        prime_team: prime_team.cloned(),
+    };
+    let record = serde_json::to_value(record).expect("an auth record serializes");
+    let mut auth = match auth_json {
+        Some(serde_json::Value::Object(auth)) => auth,
+        _ => serde_json::Map::new(),
+    };
+    auth.insert(PRIME_INFERENCE_PROVIDER_ID.to_string(), record);
+    serde_json::Value::Object(auth)
+}
+
+/// The team the guest's Prime Inference record bills to, as the auth
+/// storage resolves it.
+#[must_use]
+pub fn effective_prime_team_of(auth: &mut AuthStorage) -> Option<PrimeTeamCredential> {
+    effective_prime_team(auth)
+}
+
 /// The guest's auth storage: one API-key record per injected provider,
 /// holding the placeholder. The Prime Inference record carries its billing
 /// team. `None` when no provider is injected.
@@ -590,6 +675,22 @@ mod tests {
                 headers: BTreeMap::from([(header.to_string(), value.to_string())]),
             },
         )])
+    }
+
+    #[test]
+    fn the_bots_rule_keeps_the_current_rules() {
+        let current = header_rule("api.example.com", "Authorization", "Bearer keep");
+        let merged = with_bots_rule(current.clone(), "sk-prime");
+        assert_eq!(
+            merged["api.example.com"], current["api.example.com"],
+            "the current rule is kept"
+        );
+        let api = &merged[&sandbox_api_host()];
+        assert_eq!(
+            api.headers["Authorization"],
+            format!("Bearer ${{prime.secrets.{}}}", bots_secret_name("sk-prime")),
+            "the sandbox API rule is added"
+        );
     }
 
     #[test]
