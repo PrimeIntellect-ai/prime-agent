@@ -560,6 +560,27 @@ impl Supervisor {
         if settled > 0 {
             manager.record_turn(bot_id)?;
         }
+        // The guest session's live model and thinking, as the record's:
+        // the /bots row shows them, and the next create provisions the
+        // model's provider key (a `set_model` in the guest otherwise
+        // leaves the record at the spawn model).
+        match client
+            .command(&DaemonCommand::GetState {
+                id: None,
+                active_session_id: record.guest_session_id.clone(),
+                rest: Map::default(),
+            })
+            .await
+        {
+            Ok(state) => {
+                if let Err(error) = manager.adopt_guest_model(bot_id, &state) {
+                    eprintln!("pa-daemon: bots: {bot_id}: the model sync failed: {error:#}");
+                }
+            }
+            Err(error) => {
+                eprintln!("pa-daemon: bots: {bot_id}: the model read failed: {error}");
+            }
+        }
         // The bot's children land in this registry, so the /bots tree and
         // the delete cascade know them; a child the bot deleted itself goes
         // again. A bot without children answers an empty list.

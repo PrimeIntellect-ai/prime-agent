@@ -2956,3 +2956,224 @@ async fn a_secrets_refresh_rewrites_a_spawning_bots_nested_context() {
         .expect("the nested write ran");
     assert!(rewrite.1.contains_key("BOT_NESTED_JSON"));
 }
+
+/// Run the bootstrap's guest client (`BOT_CLIENT` `create`) against a fake
+/// guest daemon socket and return the create command it sent. The reply
+/// names a session file, like the guest daemon's create does.
+#[cfg(unix)]
+fn run_bot_client(
+    home: &std::path::Path,
+    session_file: Option<&std::path::Path>,
+) -> serde_json::Value {
+    use std::io::{BufRead, BufReader, Write};
+    let socket = home.join("daemon.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let reply_home = home.to_path_buf();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        writer
+            .write_all(
+                b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7}}\n",
+            )
+            .unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        let id = envelope["id"].as_str().unwrap().to_string();
+        let reply = serde_json::json!({
+            "type": "response",
+            "id": id,
+            "success": true,
+            "data": {
+                "activeSessionId": "s1",
+                "sessionFile": format!("{}/s1.jsonl", reply_home.display()),
+            },
+        });
+        writer
+            .write_all((reply.to_string() + "\n").as_bytes())
+            .unwrap();
+        envelope
+    });
+    let mut command = std::process::Command::new("python3");
+    command
+        .arg("-c")
+        .arg(super::manager::BOT_CLIENT)
+        .arg("create")
+        .env("HOME", home)
+        .env("PRIME_AGENT_DAEMON_SOCKET", &socket)
+        .env("BOT_NAME", "bot-a")
+        .env(
+            "BOT_CONFIG",
+            r#"{"cwd": "/root", "provider": "prime-inference", "model": "model-a", "thinking": "high"}"#,
+        );
+    match session_file {
+        Some(file) => command.env("BOT_SESSION_FILE", file),
+        None => command.env_remove("BOT_SESSION_FILE"),
+    };
+    let status = command.status().expect("python3");
+    assert!(status.success(), "the guest client create failed");
+    server.join().expect("the fake guest daemon answered")
+}
+
+/// A reopened bot session keeps its own model: the create the bootstrap
+/// sends must not carry the spawn-time model, provider, or thinking,
+/// because an explicit create flag overrides the model the session file
+/// pins (every `set_model` lands there). Otherwise a cold restore or an
+/// upgrade reverts a bot to its spawn model.
+#[cfg(unix)]
+#[test]
+fn a_reopened_bot_session_keeps_its_own_model() {
+    let home = tempfile::tempdir().unwrap();
+    let session = home.path().join("s1.jsonl");
+    std::fs::write(&session, r#"{"role": "user"}"#).unwrap();
+    let envelope = run_bot_client(home.path(), Some(&session));
+    let command = &envelope["command"];
+    assert_eq!(
+        command["sessionPath"].as_str(),
+        Some(session.to_str().unwrap()),
+        "the session was reopened"
+    );
+    for key in ["provider", "model", "thinking"] {
+        assert!(
+            command["config"].get(key).is_none(),
+            "the reopened create must not carry {key}"
+        );
+    }
+}
+
+/// The guest's marker file names the session when the record lost it (a
+/// registry rebuilt from labels): that reopen keeps the session's model
+/// too, not the spawn-time one.
+#[cfg(unix)]
+#[test]
+fn a_marker_named_session_also_keeps_its_model() {
+    let home = tempfile::tempdir().unwrap();
+    let session = home.path().join("s1.jsonl");
+    std::fs::write(&session, r#"{"role": "user"}"#).unwrap();
+    std::fs::write(
+        home.path().join(".prime-agent-bot-session"),
+        session.to_str().unwrap(),
+    )
+    .unwrap();
+    let envelope = run_bot_client(home.path(), None);
+    let command = &envelope["command"];
+    assert_eq!(
+        command["sessionPath"].as_str(),
+        Some(session.to_str().unwrap()),
+        "the marker-named session was reopened"
+    );
+    assert!(
+        command["config"].get("model").is_none(),
+        "the reopened create must not carry the model"
+    );
+}
+
+/// A bot session that does not exist yet still gets the spawn model: the
+/// create carries it, so a fresh sandbox boots the model the owner chose.
+#[cfg(unix)]
+#[test]
+fn a_new_bot_session_gets_the_spawn_model() {
+    let home = tempfile::tempdir().unwrap();
+    let envelope = run_bot_client(home.path(), None);
+    let command = &envelope["command"];
+    assert!(
+        command.get("sessionPath").is_none(),
+        "no session was reopened"
+    );
+    assert_eq!(command["config"]["model"], "model-a");
+    assert_eq!(command["config"]["provider"], "prime-inference");
+    assert_eq!(command["config"]["thinking"], "high");
+}
+
+/// The follow sync adopts the guest session's live model and thinking
+/// into the record: the /bots row shows them, and the next create
+/// provisions the model's provider key. A summary without a model leaves
+/// the record alone.
+#[tokio::test(start_paused = true)]
+async fn the_follow_sync_adopts_the_guests_model() {
+    let (dir, _platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    assert_eq!(
+        manager.get("bot-a").unwrap().model.as_deref(),
+        Some("prime-inference/model-a")
+    );
+
+    // The guest's `get_state` summary after a `set_model`.
+    manager
+        .adopt_guest_model(
+            "bot-a",
+            &serde_json::json!({
+                "model": { "id": "model-b", "provider": "openai" },
+                "thinkingLevel": "high",
+            }),
+        )
+        .unwrap();
+    let record = manager.get("bot-a").unwrap();
+    assert_eq!(record.model.as_deref(), Some("openai/model-b"));
+    assert_eq!(record.thinking.as_deref(), Some("high"));
+    assert_eq!(
+        super::registry::BotRegistry::load(dir.path())
+            .unwrap()
+            .get("bot-a")
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("openai/model-b"),
+        "the file on disk carries the model"
+    );
+
+    // An unchanged summary writes nothing new; a "default" (unset) level
+    // keeps the record's thinking; one without a model keeps the model.
+    manager
+        .adopt_guest_model(
+            "bot-a",
+            &serde_json::json!({
+                "model": { "id": "model-b", "provider": "openai" },
+                "thinkingLevel": "default",
+            }),
+        )
+        .unwrap();
+    let record = manager.get("bot-a").unwrap();
+    assert_eq!(record.model.as_deref(), Some("openai/model-b"));
+    assert_eq!(
+        record.thinking.as_deref(),
+        Some("high"),
+        "a default level keeps the record's thinking"
+    );
+    manager
+        .adopt_guest_model("bot-a", &serde_json::json!({ "model": null }))
+        .unwrap();
+    assert_eq!(
+        manager.get("bot-a").unwrap().model.as_deref(),
+        Some("openai/model-b"),
+        "a summary without a model leaves the record alone"
+    );
+}
+
+/// A lifecycle save of a snapshot taken before a model adoption keeps the
+/// adopted model: the save merges the registry's current model and thinking
+/// (only the adoption changes them, under the registry lock), so a stale
+/// snapshot cannot revert the guest's live choice.
+#[tokio::test(start_paused = true)]
+async fn a_stale_lifecycle_save_keeps_the_adopted_model() {
+    let (_dir, _platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+
+    // The snapshot a lifecycle operation took before the adoption.
+    let stale = manager.get("bot-a").unwrap();
+    manager
+        .adopt_guest_model(
+            "bot-a",
+            &serde_json::json!({
+                "model": { "id": "model-b", "provider": "openai" },
+                "thinkingLevel": "high",
+            }),
+        )
+        .unwrap();
+    manager.save(stale).unwrap();
+    let record = manager.get("bot-a").unwrap();
+    assert_eq!(record.model.as_deref(), Some("openai/model-b"));
+    assert_eq!(record.thinking.as_deref(), Some("high"));
+}

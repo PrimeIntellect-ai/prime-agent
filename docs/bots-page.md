@@ -62,7 +62,7 @@ The owner's daemon stores its sandbox API key as a Prime secret and adds one hea
 
 Bots nest two levels deep: owner, bot, bot. A bot at the second level cannot spawn another one, and `rlm.spawn(target="sandbox")` inside a bot that was not spawned with `bots=True` fails fast with "this bot may not spawn bots" instead of calling the platform. Children count toward the owner's bot list and its `bots.maxBots` cap (default 10, in `settings.json`), checked before each create. A child's sandbox carries the owner's label and a `prime-agent-bot-parent:<id>` label, so the owner's daemon lists them, shows them in the tree, prices them, and deletes them: deleting a bot deletes its descendants first.
 
-`prime-agent bots allow-spawns <bot>` gives one running bot the same rule, guest settings, and flag without a respawn (it replaces the sandbox's whole network policy, keeping its current rules). `rlm.spawn(..., bots=True)` on a new bot is the cleaner path.
+`prime-agent bots allow-spawns <bot>` gives one running bot the same rule, guest settings, and flag without a respawn (it replaces the sandbox's whole network policy, keeping its current rules). A running daemon takes the change itself, so its registry keeps the flag. `rlm.spawn(..., bots=True)` on a new bot is the cleaner path.
 
 **Security note.** With `bots=True`, any code inside that bot can call the whole Prime sandbox API as the owner: create sandboxes, delete them, and exec into any sandbox of the account. Give such bots a dedicated, sandbox-scoped API key (its own key in `auth.json`, injected through a header rule) so it can be disabled alone, and review what runs in them.
 

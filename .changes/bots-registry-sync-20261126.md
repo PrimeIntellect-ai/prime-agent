@@ -1,0 +1,1 @@
+- `bots allow-spawns` now goes through the running daemon, so its next registry save keeps the flag, and a bot keeps the model its guest session picked across restores and upgrades.
