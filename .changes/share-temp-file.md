@@ -1,0 +1,1 @@
+- Fixed `/share` using one fixed temp file for every session, so two sessions sharing at the same time could delete or upload each other's export. Each share now exports into a temp folder of its own.

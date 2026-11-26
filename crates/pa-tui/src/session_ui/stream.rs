@@ -231,11 +231,13 @@ mod streaming_tray_hint_tests {
     #[test]
     fn the_hint_names_the_follow_up_key_over_a_draft() {
         let kb = KeybindingsManager::new();
+        // The follow-up key renders with the host platform's `alt` label
+        // (macOS: Option, elsewhere: Alt).
         assert_eq!(
             streaming_tray_hint(&kb, true, "a draft in the editor"),
             Some(format!(
                 "{}+Enter to queue message",
-                crate::keybindings::format_key_text("alt")
+                crate::keybindings::host_alt_label()
             )),
             "the default binding renders the TS sentence"
         );

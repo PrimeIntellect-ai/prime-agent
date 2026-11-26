@@ -150,10 +150,12 @@ impl Inner {
         let result = Box::pin(self.enqueue_request(
             Request::Execute {
                 code: code.to_string(),
+                runtime_bootstrap: true,
             },
             ExecuteOptions {
                 internal: true,
                 protocol_repair: true,
+                runtime_bootstrap: true,
                 ..ExecuteOptions::default()
             },
             Some(REPAIR_STEP_TIMEOUT_MS),

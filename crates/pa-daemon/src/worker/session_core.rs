@@ -31,6 +31,10 @@ pub(crate) struct SessionCore {
     /// gate's aborted-row exception stays closed while it settles its turn.
     pub(crate) suppress_aborted_row: bool,
     pub(crate) shutdown_requested: bool,
+    /// Set by the supervisor-lost monitor when it stops a backgrounded
+    /// cell: no client watches the worker, so a kernel notice waits in the
+    /// durable inbox instead of waking a turn.
+    pub(crate) supervisor_lost: bool,
     /// True while a compaction run is in flight (TS `isCompacting`).
     pub(crate) compacting: bool,
     /// The turn's tool calls in flight, keyed by tool-call id: the
@@ -176,6 +180,7 @@ impl SessionCore {
             turn_completed: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
+            supervisor_lost: false,
             last_activity_ms: 0,
             compacting: false,
             running_tool_calls: std::collections::HashSet::new(),

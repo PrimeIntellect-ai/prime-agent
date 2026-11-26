@@ -457,7 +457,19 @@ pub(crate) use pa_types::daemon::UPDATE_RESTART_PREPARING_MESSAGE as UPDATE_PREP
 /// The admission gate verdict (spec §5): mutating commands are refused
 /// while `Draining..Prepared`, except the abort-family drain commands,
 /// which TS lets through during `Draining` (they shorten the drain).
+/// While the workers stop, attaching is refused too (with the direct-link
+/// ticket, which would reach the stopping worker past this gate): a
+/// reattaching client waits for the successor, or for this supervisor
+/// after an abandon.
 pub(crate) fn update_gate_refuses(state: PrepareState, command_type: &str) -> bool {
+    if state == PrepareState::Stopping
+        && matches!(
+            command_type,
+            "attach" | "reattach" | "get_direct_worker_transport"
+        )
+    {
+        return true;
+    }
     if !is_daemon_mutating_command(command_type) {
         return false;
     }
@@ -867,6 +879,14 @@ mod tests {
                 assert!(update_gate_refuses(state, mutating), "{state:?} {mutating}");
             }
         }
+        // Attaching waits out the worker stops.
+        for attach in ["attach", "reattach", "get_direct_worker_transport"] {
+            assert!(
+                update_gate_refuses(PrepareState::Stopping, attach),
+                "{attach}"
+            );
+        }
+        assert!(!update_gate_refuses(PrepareState::Stopping, "list"));
         // The TS drain commands pass during Draining and only then.
         for drain in [
             "abort",

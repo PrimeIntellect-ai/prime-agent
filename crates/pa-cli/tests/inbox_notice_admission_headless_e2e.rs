@@ -14,6 +14,9 @@
 #![allow(clippy::large_futures, clippy::too_many_lines)]
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -104,14 +107,8 @@ fn spawn_supervisor(dir: &Path, kernel_venv: &Path) -> Supervisor {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor { child, socket };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(15));
+    Supervisor { child, socket }
 }
 
 /// The scripted mock provider: one response per provider request.

@@ -1,10 +1,10 @@
-//! The `/factory` view's battery: the snapshot parsing, the diagram's
-//! highlighted rendering (asserted per span, so removing the active-node
-//! marking fails the test — the mutation check), the key loop (the row
-//! walk, the session open, and the two-press stop), the repaint
-//! hysteresis, and the scale battery (the complex machine and the
-//! fifteen-run world: selection stability, the dock's liveness count,
-//! the render window, the refresh markers, and the churn discipline).
+//! The run view's battery: the snapshot parsing, the merged diagram's
+//! overlaid rendering (asserted per span, so removing the overlay's
+//! status paint or fired-edge green fails the test — the mutation
+//! check), the key loop (the row walk, the node view, the session open,
+//! and the two-press stop), the repaint hysteresis, and the scale
+//! battery (the complex machine and the fifteen-run world: selection
+//! stability, the render window, and the churn discipline).
 
 use super::*;
 use crate::keybindings::KeybindingsManager;
@@ -269,29 +269,32 @@ fn parsing_tolerates_both_wire_spellings() {
     assert_eq!(wire[0], kernel[0], "both spellings fuse to the same run");
 }
 
-/// The diagram renders the machine's rows and connectors, with the fired
-/// edge marked.
+/// The merged run view: the run header + stats + milestones ride the
+/// SAME block diagram the machine view draws (the merge's one-canvas
+/// promise), with the fired edge lit (the mutation checks: dropping the
+/// diagram render loses the boxes; dropping the overlay loses the fired
+/// paint).
 #[test]
 fn the_diagram_renders_states_edges_and_the_fired_marker() {
     let mut view = FactoryView::new(parse_factory_runs(&runs_response(&scripted_snapshot())), 40);
     let rows = frame_text(&mut view);
     let joined = rows.join("\n");
+    assert!(joined.contains("run: review-loop — running"), "{joined}");
+    // The machine draws as the block diagram: every state a box.
+    for state in ["collect", "reviewing", "fixing"] {
+        assert!(joined.contains(state), "the {state} box renders: {joined}");
+    }
     assert!(
-        joined.contains("factory: review-loop — running"),
-        "{joined}"
-    );
-    assert!(joined.contains("✓ collect"), "the done row: {joined}");
-    assert!(joined.contains("reviewing"), "{joined}");
-    assert!(joined.contains("fixing"), "{joined}");
-    assert!(joined.contains("collect"), "{joined}");
-    assert!(joined.contains("»"), "the last-fired marker: {joined}");
-    assert!(
-        joined.contains("when verdict.approved eq false"),
-        "the guard label: {joined}"
+        joined.contains("▼ start"),
+        "the entry arrow labels the entry state: {joined}"
     );
     assert!(
-        joined.contains("when verdict exists"),
-        "the valueless guard label: {joined}"
+        joined.contains("false"),
+        "the guarded branch's short label: {joined}"
+    );
+    assert!(
+        joined.contains("↺ verdict exists"),
+        "the self-loop's guard label: {joined}"
     );
     assert!(joined.contains("milestones: started"), "{joined}");
     assert!(joined.contains("1 running"), "{joined}");
@@ -303,6 +306,35 @@ fn the_diagram_renders_states_edges_and_the_fired_marker() {
         joined.contains("1 transitions"),
         "the transitions_fired stat: {joined}"
     );
+    // The fired edge (collect → reviewing) paints success on its arrow.
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    let fired_arrow = spans.iter().any(|row| {
+        row.iter()
+            .any(|span| span.content.contains("▼") && span.style == success)
+    });
+    assert!(fired_arrow, "the fired edge's arrow paints success");
+    // The spawned child nests under its state's box.
+    assert!(
+        joined.contains("└─ #0 · e0 run-ab"),
+        "the settled child nests under the collect box: {joined}"
+    );
+}
+
+/// Each spawned instance of one state nests under its box with its own
+/// label, so a foreach's children stay apart.
+#[test]
+fn each_instance_of_a_state_nests_with_its_own_label() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["nodes"][0]["instances"] = json!([
+        { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-1" },
+        { "index": 1, "entry": 0, "status": "done", "attempt": 1, "child": "child-4" }
+    ]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
+    let joined = frame_text(&mut view).join("\n");
+    for label in ["└─ #0 · e0 run-ab", "└─ #1 · e0 run-ab"] {
+        assert!(joined.contains(label), "missing {label:?}: {joined}");
+    }
 }
 
 /// A python state paints its callable where a subagent state paints its
@@ -321,9 +353,12 @@ fn a_python_state_renders_its_callable() {
     );
     let mut view = FactoryView::new(runs, 40);
     let joined = frame_text(&mut view).join("\n");
+    // The box's detail line names the callable (clipped at the box's
+    // TEXT_MAX like every box detail — the same clip the machine view's
+    // diagram applies).
     assert!(
-        joined.contains("collect (py my_tools.gh.open_prs)"),
-        "{joined}"
+        joined.contains("python · my_tools.gh.open…"),
+        "the box's detail line names the callable: {joined}"
     );
 }
 
@@ -351,11 +386,11 @@ fn the_diagram_renders_per_stage_agent_occupancy() {
     let rows = frame_text(&mut view);
     let joined = rows.join("\n");
     assert!(
-        joined.contains("reviewing (3 run · 2 queued)"),
-        "the occupied stage's label carries its agent counts: {joined}"
+        joined.contains("agent · 3 run · 2 queued"),
+        "the occupied stage's box carries its agent counts: {joined}"
     );
     assert!(
-        !joined.contains("(0 run"),
+        !joined.contains("0 run ·"),
         "a stage at rest carries no occupancy fragment: {joined}"
     );
     // An older kernel's reply (no count keys) derives the same counts
@@ -378,14 +413,16 @@ fn the_diagram_renders_per_stage_agent_occupancy() {
     let mut view = FactoryView::new(runs, 40);
     let rows = frame_text(&mut view);
     assert!(
-        rows.join("\n").contains("reviewing (3 run · 2 queued)"),
+        rows.join("\n").contains("agent · 3 run · 2 queued"),
         "the fallback renders the same occupancy"
     );
 }
 
-/// The highlighting: the active node's row paints in the accent (bright)
-/// color and the pending node in the dim color — removing the marking
-/// fails this test (the mutation check on the diagram's highlighting).
+/// The overlay's highlighting: the active state's box frame and title
+/// paint in the accent (bright) color and the never-entered state's box
+/// paints dim, the status glyph rides the active box's top border, and
+/// the fired edge's arrow paints success — removing any arm of the
+/// overlay fails this test (the mutation check on the overlay).
 #[test]
 fn active_nodes_paint_bright_and_pending_paints_dim() {
     let mut view = FactoryView::new(parse_factory_runs(&runs_response(&scripted_snapshot())), 40);
@@ -396,19 +433,23 @@ fn active_nodes_paint_bright_and_pending_paints_dim() {
         rows.iter()
             .any(|span| span.content.contains(text) && span.style == style)
     };
-    // The active node's id is accent-bright.
+    // The active state's box frame and title paint accent.
     let reviewing_bright = rows.iter().any(|row| styled(row, accent, "reviewing"));
-    assert!(reviewing_bright, "reviewing must paint accent");
-    // The never-entered node paints dim.
+    assert!(reviewing_bright, "reviewing's box must paint accent");
+    let reviewing_frame = rows.iter().any(|row| styled(row, accent, "●"));
+    assert!(reviewing_frame, "the running glyph rides the accent frame");
+    // The never-entered state's box paints dim.
     let fixing_dim = rows.iter().any(|row| styled(row, dim, "fixing"));
     assert!(fixing_dim, "fixing must paint dim");
-    // The last-fired edge's marker paints success.
+    let pending_glyph = rows.iter().any(|row| styled(row, dim, "◐"));
+    assert!(pending_glyph, "the pending glyph rides the dim frame");
+    // The last-fired edge's arrow paints success.
     let success = theme().fg_style(ThemeColor::Success);
     let fired_marked = rows.iter().any(|row| {
         row.iter()
-            .any(|span| span.content.contains("»") && span.style == success)
+            .any(|span| span.content.contains("▼") && span.style == success)
     });
-    assert!(fired_marked, "the fired marker must paint success");
+    assert!(fired_marked, "the fired edge's arrow must paint success");
 }
 
 /// The instance layer paints the row too: a foreach entry that failed
@@ -447,7 +488,7 @@ fn a_terminal_entry_with_running_instances_stays_bright() {
     );
     let text = frame_text(&mut view);
     assert!(
-        text.join("\n").contains("reviewing (1 run · 0 queued)"),
+        text.join("\n").contains("1 run · 0 queued"),
         "the occupancy label still shows the in-flight sibling"
     );
 }
@@ -590,7 +631,7 @@ fn a_malformed_cached_reply_mounts_with_the_error_not_a_silent_empty() {
     let mut view = FactoryView::from_reply(&two_run_response(), 40);
     let joined = frame_text(&mut view).join("\n");
     assert!(
-        joined.contains("factory: second-run"),
+        joined.contains("run: second-run"),
         "the cached runs mount newest-first: {joined}"
     );
     assert!(
@@ -618,26 +659,90 @@ fn the_fired_edge_identity_includes_the_guard() {
         { "from": "reviewing", "to": "fixing", "seq": 9,
           "when": { "output": "verdict", "path": "approved", "op": "eq", "value": false } }
     ]);
-    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
-    let rows = frame_text(&mut view);
-    // Both sibling edges render; the fired `»` sits ONLY on the row of
-    // the guard that fired — the sibling row with the same from+to
-    // carries no marker.
-    let fired_row = rows
-        .iter()
-        .find(|row| row.contains("\u{bb}"))
-        .expect("the fired marker renders");
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 60);
+    // Both sibling guards render as labels at the shared arrow; only the
+    // FIRED guard's label paints success — the sibling label with the
+    // same from+to never cross-marks (the mutation check: matching on
+    // from+to alone lights both).
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    let styled = |text: &str, style: crate::Style| {
+        spans.iter().any(|row| {
+            row.iter()
+                .any(|span| span.content.contains(text) && span.style == style)
+        })
+    };
     assert!(
-        fired_row.contains("verdict.approved eq false"),
-        "the fired marker sits on the fired guard's edge: {fired_row}"
+        styled("false", success),
+        "the fired guard's label paints success"
     );
-    let sibling = rows
-        .iter()
-        .find(|row| row.contains("verdict.approved eq true"))
-        .expect("the sibling guard's edge renders");
     assert!(
-        !sibling.contains("\u{bb}"),
-        "the sibling guard with the same from+to never cross-marks: {sibling}"
+        !styled("true", success),
+        "the sibling guard's label never cross-marks"
+    );
+    let joined = frame_text(&mut view).join("\n");
+    assert!(
+        joined.contains("false") && joined.contains("true"),
+        "both sibling guards render: {joined}"
+    );
+}
+
+/// A join's fired edge lights whatever order the fired window lists its
+/// sources in, and its `join` label paints as fired.
+#[test]
+fn a_fired_join_lights_whatever_its_source_order() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["machine"]["transitions"] = json!([
+        { "from": ["collect", "reviewing"], "to": "fixing", "on": "settled" }
+    ]);
+    snapshot["lastFired"] = json!([
+        { "from": ["reviewing", "collect"], "to": "fixing", "seq": 9 }
+    ]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 60);
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    assert!(
+        spans.iter().any(|row| row
+            .iter()
+            .any(|span| span.content.contains("join") && span.style == success)),
+        "the fired join's label paints success: {:?}",
+        frame_text(&mut view)
+    );
+}
+
+/// A run selected before the cached batch lists it shows a loading line,
+/// never a blank page.
+#[test]
+fn a_selected_run_missing_from_the_batch_shows_loading() {
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&scripted_snapshot())), 40);
+    view.select(FactoryRow::header("run-not-listed"));
+    let joined = frame_text(&mut view).join("\n");
+    assert!(joined.contains("Loading run run-not-listed…"), "{joined}");
+}
+
+/// A back edge's label lights only when that back edge fired, not when a
+/// forward edge into the same state did.
+#[test]
+fn a_back_edge_label_stays_unlit_when_only_a_forward_edge_fired() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["machine"]["transitions"] = json!([
+        { "from": "collect", "to": "reviewing", "on": "settled" },
+        { "from": "reviewing", "to": "fixing", "on": "settled" },
+        { "from": "fixing", "to": "reviewing", "on": "settled",
+          "when": { "output": "verdict", "op": "eq", "value": "loopback" } }
+    ]);
+    snapshot["lastFired"] = json!([{ "from": "collect", "to": "reviewing", "seq": 7 }]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 60);
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    let label = spans
+        .iter()
+        .flatten()
+        .find(|span| span.content.contains("loopback"))
+        .expect("the back edge's label renders");
+    assert_ne!(
+        label.style, success,
+        "the unfired back edge's label stays unlit"
     );
 }
 
@@ -650,10 +755,10 @@ fn the_empty_state_names_the_surface() {
     assert!(joined.contains("No live factory runs."), "{joined}");
     assert!(joined.contains("await rlm.factory.run"), "{joined}");
     assert!(
-        joined.contains("move"),
-        "the hint names the arrows: {joined}"
+        joined.contains("node"),
+        "the hint names the node walk: {joined}"
     );
-    assert!(joined.contains("open"), "{joined}");
+    assert!(joined.contains("open session"), "{joined}");
     assert!(joined.contains("back"), "{joined}");
 }
 
@@ -673,10 +778,12 @@ fn row(run_id: &str, state_id: Option<&str>) -> (String, Option<String>) {
     (run_id.to_string(), state_id.map(str::to_string))
 }
 
-/// The arrows walk the run headers and the states that ran a session,
-/// flattened across panels (newest run first); a state without a child —
-/// never entered, or entered with no child spawned yet — is skipped and
-/// paints dim, never accent. Both ends clamp.
+/// The arrows walk the focused run's header and EVERY state in declared
+/// order — the run view is the single-run detail (the machines list is
+/// the multi-run surface), and a state without a child (never entered,
+/// or a python state) stays selectable for node inspection. Both ends
+/// clamp. (The mutation check: reverting the walk to child-carrying
+/// states only drops `fixing` from the expected walk.)
 #[test]
 fn the_arrows_walk_headers_and_session_states_across_panels() {
     let mut response = two_run_response();
@@ -685,13 +792,12 @@ fn the_arrows_walk_headers_and_session_states_across_panels() {
     response["runs"][1]["nodes"][2]["entries"] =
         json!([ { "index": 0, "status": "running", "error": null } ]);
     let mut view = FactoryView::new(parse_factory_runs(&response), 80);
+    // The page opens on the NEWEST run (the feed's reading order).
     let expected = [
         row("run-def67890", None),
         row("run-def67890", Some("collect")),
         row("run-def67890", Some("reviewing")),
-        row("run-abc12345", None),
-        row("run-abc12345", Some("collect")),
-        row("run-abc12345", Some("reviewing")),
+        row("run-def67890", Some("fixing")),
     ];
     assert_eq!(selected_row(&view), expected[0]);
     for want in &expected[1..] {
@@ -699,36 +805,34 @@ fn the_arrows_walk_headers_and_session_states_across_panels() {
         assert_eq!(&selected_row(&view), want);
     }
     let _ = view.handle_key("down", &kb());
-    assert_eq!(selected_row(&view), expected[5], "down clamps");
-    for want in expected[..5].iter().rev() {
+    assert_eq!(selected_row(&view), expected[3], "down clamps");
+    for want in expected[..3].iter().rev() {
         let _ = view.handle_key("up", &kb());
         assert_eq!(&selected_row(&view), want);
     }
     let _ = view.handle_key("up", &kb());
     assert_eq!(selected_row(&view), expected[0], "up clamps");
-    // The selected row carries the marker; the session-less state paints
-    // dim even though it is active.
+    // The selected state's box carries the selection frame (the accent
+    // double-line box), distinct from the status paint.
     let _ = view.handle_key("down", &kb());
     let text = frame_text(&mut view);
     assert!(
-        text.iter().any(|row| row.starts_with(" ▸ ✓ collect")),
-        "{text:?}"
+        text.iter().any(|row| row.contains("┏")),
+        "the selected state's box frames in the selection style: {text:?}"
     );
-    let spans = frame_spans(&mut view);
-    let paints = |color: ThemeColor| {
-        spans
-            .iter()
-            .flatten()
-            .any(|span| span.content == "fixing" && span.style == theme().fg_style(color))
-    };
-    assert!(paints(ThemeColor::Dim) && !paints(ThemeColor::Accent));
+    assert!(
+        text.iter().any(|row| row.contains("┃ collect")),
+        "the selected state's title rides the selection frame: {text:?}"
+    );
 }
 
-/// Enter and → open the selected state's LATEST child (a retry overwrites
-/// the instance's child; a later entry's child wins); on a header they
-/// open nothing.
+/// Enter opens the selected state's NODE VIEW (the shared inspection
+/// surface); `o` and → open the state's LATEST child session (a retry
+/// overwrites the instance's child; a later entry's child wins); on a
+/// header both open nothing. (The mutation check: Enter falling back to
+/// the open action fails the `OpenNode` assertion.)
 #[test]
-fn enter_and_right_open_the_latest_child_and_headers_open_nothing() {
+fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
     let mut snapshot = scripted_snapshot();
     snapshot["nodes"][1]["instances"] = json!([
         { "index": 0, "entry": 0, "status": "done", "attempt": 2, "child": "child-2-retry", "durationMs": 5, "error": null },
@@ -736,17 +840,62 @@ fn enter_and_right_open_the_latest_child_and_headers_open_nothing() {
         { "index": 1, "entry": 1, "status": "pending", "attempt": 0, "child": null, "durationMs": null, "error": null }
     ]);
     let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
-    for key in ["enter", "right"] {
+    for key in ["enter", "right", "o"] {
         assert_eq!(view.handle_key(key, &kb()), FactoryViewAction::None);
     }
     let _ = view.handle_key("down", &kb());
     let open = |child: &str| FactoryViewAction::Open {
         child_id: child.to_string(),
     };
-    assert_eq!(view.handle_key("enter", &kb()), open("child-1"));
+    let open_node = |state: &str| FactoryViewAction::OpenNode {
+        run_id: "run-abc12345".to_string(),
+        state_id: state.to_string(),
+        selector: None,
+    };
+    assert_eq!(view.handle_key("enter", &kb()), open_node("collect"));
+    // The session UI mounts the node view on OpenNode; once mounted, it
+    // owns the keys — Esc steps back to the diagram (the unit harness
+    // mounts the loading view the session UI would).
+    view.node = Some(node::NodeView::loading("run-abc12345", "collect"));
+    assert_eq!(view.handle_key("escape", &kb()), FactoryViewAction::None);
+    assert!(view.node.is_none(), "Esc closed the node view");
     let _ = view.handle_key("down", &kb());
-    assert_eq!(view.handle_key("enter", &kb()), open("child-5"));
+    assert_eq!(view.handle_key("enter", &kb()), open_node("reviewing"));
+    assert_eq!(view.handle_key("o", &kb()), open("child-5"));
     assert_eq!(view.handle_key("right", &kb()), open("child-5"));
+    // A state without a child still opens its node view.
+    let _ = view.handle_key("down", &kb());
+    assert_eq!(view.handle_key("enter", &kb()), open_node("fixing"));
+}
+
+#[test]
+fn node_errors_keep_the_footer_within_short_viewports() {
+    let mut view = FactoryView::new(Vec::new(), 20);
+    view.node = Some(node::NodeView::loading("run", "worker"));
+    view.set_error(Some("child open failed".to_string()));
+    let full = view.render(&theme(), 110, &kb());
+    let footer = full.last().unwrap().clone();
+    for budget in 0..=6 {
+        view.viewport_rows = budget;
+        let rows = view.render(&theme(), 110, &kb());
+        assert!(rows.len() <= budget, "budget {budget}: {rows:?}");
+        if budget > 0 {
+            assert_eq!(rows.last(), Some(&footer), "budget {budget}");
+        }
+    }
+}
+
+#[test]
+fn the_node_view_honors_rebound_confirm_before_literal_shortcuts() {
+    for key in ["right", "left", "o"] {
+        let rebound = KeybindingsManager::with_user_bindings(
+            serde_json::from_value(json!({"tui.select.confirm": [key]})).unwrap(),
+        );
+        let mut view = FactoryView::new(Vec::new(), 40);
+        view.node = Some(node::NodeView::loading("run", "worker"));
+        assert_eq!(view.handle_key(key, &rebound), FactoryViewAction::None);
+        assert!(view.node.as_mut().unwrap().step_back(), "{key} opens files");
+    }
 }
 
 /// The accident this page had: on a live run, repeated navigation —
@@ -763,7 +912,9 @@ fn navigation_never_stops_or_resumes_a_run() {
             assert!(
                 matches!(
                     action,
-                    FactoryViewAction::None | FactoryViewAction::Open { .. }
+                    FactoryViewAction::None
+                        | FactoryViewAction::Open { .. }
+                        | FactoryViewAction::OpenNode { .. }
                 ),
                 "{key} on {:?} acted: {action:?}",
                 selected_row(&view)
@@ -886,55 +1037,31 @@ fn left_and_escape_close_the_page() {
     assert_eq!(selected_row(&view), row("run-def67890", None));
 }
 
-/// The repaint hysteresis: an unchanged snapshot applies without a
-/// changed marker, a state/instance change lights it exactly for that
-/// run, the marker decays once quiescent, and the clock never trips it
-/// (elapsed-only movement is not notice-worthy — the mutation check on
-/// the signature).
+/// The repaint hysteresis (the fold's return value): an unchanged
+/// snapshot applies without the repaint signal, a state/instance change
+/// fires it, and the clock never trips it (elapsed-only movement is not
+/// notice-worthy — the mutation check on the signature).
 #[test]
-fn apply_runs_lights_the_marker_only_on_notice_worthy_changes() {
+fn apply_runs_fires_the_repaint_signal_only_on_notice_worthy_changes() {
     let runs = parse_factory_runs(&runs_response(&scripted_snapshot()));
     let mut view = FactoryView::new(runs, 40);
     // The same snapshot: no change.
     let changed = view.apply_runs(parse_factory_runs(&runs_response(&scripted_snapshot())));
     assert!(!changed, "an identical snapshot changes nothing");
-    let rows = frame_text(&mut view);
-    assert!(
-        !rows.join("\n").contains("changed"),
-        "the marker stays off for an identical snapshot"
-    );
     // The instance settles: a notice-worthy change.
     let mut settled = scripted_snapshot();
     settled["nodes"][1]["status"] = json!("done");
     settled["nodes"][1]["instances"][0]["status"] = json!("done");
     let changed = view.apply_runs(parse_factory_runs(&runs_response(&settled)));
     assert!(changed, "a state/instance change is notice-worthy");
-    let rows = frame_text(&mut view);
-    assert!(
-        rows.join("\n").contains("changed"),
-        "the changed marker lights on the state change"
-    );
-    // The marker decays on the next unchanged cycle.
-    let changed = view.apply_runs(parse_factory_runs(&runs_response(&settled)));
-    assert!(!changed);
-    let rows = frame_text(&mut view);
-    assert!(
-        !rows.join("\n").contains("changed"),
-        "the marker decays once quiescent"
-    );
-    // The clock never trips the marker: an elapsed-only bump repaints the
-    // stats line but is not a notice-worthy run-shape change.
+    // The clock never trips the signal: an elapsed-only bump repaints
+    // the stats line but is not a notice-worthy run-shape change.
     let mut older = settled;
     older["elapsed_ms"] = json!(120_000);
     let changed = view.apply_runs(parse_factory_runs(&runs_response(&older)));
     assert!(
         !changed,
         "an elapsed-only bump is not a notice-worthy change"
-    );
-    let rows = frame_text(&mut view);
-    assert!(
-        !rows.join("\n").contains("changed"),
-        "the clock keeps the changed marker off"
     );
 }
 
@@ -963,29 +1090,25 @@ fn the_runs_list_reads_newest_first_and_opens_on_the_newest_run() {
         Some("run-def67890".to_string()),
         "the newest run is the default selection"
     );
-    // The rendered frame: the newest run's panel is the first panel and
-    // the older run renders below it.
+    // The rendered frame: the run view renders the FOCUSED run (the
+    // newest, the default selection) — the machines list is the
+    // multi-run surface now.
     let rows = frame_text(&mut view);
     let joined = rows.join("\n");
-    let first_header = rows
-        .iter()
-        .find(|row| row.contains("factory: "))
-        .expect("the panels render");
     assert!(
-        first_header.contains("second-run"),
-        "the newest run's panel renders first: {joined}"
+        joined.contains("run: second-run — running"),
+        "the newest (focused) run's header renders: {joined}"
     );
-    let newest = rows
-        .iter()
-        .position(|row| row.contains("factory: second-run"))
-        .expect("the newest run's header renders");
-    let older = rows
-        .iter()
-        .position(|row| row.contains("factory: review-loop"))
-        .expect("the older run's header renders");
     assert!(
-        newest < older,
-        "a run created after an existing one appears above it: {joined}"
+        !joined.contains("run: review-loop"),
+        "the older run renders on the machines list, not here: {joined}"
+    );
+    // Walking the selection to the older run refocuses the view on it.
+    select_run(&mut view, "run-abc12345");
+    let joined = frame_text(&mut view).join("\n");
+    assert!(
+        joined.contains("run: review-loop — running"),
+        "the selected run refocuses the view: {joined}"
     );
 }
 
@@ -997,9 +1120,9 @@ fn the_runs_list_reads_newest_first_and_opens_on_the_newest_run() {
 #[test]
 fn a_fold_keeps_the_selection_on_the_same_row() {
     let mut view = FactoryView::new(parse_factory_runs(&two_run_response()), 40);
-    for _ in 0..5 {
-        let _ = view.handle_key("down", &kb());
-    }
+    select_run(&mut view, "run-abc12345");
+    let _ = view.handle_key("down", &kb());
+    let _ = view.handle_key("down", &kb());
     assert_eq!(selected_row(&view), row("run-abc12345", Some("reviewing")));
     view.apply_runs(parse_factory_runs(&three_run_response()));
     assert_eq!(
@@ -1012,8 +1135,8 @@ fn a_fold_keeps_the_selection_on_the_same_row() {
     view.apply_runs(parse_factory_runs(&without_session));
     assert_eq!(
         selected_row(&view),
-        row("run-abc12345", None),
-        "a vanished state falls back to its run's header"
+        row("run-abc12345", Some("reviewing")),
+        "a state that lost its session stays selectable (node inspection)"
     );
     view.apply_runs(parse_factory_runs(&later_pair_response()));
     assert_eq!(
@@ -1071,23 +1194,22 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
     );
     // The key hint stays painted (the trailing chrome never truncates).
     assert!(
-        joined.contains("Enter/→ open"),
+        joined.contains("open session"),
         "the key hint stays painted: {joined}"
     );
     // The default selection is the newest run: its header stays visible
-    // with its marker, and the older panel drops first.
+    // with its marker, and the older run is not on this page.
     assert!(
-        joined.contains("▸ factory: second-run — running"),
+        joined.contains("▸ run: second-run — running"),
         "the newest (selected) run's header stays visible: {joined}"
     );
     assert!(
-        !joined.contains("factory: review-loop"),
-        "the older panel drops instead of the chrome: {joined}"
+        !joined.contains("run: review-loop"),
+        "the older run renders on the machines list: {joined}"
     );
 
-    // The selection moved down the feed (the older run): the window
-    // follows the selection, keeps the hint, and drops the newest
-    // panel instead.
+    // The selection moved to the older run: the view follows the
+    // selection and keeps the hint.
     let mut selected_older = FactoryView::new(parse_factory_runs(&two_run_response()), 8);
     select_run(&mut selected_older, "run-abc12345");
     let rows = frame_text(&mut selected_older);
@@ -1097,16 +1219,16 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
         "the view stays inside the budget: {joined}"
     );
     assert!(
-        joined.contains("Enter/→ open"),
+        joined.contains("open session"),
         "the key hint stays painted: {joined}"
     );
     assert!(
-        joined.contains("▸ factory: review-loop — running"),
+        joined.contains("▸ run: review-loop — running"),
         "the selected run's header stays visible: {joined}"
     );
     assert!(
-        !joined.contains("factory: second-run"),
-        "the unselected newest panel drops instead of the chrome: {joined}"
+        !joined.contains("run: second-run"),
+        "the unselected newest run is not on this page: {joined}"
     );
 }
 
@@ -1490,7 +1612,7 @@ fn panel_rows<'a>(rows: &'a [String], name: &str) -> &'a [String] {
         .unwrap_or_else(|| panic!("the panel for {name} renders"));
     let end = rows[start + 1..]
         .iter()
-        .position(|row| row.contains("factory: "))
+        .position(|row| row.contains("run: "))
         .map_or(rows.len(), |offset| start + 1 + offset);
     &rows[start..end]
 }
@@ -1509,53 +1631,64 @@ fn a_complex_machine_renders_its_whole_shape() {
     let rows = frame_text(&mut view);
     let joined = rows.join("\n");
     assert!(
-        joined.contains("factory: pr run — running"),
+        joined.contains("run: pr run — running"),
         "the run header: {joined}"
     );
-    // The declared order's rows, the entry and resident markers.
-    assert!(joined.contains("triage"), "{joined}");
+    // The declared order's boxes; the entry arrow labels the entry state.
+    for state in [
+        "triage", "review", "fix", "verify", "merge", "watchdog", "report",
+    ] {
+        assert!(joined.contains(state), "the {state} box renders: {joined}");
+    }
     assert!(
-        joined.contains("[entry]"),
-        "the entry state's marker: {joined}"
-    );
-    assert!(joined.contains("watchdog"), "{joined}");
-    assert!(
-        panel_rows(&rows, "factory: pr run")
-            .iter()
-            .any(|row| row.contains("✓ triage")),
-        "the settled entry state: {joined}"
-    );
-    // The two guarded branches carry their guards.
-    assert!(
-        joined.contains("when verdict.approved eq false"),
-        "the loop's guard: {joined}"
+        joined.contains("▼ start"),
+        "the entry arrow labels the entry state: {joined}"
     );
     assert!(
-        joined.contains("when verdict.approved eq true"),
+        joined.contains("resident"),
+        "the resident state's detail: {joined}"
+    );
+    // The two guarded branches carry their short guard labels; the
+    // fan-in join renders ONCE with its join label.
+    assert!(joined.contains("false"), "the loop's guard: {joined}");
+    assert!(
+        joined.contains("true"),
         "the merge branch's guard: {joined}"
     );
-    // The loop's back edge renders with the return marker; the fan-in
-    // join renders ONCE with its join label (not once per source).
-    let panel = panel_rows(&rows, "factory: pr run");
-    let back_edge = panel
-        .iter()
-        .find(|row| row.contains("↩"))
-        .expect("the loop's back edge renders");
-    assert!(
-        back_edge.contains("review"),
-        "the back edge returns to the loop head: {back_edge}"
+    assert_eq!(
+        joined.matches("join").count(),
+        1,
+        "the fan-in join renders once: {joined}"
     );
-    let joins = panel
-        .iter()
-        .filter(|row| row.contains("join: merge + verify"))
-        .count();
-    assert_eq!(joins, 1, "the fan-in join renders once: {joined}");
+    // The status glyphs ride the boxes' top borders: the settled entry
+    // (✓), the in-flight review (●), the resident watchdog (●), the
+    // never-entered states (◐).
+    assert!(joined.contains("┌✓"), "the settled entry's glyph: {joined}");
+    assert!(
+        joined.matches("┌●").count() >= 2,
+        "the in-flight and resident boxes carry the running glyph: {joined}"
+    );
+    assert!(
+        joined.contains("┌◐"),
+        "a never-entered box carries the pending glyph: {joined}"
+    );
+    for glyph in ['✓', '●', '◐'] {
+        assert!(
+            !joined.contains(&format!("└{glyph}")),
+            "the bottom border carries no {glyph} glyph: {joined}"
+        );
+    }
     // The fired markers sit on the fired edges (both of triage's).
-    let fired = panel.iter().filter(|row| row.contains("»")).count();
-    assert_eq!(fired, 2, "both fired edges carry the marker: {joined}");
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    let fired = spans
+        .iter()
+        .flat_map(|row| row.iter())
+        .filter(|span| span.content.contains("▼") && span.style == success)
+        .count();
+    assert_eq!(fired, 2, "both fired edges light their arrows: {joined}");
     // The live highlighting: the in-flight review and the resident
     // watchdog paint accent; the never-entered states paint dim.
-    let spans = frame_spans(&mut view);
     let accent = theme().fg_style(ThemeColor::Accent);
     let dim = theme().fg_style(ThemeColor::Dim);
     let accent_span = |text: &str| {
@@ -1570,13 +1703,12 @@ fn a_complex_machine_renders_its_whole_shape() {
                 .any(|span| span.content == text && span.style == dim)
         })
     };
-    assert!(accent_span("review"), "the in-flight state paints accent");
+    assert!(accent_span("review"), "the in-flight review paints accent");
     assert!(
         accent_span("watchdog"),
-        "the resident state paints accent while its child runs"
+        "the resident watchdog paints accent"
     );
-    assert!(dim_span("fix"), "the never-entered state paints dim");
-    assert!(dim_span("report"), "{joined}");
+    assert!(dim_span("report"), "the never-entered report paints dim");
 }
 
 /// The dock's factory count reads ONE liveness rule across the whole
@@ -1678,11 +1810,14 @@ fn selection_stays_on_the_same_run_across_a_many_run_churn() {
 /// focused run's header).
 #[test]
 fn fifteen_panels_window_to_the_focus_on_a_small_viewport() {
+    // The run view renders ONE run (the focused run): even the complex
+    // machine's tall diagram never exceeds the viewport, the hint stays
+    // painted, and the selected state's box slides into sight.
     let mut view = FactoryView::new(parse_factory_runs(&world_response()), 26);
     let rows = frame_text(&mut view);
     assert!(
         rows.len() <= 26,
-        "fifteen panels never exceed the viewport: {:?}",
+        "the diagram never exceeds the viewport: {:?}",
         rows.len()
     );
     assert!(
@@ -1690,33 +1825,32 @@ fn fifteen_panels_window_to_the_focus_on_a_small_viewport() {
         "the hint paints as the chrome's last row: {:?}",
         rows.last()
     );
-    // The leading window keeps the feed's head: the newest panel
-    // renders first.
+    // The focused run is the feed's head: the newest run renders.
     assert!(
-        rows.iter().any(|row| row.contains("factory: world-run-14")),
-        "the newest panel renders first: {}",
+        rows.iter().any(|row| row.contains("run: world-run-14")),
+        "the newest (focused) run renders: {}",
         rows.join("\n")
     );
-    // Focus run #7: the window slides to it — its header paints, the
-    // head panel drops instead, and the hint survives.
+    assert!(
+        !rows.iter().any(|row| row.contains("run: world-run-7")),
+        "the other runs render on the machines list, not here: {}",
+        rows.join("\n")
+    );
+    // Focus run #7: the view follows the selection — its header paints.
     select_run(&mut view, "run-w07");
     let rows = frame_text(&mut view);
     let joined = rows.join("\n");
     assert!(rows.len() <= 26, "the windowed frame stays in budget");
     assert!(
-        joined.contains("▸ factory: world-run-7 — running"),
-        "the focused panel's header paints after the slide: {joined}"
+        joined.contains("▸ run: world-run-7 — running"),
+        "the focused run's header paints after the slide: {joined}"
     );
     assert!(
-        !joined.contains("factory: world-run-14"),
-        "the head panel dropped instead of the chrome: {joined}"
+        !joined.contains("run: world-run-14"),
+        "the head run dropped instead of the chrome: {joined}"
     );
-    assert!(
-        rows.last().is_some_and(|row| row.contains("back")),
-        "the hint still paints after the slide"
-    );
-    // A selected state deep inside a tall panel: the window slides to
-    // the row itself, so the open/stop target stays visible.
+    // A selected state deep inside the tall diagram: the window slides
+    // to the box itself, so the open/stop target stays visible.
     let mut short = FactoryView::new(parse_factory_runs(&world_response()), 10);
     short.selected = Some(FactoryRow {
         run_id: "run-w07".to_string(),
@@ -1725,9 +1859,8 @@ fn fifteen_panels_window_to_the_focus_on_a_small_viewport() {
     let rows = frame_text(&mut short);
     assert!(rows.len() <= 10);
     assert!(
-        rows.iter()
-            .any(|row| row.contains("▸") && row.contains("watchdog")),
-        "the selected state paints: {}",
+        rows.iter().any(|row| row.contains("watchdog")),
+        "the selected state's box paints: {}",
         rows.join("\n")
     );
     // Degenerate budgets honor the viewport exactly.
@@ -1751,72 +1884,55 @@ fn fifteen_panels_window_to_the_focus_on_a_small_viewport() {
 #[test]
 fn the_refresh_tick_lights_only_notice_worthy_changes_across_many_runs() {
     let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
-    let changed_headers = |view: &mut FactoryView| {
-        frame_text(view)
-            .iter()
-            .filter(|row| row.contains("● changed"))
-            .count()
-    };
+    select_run(&mut view, "run-w02");
     // An identical structural reply applies nothing.
     assert!(!view.apply_runs(parse_factory_runs(&world_response())));
-    assert_eq!(changed_headers(&mut view), 0, "no run changed");
     // The clock tick across the whole world lights nothing.
-    assert!(!view.apply_runs(parse_factory_runs(&world_clock_tick())));
-    assert_eq!(
-        changed_headers(&mut view),
-        0,
+    assert!(
+        !view.apply_runs(parse_factory_runs(&world_clock_tick())),
         "the elapsed clock is not notice-worthy, at any scale"
     );
-    // The settle script on run w02: one instance settles — the marker
-    // lights on THAT run alone, and its occupancy label drops to
-    // 2 run.
+    // The settle script on run w02: one instance settles — the fold is
+    // notice-worthy (the repaint signal fires) and the occupancy label
+    // drops to 2 run.
     assert!(view.apply_runs(parse_factory_runs(&w02_settled(2))));
-    let rows = frame_text(&mut view);
-    assert_eq!(changed_headers(&mut view), 1, "exactly one run changed");
-    let panel = panel_rows(&rows, "factory: world-run-2");
+    let joined = frame_text(&mut view).join("\n");
     assert!(
-        panel.iter().any(|row| row.contains("● changed")),
-        "the changed run is w02: {}",
-        rows.join("\n")
+        joined.contains("2 run · 0 queued"),
+        "the occupancy label drops to 2 run: {joined}"
     );
-    assert!(
-        panel
-            .iter()
-            .any(|row| row.contains("review (2 run · 0 queued)")),
-        "the occupancy label drops to 2 run: {panel:?}"
-    );
-    // One instance deeper: 1 run, still exactly one marker.
+    // One instance deeper: 1 run.
     assert!(view.apply_runs(parse_factory_runs(&w02_settled(1))));
-    let rows = frame_text(&mut view);
-    assert_eq!(changed_headers(&mut view), 1);
+    let joined = frame_text(&mut view).join("\n");
     assert!(
-        panel_rows(&rows, "factory: world-run-2")
-            .iter()
-            .any(|row| row.contains("review (1 run · 0 queued)")),
-        "the occupancy label drops to 1 run"
+        joined.contains("1 run · 0 queued"),
+        "the occupancy label drops to 1 run: {joined}"
     );
-    // The entry settles and the guarded loop edge fires: the marker
-    // moves to the newly fired transition, the review stage drains
-    // (no occupancy fragment), and the active node moves to fix.
+    // The entry settles and the guarded loop edge fires: the newly
+    // fired edge's label paints success, the review stage drains (no
+    // occupancy fragment), and the active node moves to fix.
     assert!(view.apply_runs(parse_factory_runs(&w02_entry_fired())));
-    let rows = frame_text(&mut view);
-    assert_eq!(changed_headers(&mut view), 1, "still exactly one run");
-    let panel = panel_rows(&rows, "factory: world-run-2");
-    let fired_edge = panel
-        .iter()
-        .find(|row| row.contains("»") && row.contains("fix"))
-        .expect("the newly fired edge carries the marker");
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    let fired_guard = spans.iter().any(|row| {
+        row.iter()
+            .any(|span| span.content.contains("false") && span.style == success)
+    });
     assert!(
-        fired_edge.contains("verdict.approved eq false"),
-        "the fired marker sits on the loop's guarded edge: {fired_edge}"
+        fired_guard,
+        "the fired loop edge's guard label paints success"
+    );
+    let joined = frame_text(&mut view).join("\n");
+    assert!(
+        !joined.lines().any(|row| row.contains("agent · reviewer ·")),
+        "the drained review stage carries no occupancy fragment: {joined}"
     );
     assert!(
-        !panel.iter().any(|row| row.contains("review (1 run")),
-        "the drained stage carries no occupancy fragment: {panel:?}"
+        joined.contains("1 run · 0 queued"),
+        "the entered fix stage carries its occupancy: {joined}"
     );
     // The active-node highlighting follows the settling: the entered
     // fix stage paints accent, the settled review stage does not.
-    let spans = frame_spans(&mut view);
     let accent = theme().fg_style(ThemeColor::Accent);
     let accent_ids: Vec<String> = spans
         .iter()
@@ -1830,19 +1946,8 @@ fn the_refresh_tick_lights_only_notice_worthy_changes_across_many_runs() {
         accent_ids.iter().any(|id| id == "fix"),
         "the entered fix stage paints accent: {accent_ids:?}"
     );
-    let rows = frame_text(&mut view);
-    let panel = panel_rows(&rows, "factory: world-run-2");
-    let panel_start = rows
-        .iter()
-        .position(|row| row.contains("factory: world-run-2"))
-        .expect("the panel renders");
-    let panel_end = panel_start + panel.len();
-    let review_accent = spans[panel_start..panel_end].iter().any(|row| {
-        row.iter()
-            .any(|span| span.content == "review" && span.style == accent)
-    });
     assert!(
-        !review_accent,
+        !accent_ids.iter().any(|id| id == "review"),
         "the settled review stage loses the accent: {accent_ids:?}"
     );
 }
@@ -1868,7 +1973,7 @@ fn orchestration_targets_the_focused_run_among_many() {
     assert_eq!(selected_row(&view), row("run-w07", None));
     let rows = frame_text(&mut view);
     assert!(
-        panel_rows(&rows, "factory: world-run-7")
+        panel_rows(&rows, "run: world-run-7")
             .iter()
             .any(|row| row.contains("— stopping")),
         "the stopped run's panel reads stopping"
@@ -1907,47 +2012,19 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
     let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
     select_run(&mut view, "run-w07");
     // The busy tick: a five-run burst folds in on top while four runs
-    // change shape underneath.
+    // change shape underneath — the fold is notice-worthy (the repaint
+    // signal fires).
     assert!(view.apply_runs(parse_factory_runs(&world_churn_tick())));
     assert_eq!(
         view.selected_run().map(|run| run.run_id.clone()),
         Some("run-w07".to_string()),
         "the selection tracks the same run through the burst"
     );
-    // Exactly the four changed runs light the marker — the burst's new
-    // runs paint none, the untouched runs none.
+    // The page stays coherent: the focused run paints, the hint paints.
     let rows = frame_text(&mut view);
-    let marked: Vec<&String> = rows
-        .iter()
-        .filter(|row| row.contains("● changed"))
-        .collect();
-    assert_eq!(marked.len(), 4, "exactly the changed runs: {marked:?}");
-    for name in ["world-run-2", "world-run-9", "world-run-11", "world-run-12"] {
-        assert!(
-            marked.iter().any(|row| row.contains(name)),
-            "{name}'s panel carries the changed marker: {marked:?}"
-        );
-    }
-    for name in [
-        "world-run-19",
-        "world-run-15",
-        "world-run-5",
-        "world-run-14",
-    ] {
-        assert!(
-            !marked.iter().any(|row| row.contains(name)),
-            "{name} never carries a marker: {marked:?}"
-        );
-    }
-    // The page stays coherent: the burst's panels render, the focused
-    // panel paints, the hint paints.
     let joined = rows.join("\n");
-    assert!(joined.contains("factory: world-run-19"), "{joined}");
-    assert!(
-        joined.contains("▸ factory: world-run-7 — running"),
-        "{joined}"
-    );
-    assert!(joined.contains("Enter/→ open"), "{joined}");
+    assert!(joined.contains("▸ run: world-run-7 — running"), "{joined}");
+    assert!(joined.contains("open session"), "{joined}");
     // The focused run vanishes mid-orchestration: the selection hands
     // back to the head, and the very next keypress resolves against
     // the folded batch — never a stale index.
@@ -1967,23 +2044,30 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
         view.handle_key("ctrl+x", &kb()),
         FactoryViewAction::Stop {
             run_id: "run-w19".to_string()
-        }
-    );
-    // Interleaved folds never drop a key: a walk with a fold between
-    // every press lands exactly where an unfolded walk would.
-    let mut view = FactoryView::new(parse_factory_runs(&world_churn_tick()), 400);
-    for _ in 0..3 {
-        let _ = view.handle_key("down", &kb());
-        let _ = view.apply_runs(parse_factory_runs(&world_churn_tick()));
-    }
-    assert_eq!(
-        selected_row(&view),
-        row("run-w19", Some("watchdog")),
-        "every keypress resolved against the folded batch"
+        },
+        "the stop resolves against the folded head"
     );
 }
 
-/// The dock's factory row lists the live runs (the dock count's own set), paused runs first.
+#[test]
+fn node_panels_show_factory_errors_in_documents_and_files() {
+    let mut view = FactoryView::new(Vec::new(), 12);
+    view.node = Some(node::NodeView::loading("run", "worker"));
+    view.set_error(Some("child session not found".to_string()));
+    for files_open in [false, true] {
+        if files_open {
+            assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
+        }
+        let rows = frame_text(&mut view);
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("child session not found")));
+        assert!(rows.len() <= 12);
+    }
+}
+
+/// The dock's expanded items list the live runs, paused first, beside
+/// a count of the running runs only.
 #[test]
 fn the_dock_factory_items_list_live_runs_paused_first() {
     let mut response = three_run_response();
@@ -2018,6 +2102,836 @@ fn a_graph_reply_counts_stored_specs_and_live_runs() {
     response["factorySpecs"] = json!(2);
     assert_eq!(
         FactoryCounts::of(&response).label().as_deref(),
-        Some("2 factories \u{b7} 1 running \u{b7} 1 paused")
+        Some("2 machines \u{b7} 1 running \u{b7} 1 paused")
     );
+    response["factorySpecs"] = json!(1);
+    assert_eq!(
+        FactoryCounts::of(&response).label().as_deref(),
+        Some("1 machine \u{b7} 1 running \u{b7} 1 paused")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The merged view's pins: the one-diagram determinism, the node view.
+// ---------------------------------------------------------------------------
+
+/// The merge's one-canvas promise (P1): for one graph, the run view's
+/// diagram and the machine view's diagram produce the SAME layout —
+/// identical plain text, box positions, and labels — whenever the
+/// overlay is absent; a live overlay only repaints styles and nests
+/// child rows, it never moves a box (the mutation check: any geometry
+/// branch keyed on the overlay fails the equality).
+#[test]
+fn the_machine_and_run_diagrams_share_one_layout() {
+    let runs = parse_factory_runs(&runs_response(&scripted_snapshot()));
+    let run = &runs[0];
+    let theme = theme();
+    let plain = |lines: &Vec<Line>| {
+        lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let machine = block_diagram(&theme, &run.states, &run.transitions, None, None);
+    let run_view = block_diagram(&theme, &run.states, &run.transitions, None, None);
+    assert_eq!(plain(&machine.lines), plain(&run_view.lines));
+    assert_eq!(machine.node_rows, run_view.node_rows);
+    // A selected box changes only that box's frame glyphs (the accent
+    // double-line frame), never the geometry: the boxes stay on their
+    // rows.
+    let selected = block_diagram(&theme, &run.states, &run.transitions, Some(0), None);
+    assert_eq!(
+        machine.node_rows, selected.node_rows,
+        "the selection never moves a box"
+    );
+    assert_eq!(machine.lines.len(), selected.lines.len());
+    // A paint-only overlay adds status glyphs, but each glyph replaces
+    // one horizontal-border cell; the box geometry stays the same.
+    let mut paint_only = FactoryView::overlay_for(run);
+    for node in paint_only.nodes.values_mut() {
+        node.occupancy = String::new();
+        node.children.clear();
+    }
+    let painted = block_diagram(
+        &theme,
+        &run.states,
+        &run.transitions,
+        None,
+        Some(&paint_only),
+    );
+    assert_eq!(machine.node_rows, painted.node_rows);
+    let painted_text = paint_only
+        .nodes
+        .values()
+        .fold(plain(&painted.lines), |text, node| {
+            text.replace(node.glyph, "─")
+        });
+    assert_eq!(plain(&machine.lines), painted_text);
+    // The full overlay (occupancy widens boxes, children nest under
+    // them) never moves a box: every state keeps the row the plain
+    // diagram painted it on. The widened boxes, the recentered
+    // connectors, and the nested child rows repaint their own rows —
+    // the occupancy fragment rides the widened box's detail line and
+    // the children nest under it (both renders have their own pins) —
+    // and the widened box realigns the layer centers, dropping the
+    // machine view's channel rows where the child rows land, so
+    // row-for-row survival is not the invariant: the box anchors are.
+    let overlay = FactoryView::overlay_for(run);
+    let live = block_diagram(&theme, &run.states, &run.transitions, None, Some(&overlay));
+    assert_eq!(
+        machine.node_rows, live.node_rows,
+        "the occupancy widening and the nested children never move a box"
+    );
+}
+
+/// The node view's reply parse: the instance list, the run name, and
+/// the selected instance's document (wire keys; the mutation check on
+/// each key).
+#[test]
+fn the_node_view_parses_the_node_wire_reply() {
+    let data = json!({
+        "runId": "run-abc12345",
+        "specId": "review-loop",
+        "name": "review-loop",
+        "state": {
+            "id": "reviewing", "status": "running", "lifecycle": "task",
+            "attempts": 1, "entriesUsed": 1, "maxEntries": 4,
+            "entries": [ { "index": 0, "status": "running", "error": null } ],
+            "instances": [
+                { "index": 0, "entry": 0, "status": "done", "attempt": 2, "child": "child-2", "durationMs": 5, "error": null },
+                { "index": 1, "entry": 0, "status": "running", "attempt": 1, "child": "child-3", "durationMs": 0, "error": null }
+            ]
+        },
+        "entry": {
+            "index": 0, "status": "running", "outputs": "{\n  \"result\": \"settled\"\n}",
+            "outputErrors": {"report": "capture failed"}
+        },
+        "instance": {
+            "index": 1, "entry": 0, "status": "running", "attempt": 1,
+            "child": "child-3", "childName": "run-ab-reviewer", "sessionDir": "/tmp/s/sub-1",
+            "durationMs": 0, "error": null,
+            "prompt": "## Review\nDo the review.", "promptTruncated": true,
+            "inputs": "{\"task\": \"x\"}", "inputsTruncated": true,
+            "answer": "answer text", "answerTruncated": true,
+            "provisional": false, "captureFailed": true
+        }
+    });
+    let view =
+        node::NodeView::parse_reply("run-abc12345", "reviewing", &data).expect("the reply parses");
+    assert_eq!(view.run_name, "review-loop");
+    assert_eq!(view.instances.len(), 2);
+    assert_eq!(view.instances[0].attempt, 2);
+    assert_eq!(view.instances[1].child.as_deref(), Some("child-3"));
+    let document = view.document.as_ref().expect("the document parses");
+    assert_eq!(document.child.as_deref(), Some("child-3"));
+    assert_eq!(document.child_name.as_deref(), Some("run-ab-reviewer"));
+    assert_eq!(document.session_dir.as_deref(), Some("/tmp/s/sub-1"));
+    assert_eq!(document.prompt, "## Review\nDo the review.");
+    assert!(document.prompt_truncated);
+    assert_eq!(document.inputs.as_deref(), Some("{\"task\": \"x\"}"));
+    assert!(document.inputs_truncated);
+    assert_eq!(document.answer.as_deref(), Some("answer text"));
+    assert!(document.answer_truncated);
+    assert!(document.capture_failed);
+    assert_eq!(
+        document.outputs.as_deref(),
+        Some("{\n  \"result\": \"settled\"\n}")
+    );
+    assert!(!document.outputs_truncated);
+    assert_eq!(
+        document.output_errors.as_deref(),
+        Some("{\n  \"report\": \"capture failed\"\n}")
+    );
+    // The fresh parse starts on the first instance; the merge retargets
+    // to the document's instance (see the merge pin below).
+    assert_eq!(view.selected_child(), Some("child-2"));
+    assert_eq!(view.selected_selector(), Some((0, 0)));
+    // The return target carries the node and the instance.
+    let target = view.target();
+    assert_eq!(target.run_id, "run-abc12345");
+    assert_eq!(target.state_id, "reviewing");
+    assert_eq!(target.instance, Some((0, 0)));
+}
+
+#[test]
+fn a_zero_item_node_entry_keeps_its_settle_without_an_instance() {
+    let data = json!({
+        "runId": "run-abc12345",
+        "specId": "review-loop",
+        "name": "review-loop",
+        "state": {"id": "fan", "status": "done", "instances": []},
+        "entry": {
+            "index": 3,
+            "status": "done",
+            "outputs": "{}",
+            "outputErrors": {}
+        },
+        "instance": null
+    });
+    let view = node::NodeView::parse_reply("run-abc12345", "fan", &data)
+        .expect("the zero-item entry parses");
+    assert!(view.instances.is_empty());
+    let document = view.document.as_ref().expect("the settle is shown");
+    assert_eq!(document.entry, Some(3));
+    assert_eq!(document.index, None);
+    assert_eq!(document.status, "done");
+    assert_eq!(document.outputs.as_deref(), Some("{}"));
+    assert!(document.output_errors.is_none());
+    assert_eq!(view.target().instance, None);
+    let rows = view.render(&theme(), 80, &kb(), 30);
+    let text = rows
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("no instances were created"), "{text}");
+    assert!(
+        text.contains("outputs"),
+        "the empty settle remains visible: {text}"
+    );
+    assert!(
+        text.contains("{}"),
+        "the empty output map remains visible: {text}"
+    );
+}
+
+#[test]
+fn a_never_entered_node_state_renders_without_fabricating_an_entry() {
+    let data = json!({
+        "runId": "run-abc12345",
+        "specId": "review-loop",
+        "name": "review-loop",
+        "state": {"id": "fixing", "status": "pending", "instances": []},
+        "entry": null,
+        "instance": null
+    });
+    let mut view = node::NodeView::loading("run-abc12345", "fixing");
+    view.merge_reply(&data);
+    assert!(
+        view.error.is_none(),
+        "a never-entered state is not an error"
+    );
+    assert!(view.instances.is_empty());
+    assert!(view.document.is_none(), "no entry is fabricated");
+    assert_eq!(view.selected_selector(), None);
+    assert_eq!(view.document_selector(), None);
+    assert_eq!(view.target().instance, None);
+    let text = view
+        .render(&theme(), 80, &kb(), 30)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("not yet entered"), "{text}");
+    assert!(!text.contains("no instances were created"), "{text}");
+}
+
+#[test]
+fn a_later_zero_item_node_entry_keeps_its_settle_without_selecting_history() {
+    let data = json!({
+        "state": {"id": "fan", "status": "done", "instances": [
+            {"index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "older-child"}
+        ]},
+        "entry": {
+            "index": 1,
+            "status": "done",
+            "outputs": "{\"result\": \"latest\"}",
+            "outputErrors": {}
+        },
+        "instance": null
+    });
+    let mut view = node::NodeView::loading("run-abc12345", "fan");
+    view.merge_reply(&data);
+    assert_eq!(view.instances.len(), 1);
+    assert_eq!(view.selected_selector(), None);
+    assert_eq!(view.document_selector(), None);
+    assert_eq!(view.target().instance, None);
+
+    let bindings = kb();
+    let text = view
+        .render(&theme(), 80, &bindings, 30)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("#0 \u{b7} e0 \u{b7} done"), "{text}");
+    assert!(
+        text.contains("the entry settled without creating an instance"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("▸ #0"),
+        "the older instance is not selected: {text}"
+    );
+
+    let page_down = bindings
+        .first_key("tui.select.pageDown")
+        .expect("the page-down binding");
+    assert!(view.handle_key(&page_down, &bindings, 30));
+    assert_eq!(
+        view.selected_selector(),
+        None,
+        "scrolling keeps the empty entry selected"
+    );
+
+    let down = bindings
+        .first_key("tui.select.down")
+        .expect("the down binding");
+    assert!(view.handle_key(&down, &bindings, 30));
+    assert_eq!(
+        view.selected_selector(),
+        Some((0, 0)),
+        "explicit navigation still selects historical instances"
+    );
+}
+
+#[test]
+fn the_node_view_flags_truncated_output_error_details_without_renaming_ports() {
+    let data = json!({
+        "state": {"id": "report", "status": "error", "instances": []},
+        "entry": {
+            "index": 0,
+            "status": "error",
+            "outputs": null,
+            "outputErrors": {"risk_score": "invalid json at end…"},
+            "outputErrorsTruncated": true
+        },
+        "instance": null
+    });
+    let view = node::NodeView::parse_reply("run-abc12345", "report", &data)
+        .expect("the node report parses");
+    let text = view
+        .render(&theme(), 80, &kb(), 30)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("\"risk_score\""),
+        "port names stay verbatim: {text}"
+    );
+    assert!(
+        text.contains("truncated to fit the activity frame"),
+        "the bounded preview is explicit: {text}"
+    );
+}
+
+#[test]
+fn the_node_view_flags_a_bounded_output_preview() {
+    let data = json!({
+        "state": {"id": "reviewing", "instances": []},
+        "entry": {
+            "index": 2,
+            "status": "done",
+            "outputs": "{\"result\": \"preview\"}",
+            "outputsTruncated": true,
+            "outputErrors": {}
+        },
+        "instance": null
+    });
+    let view = node::NodeView::parse_reply("run-abc12345", "reviewing", &data)
+        .expect("the preview reply parses");
+    let document = view.document.as_ref().expect("the settle is shown");
+    assert!(document.outputs_truncated);
+    let text = view
+        .render(&theme(), 80, &kb(), 30)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("… (truncated)"), "{text}");
+}
+
+#[test]
+fn a_late_node_reply_does_not_replace_the_newer_instance_document() {
+    let reply = |prompt: &str| {
+        json!({
+            "name": "review-loop",
+            "state": {"instances": [{"index": 0, "entry": 0, "status": "running"}]},
+            "entry": {"index": 0, "status": "running", "outputs": null, "outputErrors": {}},
+            "instance": {
+                "index": 0,
+                "entry": 0,
+                "status": "running",
+                "prompt": prompt
+            }
+        })
+    };
+    let mut view = node::NodeView::loading("run-abc12345", "reviewing");
+    view.set_request_epoch(2, None);
+    assert!(view.apply_request_result(2, Ok(reply("newer"))));
+    assert!(!view.apply_request_result(1, Ok(reply("older"))));
+    assert!(!view.apply_request_result(1, Err("old timeout".to_string())));
+    assert_eq!(
+        view.error, None,
+        "a stale error leaves the newer reply alone"
+    );
+    // A delivery retires its request; the next fetch carries a new epoch.
+    view.set_request_epoch(3, None);
+    assert!(view.apply_request_result(3, Err("current timeout".to_string())));
+    assert_eq!(view.error.as_deref(), Some("current timeout"));
+    assert_eq!(
+        view.document
+            .as_ref()
+            .map(|document| document.prompt.as_str()),
+        Some("newer")
+    );
+}
+
+#[test]
+fn narrow_node_markdown_wrap_and_scroll_preserve_the_full_paragraph() {
+    let words = (0..240)
+        .map(|index| format!("word-{index:03}"))
+        .collect::<Vec<_>>();
+    let prompt = words.join(" ");
+    let data = json!({
+        "state": {"id": "reviewing", "instances": [
+            {"index": 0, "entry": 0, "status": "done"}
+        ]},
+        "entry": {"index": 0, "status": "done", "outputs": null, "outputErrors": {}},
+        "instance": {
+            "index": 0,
+            "entry": 0,
+            "status": "done",
+            "prompt": prompt
+        }
+    });
+    let mut view =
+        node::NodeView::parse_reply("run-abc12345", "reviewing", &data).expect("the reply parses");
+    let theme = theme();
+    let kb = kb();
+    let page_down = kb
+        .first_key("tui.select.pageDown")
+        .expect("the page-down binding");
+    let mut rendered = String::new();
+    for _ in 0..40 {
+        for row in view.render(&theme, 80, &kb, 12) {
+            let clipped = crate::width::truncate_line(&row, 80, "");
+            rendered.push_str(
+                &clipped
+                    .iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>(),
+            );
+            rendered.push('\n');
+        }
+        assert!(view.handle_key(&page_down, &kb, 12));
+    }
+    let last_page = view
+        .render(&theme, 80, &kb, 12)
+        .iter()
+        .map(|row| {
+            crate::width::truncate_line(row, 80, "")
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    rendered.push_str(&last_page);
+    for word in words {
+        assert!(rendered.contains(&word), "narrow rendering dropped {word}");
+    }
+    assert!(
+        last_page.contains("word-239"),
+        "scroll measurement reached the final paragraph row: {last_page}"
+    );
+}
+
+#[test]
+fn narrow_file_markdown_scroll_uses_the_rendered_width() {
+    let words = (0..240)
+        .map(|index| format!("fileword-{index:03}"))
+        .collect::<Vec<_>>();
+    let text = words.join(" ");
+    let data = json!({
+        "state": {"id": "reviewing", "instances": [
+            {"index": 0, "entry": 0, "status": "done"}
+        ]},
+        "entry": {"index": 0, "status": "done", "outputs": null, "outputErrors": {}},
+        "instance": {"index": 0, "entry": 0, "status": "done", "prompt": "current"}
+    });
+    let mut view =
+        node::NodeView::parse_reply("run-abc12345", "reviewing", &data).expect("the reply parses");
+    view.set_files(node::NodeFiles {
+        files: vec![("README.md".to_string(), text)],
+        state_files: vec![("reviewing".to_string(), vec!["README.md".to_string()])],
+    });
+    let theme = theme();
+    let kb = kb();
+    let page_down = kb
+        .first_key("tui.select.pageDown")
+        .expect("the page-down binding");
+    assert!(view.handle_key("enter", &kb, 12));
+    assert!(!view.render(&theme, 80, &kb, 12).is_empty());
+    for _ in 0..40 {
+        assert!(view.handle_key(&page_down, &kb, 12));
+    }
+    let last_page = view
+        .render(&theme, 80, &kb, 12)
+        .iter()
+        .map(|row| {
+            crate::width::truncate_line(row, 80, "")
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        last_page.contains("fileword-239"),
+        "file scroll measurement reached the final wrapped row: {last_page}"
+    );
+}
+
+#[test]
+fn the_node_view_renders_markdown_and_toggles_the_files() {
+    let data = json!({
+        "name": "review-loop",
+        "state": { "id": "reviewing", "instances": [
+            { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-2", "durationMs": 5 }
+        ]},
+        "entry": {"index": 0, "status": "done", "outputs": null, "outputErrors": {}},
+        "instance": {
+            "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-2",
+            "prompt": "## Design\n\nWrite the design **now**.", "prompt_truncated": false
+        }
+    });
+    let mut view =
+        node::NodeView::parse_reply("run-abc12345", "design", &data).expect("the reply parses");
+    let theme = theme();
+    let kb = kb();
+    let rows = view.render(&theme, 110, &kb, 40);
+    let text = rows
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("realized prompt"),
+        "the document names the prompt section: {text}"
+    );
+    // The prompt's Markdown renders: the `## Design` heading paints the
+    // Markdown heading style, the bold word paints bold — never the
+    // plain text style the scratch rendered.
+    let heading_style = crate::markdown::MarkdownStyle::from_theme(&theme)
+        .heading
+        .add_modifier(ratatui::style::Modifier::BOLD);
+    let heading = rows.iter().any(|row| {
+        row.iter()
+            .any(|span| span.content.contains("Design") && span.style == heading_style)
+    });
+    assert!(heading, "the prompt's heading paints the Markdown style");
+    // Enter toggles the template-files document. Until its separate
+    // fetch lands, the page says loading rather than falsely claiming an
+    // empty library.
+    assert!(view.handle_key("enter", &kb, 40), "Enter is handled");
+    let rows = view.render(&theme, 110, &kb, 40);
+    let text = rows
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("node: design · review-loop · 0 files"),
+        "the files document mounts: {text}"
+    );
+    assert!(
+        text.contains("Loading files…"),
+        "the files request is pending: {text}"
+    );
+    view.set_files(node::NodeFiles::default());
+    let empty_text = view
+        .render(&theme, 110, &kb, 40)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        empty_text.contains("No files recorded for this state."),
+        "the settled empty files response is honest: {empty_text}"
+    );
+    // Fold the library payload: the file renders with the machine
+    // view's own colored files rendering.
+    view.set_files(node::NodeFiles::parse(&json!({
+        "files": [ { "path": "prompts/design.md", "text": "## Design\n\nWrite **DESIGN.md**.\n" } ],
+        "stateFiles": [ { "state": "design", "paths": ["prompts/design.md"] } ]
+    })));
+    let rows = view.render(&theme, 110, &kb, 40);
+    let text = rows
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("── prompts/design.md"), "{text}");
+    let heading = rows.iter().any(|row| {
+        row.iter()
+            .any(|span| span.content.contains("Design") && span.style == heading_style)
+    });
+    assert!(
+        heading,
+        "the template file's Markdown keeps its color: {text}"
+    );
+    // Esc steps back: files → document → (the caller closes).
+    assert!(view.step_back(), "Esc closes the files first");
+    assert!(!view.step_back(), "the next Esc leaves the view");
+}
+
+#[test]
+fn node_and_files_errors_clear_only_with_their_matching_success() {
+    let initial = json!({
+        "state": {"id": "reviewing", "instances": [
+            {"index": 0, "entry": 0, "status": "running"}
+        ]},
+        "entry": {"index": 0, "status": "running", "outputs": null, "outputErrors": {}},
+        "instance": {"index": 0, "entry": 0, "status": "running", "prompt": "initial"}
+    });
+    let mut view = node::NodeView::parse_reply("run-abc12345", "reviewing", &initial)
+        .expect("the node reply parses");
+    view.set_request_epoch(1, None);
+    view.set_error("node request failed");
+    view.set_files_error("library request failed");
+    let next = json!({
+        "state": {"id": "reviewing", "instances": [
+            {"index": 0, "entry": 0, "status": "running"}
+        ]},
+        "entry": {"index": 0, "status": "running", "outputs": null, "outputErrors": {}},
+        "instance": {"index": 0, "entry": 0, "status": "running", "prompt": "latest"}
+    });
+    assert!(view.apply_request_result(1, Ok(next)));
+
+    let theme = theme();
+    let kb = kb();
+    let document_text = view
+        .render(&theme, 80, &kb, 30)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!document_text.contains("node request failed"));
+    assert!(view.handle_key("enter", &kb, 30));
+    let files_text = view
+        .render(&theme, 80, &kb, 30)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        files_text.contains("Error: library request failed"),
+        "{files_text}"
+    );
+    assert!(
+        !files_text.contains("No files recorded for this state."),
+        "{files_text}"
+    );
+
+    view.set_files(node::NodeFiles::default());
+    let files_text = view
+        .render(&theme, 80, &kb, 30)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        files_text.contains("No files recorded for this state."),
+        "{files_text}"
+    );
+    assert!(
+        !files_text.contains("library request failed"),
+        "{files_text}"
+    );
+
+    assert!(view.step_back());
+    view.set_error("node request failed");
+    view.set_files(node::NodeFiles::default());
+    let document_text = view
+        .render(&theme, 80, &kb, 30)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        document_text.contains("Error: node request failed"),
+        "{document_text}"
+    );
+}
+
+/// The node view's merge: a reply for a moved selection retargets it,
+/// a malformed reply keeps the last good document, and the files
+/// document survives every merge (the fold contract).
+#[test]
+fn the_node_view_merge_keeps_the_files_and_fixes_the_selection() {
+    let data = json!({
+        "name": "review-loop",
+        "state": { "id": "reviewing", "instances": [
+            { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-2" },
+            { "index": 1, "entry": 0, "status": "running", "attempt": 1, "child": "child-3" }
+        ]},
+        "entry": {"index": 0, "status": "running", "outputs": null, "outputErrors": {}},
+        "instance": { "index": 0, "entry": 0, "status": "done", "child": "child-2", "prompt": "first" }
+    });
+    let mut view =
+        node::NodeView::parse_reply("run-abc12345", "reviewing", &data).expect("the reply parses");
+    view.set_files(node::NodeFiles::parse(&json!({
+        "files": [ { "path": "prompts/design.md", "text": "## Design\n" } ],
+        "stateFiles": [ { "state": "reviewing", "paths": ["prompts/design.md"] } ]
+    })));
+    // The walk moves to instance 1; the refetched reply answers it: the
+    // merge retargets the selection to the document's instance.
+    view.handle_key("down", &kb(), 40);
+    let moved = json!({
+        "name": "review-loop",
+        "state": { "id": "reviewing", "instances": [
+            { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-2" },
+            { "index": 1, "entry": 0, "status": "running", "attempt": 1, "child": "child-3" }
+        ]},
+        "entry": {"index": 0, "status": "running", "outputs": null, "outputErrors": {}},
+        "instance": { "index": 1, "entry": 0, "status": "running", "child": "child-3", "prompt": "second" }
+    });
+    view.merge_reply(&moved);
+    assert_eq!(
+        view.selected_selector(),
+        Some((0, 1)),
+        "the selection follows the document"
+    );
+    assert_eq!(
+        view.document
+            .as_ref()
+            .map(|document| document.prompt.as_str()),
+        Some("second")
+    );
+    assert!(
+        view.files.is_some(),
+        "the files document survives the merge"
+    );
+    // A malformed reply keeps the last good document.
+    view.merge_reply(&json!({ "nothing": "here" }));
+    assert_eq!(
+        view.document
+            .as_ref()
+            .map(|document| document.prompt.as_str()),
+        Some("second"),
+        "the malformed reply keeps the last good document"
+    );
+    assert!(view.error.is_some(), "the malformed reply reports");
+}
+
+/// A mermaid fence with no parseable states (a header only, or a one-line
+/// `graph TD; A-->B`) renders nothing instead of crashing the files page.
+#[test]
+fn a_mermaid_block_without_states_renders_nothing() {
+    for text in ["flowchart TB", "graph TD; A-->B", "stateDiagram-v2"] {
+        assert!(
+            super::mermaid::mermaid_block_lines(&theme(), text).is_empty(),
+            "{text:?}"
+        );
+    }
+}
+
+/// A mermaid flowchart node keeps only the label inside its shape, compound shapes included.
+#[test]
+fn compound_flowchart_shapes_keep_only_their_label() {
+    use super::mermaid::{parse_mermaid, Mermaid};
+    let Some(Mermaid::Diagram { states, .. }) = parse_mermaid(
+        "flowchart TB\n  a((circle)) --> b([stadium])\n  c[(cylinder)] --> d{{hexagon}}\n  e[box] --> f>flag]",
+    ) else {
+        panic!("a flowchart parses to a diagram");
+    };
+    let labels: Vec<(&str, Option<&str>)> = states
+        .iter()
+        .map(|state| (state.id.as_str(), state.label.as_deref()))
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            ("a", Some("circle")),
+            ("b", Some("stadium")),
+            ("c", Some("cylinder")),
+            ("d", Some("hexagon")),
+            ("e", Some("box")),
+            ("f", Some("flag")),
+        ]
+    );
+}
+
+/// A run too large to draw keeps its size notice while a state is
+/// selected: the selection resolves to the notice row, never past it.
+#[test]
+fn an_oversized_run_keeps_its_notice_with_a_state_selected() {
+    let mut snapshot = scripted_snapshot();
+    let ids: Vec<String> = (0..40).map(|index| format!("s{index}")).collect();
+    snapshot["machine"]["states"] = json!(ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| json!({"id": id, "entry": index == 0}))
+        .collect::<Vec<_>>());
+    snapshot["machine"]["transitions"] = json!((0..ids.len())
+        .flat_map(|from| (from + 1..ids.len()).map(move |to| (from, to)))
+        .map(|(from, to)| json!({"from": ids[from], "to": ids[to]}))
+        .collect::<Vec<_>>());
+    snapshot["machine"]["order"] = json!(ids);
+    snapshot["nodes"] = json!([]);
+    snapshot["activeNodes"] = json!([]);
+    snapshot["lastFired"] = json!([]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
+    let _ = view.handle_key("down", &kb());
+    let text = frame_text(&mut view).join("\n");
+    assert!(text.contains("diagram too large to render"), "{text}");
 }

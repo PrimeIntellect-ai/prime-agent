@@ -167,13 +167,15 @@ fn scope_toggles_between_the_scoped_list_and_the_catalog() {
         .iter()
         .position(|row| row.contains("Search models"))
         .expect("the search field renders");
-    let scope_hint = format!(
+    // The toggle key renders with the host platform's `alt` label
+    // (macOS: Option+S, elsewhere: Alt+S).
+    let scope_key = format!(
         "{}+S scope (all/scoped)",
-        crate::keybindings::format_key_text("alt")
+        crate::keybindings::host_alt_label()
     );
     assert!(
         scope_row.is_some_and(|scope_row| {
-            scope_row < search_row && rows[scope_row].contains(&scope_hint)
+            scope_row < search_row && rows[scope_row].contains(&scope_key)
         }),
         "the scope row renders above the search field with its leading space:
 {}",

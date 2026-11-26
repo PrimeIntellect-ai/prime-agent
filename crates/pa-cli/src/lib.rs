@@ -29,6 +29,7 @@ pub(crate) mod daemon_discovery;
 pub(crate) mod daemon_mode;
 pub(crate) mod daemon_session_list;
 pub(crate) mod factory_command;
+pub(crate) mod factory_dir_command;
 pub(crate) mod file_processor;
 pub(crate) mod global_flags;
 pub(crate) mod headless_autonomous;
@@ -59,6 +60,7 @@ pub use mode::{AppMode, MissingSubsystem, RunOptions, Runtime, UnavailableRuntim
 pub(crate) mod piped_stdin;
 pub(crate) mod print_autonomous;
 pub(crate) mod print_boundary;
+pub(crate) mod print_daemon;
 pub(crate) mod print_goal;
 pub(crate) mod print_rlm;
 pub mod print_runtime;

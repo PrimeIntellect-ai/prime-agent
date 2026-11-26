@@ -4,6 +4,9 @@
 //! survive the same window.
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::io::Write as _;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
@@ -77,11 +80,7 @@ fn spawn_worker_with_window(
 }
 
 fn wait_worker_socket(socket: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "worker socket never appeared");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(15));
 }
 
 fn wait_exit(child: &mut Child, budget: Duration) -> bool {

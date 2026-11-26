@@ -1578,6 +1578,7 @@ dependencies = [
  "pa-ai",
  "pa-core",
  "pa-daemon",
+ "pa-factory",
  "pa-telemetry",
  "pa-tui",
  "pa-types",
@@ -1610,6 +1611,7 @@ dependencies = [
  "nix",
  "pa-agent",
  "pa-ai",
+ "pa-factory",
  "pa-models",
  "pa-telemetry",
  "pa-types",
@@ -1661,6 +1663,16 @@ dependencies = [
  "tokio-util",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "pa-factory"
+version = "0.10.5"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

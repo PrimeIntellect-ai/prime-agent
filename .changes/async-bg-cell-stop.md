@@ -1,0 +1,1 @@
+- One Escape or Ctrl+C on an idle session now stops a backgrounded `python_repl` cell, like the press that stops a foreground cell; a worker whose daemon supervisor is gone stops its backgrounded cell instead of letting it run unwatched, then exits once the cell's notice lands.

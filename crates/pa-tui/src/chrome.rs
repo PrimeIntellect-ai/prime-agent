@@ -95,10 +95,10 @@ pub enum ActivityGroup {
     Subagents,
     Heartbeats,
     Bash,
-    /// The factory page: live factory runs. Its group renders exactly
+    /// The machines page: live factory runs. Its group renders exactly
     /// while the daemon advertises the `factory_activity` lane (the
     /// opt-in gate; an advertised empty one reads its zero count) and
-    /// opens the factory page over the lane — the same navigation family
+    /// opens the machines page over the lane — the same navigation family
     /// as the subagents, heartbeats, and shells pages.
     Factory,
     /// The active goal: its group is mounted while a goal is being
@@ -147,18 +147,16 @@ pub struct ActivityDock {
     pub shells: Vec<String>,
     /// How many of the running shells are persistent.
     pub shells_persistent: usize,
-    /// The current session's stored factory specs (the expanded factory
-    /// row's breakdown; the collapsed segment counts live runs only).
-    pub factory_specs: usize,
     /// The live factory runs, paused first, each `<name> <state>` (a live
     /// state — running, stopping, or paused — or a terminal run whose
     /// children are still in flight; the current session's kernel registry
     /// only): fully terminal runs never inflate the group, exactly like
     /// the shells group's running-only scoping.
     pub factory_runs: Vec<String>,
-    /// The same live runs counted running vs paused (the collapsed count
-    /// and its paused cluster).
-    pub factory_counts: crate::factory_view::FactoryRunCounts,
+    /// The live runs' RUNNING count alone — the bar's one number. The
+    /// paused count never rides the dock (the machines page keeps the
+    /// paused rows), so the bar cannot show it by construction.
+    pub factory_running: usize,
     /// Whether the factory group renders at all: the daemon's
     /// `factory_activity` advertisement (the factory's opt-in gate —
     /// `factory.enabled`, off by default). A daemon without the lane
@@ -750,7 +748,7 @@ pub fn render_activity_dock_segments(
         return (lines, segments);
     }
     // The status-dot vocabulary (`● running / ◐ idle / ○ inactive`): the half
-    // circle marks waiting work; only the heartbeat and factory pauses keep a dot.
+    // circle marks waiting work; the heartbeat pauses keep the dot.
     let cluster = |text: &str, color: ThemeColor| {
         vec![
             theme.fg_span(ThemeColor::Dim, " · ".to_string()),
@@ -761,7 +759,7 @@ pub fn render_activity_dock_segments(
     // children and nested descendants together — ONE number.
     let running = dock.subagents_running_direct + dock.subagents_running_nested;
     let shells = dock.shells.len();
-    let factory = dock.factory_counts;
+    let factory_running = dock.factory_running;
     let mut line = vec![Span::raw(" ")];
     let mut segments: Vec<ActivityDockSegment> = Vec::new();
     for (index, group) in dock.groups().into_iter().enumerate() {
@@ -810,20 +808,19 @@ pub fn render_activity_dock_segments(
                     ));
                 }
             }
-            // The factory indicator counts the running runs, and the paused
-            // ones in their own amber cluster (the heartbeats' grammar): done
-            // and failed runs stay as panels inside the factory page.
+            // The machines indicator shows ONE number — the running
+            // count, pluralized (the operator's dock-count directive):
+            // the bar never carries a paused count, and the paused,
+            // done, and failed runs stay as state-colored rows and
+            // panels inside the run page.
             ActivityGroup::Factory => {
                 line.push(theme.fg_span(
-                    activity_color(factory.running),
-                    format!("⚙ {} factory", factory.running),
+                    activity_color(factory_running),
+                    format!(
+                        "⚙ {factory_running} machine{}",
+                        if factory_running == 1 { "" } else { "s" }
+                    ),
                 ));
-                if factory.paused > 0 {
-                    line.extend(cluster(
-                        &format!("◐ {} paused", factory.paused),
-                        ThemeColor::Warning,
-                    ));
-                }
             }
             ActivityGroup::Goal => line.push(goal_span(dock, theme)),
         }
@@ -929,24 +926,22 @@ fn render_expanded_dock_row(
             let items: Vec<String> = breakdown.into_iter().chain(dock.shells.clone()).collect();
             expanded_group_row(theme, width, ("▸", "shells"), dock.shells.len(), &items)
         }
-        // The stored specs and live runs lead, then each live run.
+        // The breakdown item shows ONE number — the running count,
+        // pluralized — and only while runs run (a fully quiet group
+        // stays the dim name alone). The bar never numbers specs, so the
+        // item composes directly instead of reusing
+        // `FactoryCounts::label()` (whose specs and paused segments
+        // belong to the agents view's activity line, not the bar), and
+        // each live run stays a state-labeled item after the count.
         ActivityGroup::Factory => {
-            let counts = crate::factory_view::FactoryCounts {
-                specs: dock.factory_specs,
-                runs: dock.factory_counts,
-            };
-            let items: Vec<String> = counts
-                .label()
+            let running = dock.factory_running;
+            let count_item = (running > 0)
+                .then(|| format!("{running} machine{}", if running == 1 { "" } else { "s" }));
+            let items: Vec<String> = count_item
                 .into_iter()
                 .chain(dock.factory_runs.clone())
                 .collect();
-            expanded_group_row(
-                theme,
-                width,
-                ("⚙", "factory"),
-                dock.factory_counts.running,
-                &items,
-            )
+            expanded_group_row(theme, width, ("⚙", "machines"), running, &items)
         }
         ActivityGroup::Goal => vec![Span::raw(" "), goal_span(dock, theme)],
     };

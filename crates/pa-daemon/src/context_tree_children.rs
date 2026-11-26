@@ -2,8 +2,8 @@
 //! worker spawned; every other child is read from its persisted session dir. Deliberate TS
 //! divergences: grandchildren live under the sibling tree (TS nests them inside `sub-<id>/`);
 //! a deleted subagent's transcript stays hidden via durable ledger tombstones at every level
-//! (TS: memory only) and its spend rides a `deleted` row from the ledger's deleted-spend fold,
-//! the same fold the agents view bills; every child carries its ledger edge's factory run tag.
+//! (TS: memory only) and its spend rides a `deleted` row from the usage ledger's fold, the same
+//! fold every spend surface reads; every child carries its ledger edge's factory run tag.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -21,25 +21,29 @@ const ELLIPSIS: &str = "...";
 
 /// The RLM ledger facts the walk reads, keyed by the parent session file
 /// (canonicalized): the tombstoned child ids whose transcripts stay hidden
-/// and the billable deleted children (the agents view's deleted-spend
-/// fold); plus each child's factory run tag, keyed by the child's own
-/// session file (child ids are only unique under one parent).
+/// and the deleted children's edges with their total spend (the usage
+/// ledger's fold, read-only); plus each child's factory run tag, keyed by the
+/// child's own session file (child ids are only unique under one parent).
 #[derive(Debug, Default)]
 pub struct ContextLedger {
     tombstoned: HashMap<PathBuf, HashSet<String>>,
     tombstoned_files: HashSet<PathBuf>,
-    deleted: HashMap<PathBuf, Vec<crate::rlm_ledger::DeletedChildUsage>>,
+    deleted: HashMap<PathBuf, Vec<(crate::rlm_ledger::RlmLedgerEdge, pa_types::ai::Usage)>>,
     factory: HashMap<PathBuf, crate::rlm_ledger::RlmFactoryTag>,
 }
 
 impl ContextLedger {
-    /// Read the facts from one ledger. An unreadable ledger degrades to no
-    /// filtering and no deleted rows.
-    pub fn read(ledger: &crate::rlm_ledger::RlmSpawnLedger) -> Self {
+    /// Read the facts from one spawn ledger and the usage ledger beside it.
+    /// An unreadable spawn ledger degrades to no filtering and no deleted rows.
+    pub(crate) fn read(
+        ledger: &std::sync::Arc<crate::rlm_ledger::RlmSpawnLedger>,
+        agent_dir: &Path,
+    ) -> Self {
+        let usage = crate::usage_ledger::UsageLedger::new(agent_dir, std::sync::Arc::clone(ledger));
         let mut facts = Self::default();
-        let (edges, deleted) = ledger.edges_with_deleted_children().unwrap_or_default();
-        // A reused path with a live edge bills as live, like the ledger's
-        // deleted-spend fold; an older tombstone must not hide its new owner.
+        let edges = ledger.edges(true).unwrap_or_default();
+        // A reused path with a live edge is live; an older tombstone must not
+        // hide its new owner.
         let live_files: HashSet<PathBuf> = edges
             .iter()
             .filter(|edge| edge.deleted.is_none())
@@ -49,25 +53,25 @@ impl ContextLedger {
         for edge in edges {
             let child = crate::lease::canonical_session_path(Path::new(&edge.child));
             match edge.factory.clone() {
-                Some(tag) => facts.factory.insert(child, tag),
+                Some(tag) => facts.factory.insert(child.clone(), tag),
                 None => facts.factory.remove(&child),
             };
             if edge.deleted.is_some() {
-                let file = crate::lease::canonical_session_path(Path::new(&edge.child));
-                if !live_files.contains(&file) {
-                    facts.tombstoned_files.insert(file);
+                let parent = crate::lease::canonical_session_path(Path::new(&edge.parent));
+                if !live_files.contains(&child) && facts.tombstoned_files.insert(child) {
+                    let total = usage.spend(Path::new(&edge.child)).total;
+                    facts
+                        .deleted
+                        .entry(parent.clone())
+                        .or_default()
+                        .push((edge.clone(), total));
                 }
                 facts
                     .tombstoned
-                    .entry(crate::lease::canonical_session_path(Path::new(
-                        &edge.parent,
-                    )))
+                    .entry(parent)
                     .or_default()
                     .insert(edge.child_id);
             }
-        }
-        for (parent, children) in deleted {
-            facts.deleted.insert(PathBuf::from(parent), children);
         }
         facts
     }
@@ -97,11 +101,8 @@ impl ContextLedger {
         }
     }
 
-    /// One `deleted` row per billable deleted child of one parent session
-    /// file, with its per-model split when the capture recorded one (the
-    /// split's tokens equal the summary's; the billed cost stays the
-    /// summary's). Without a split, the summary's `inputTokens` already
-    /// include cache reads and writes.
+    /// One `deleted` row per deleted child of one parent session file
+    /// that billed spend: the child's whole spend, its descendants' included.
     pub fn deleted_nodes(&self, parent_file: &Path) -> Vec<Value> {
         let Some(children) = self
             .deleted
@@ -111,79 +112,28 @@ impl ContextLedger {
         };
         children
             .iter()
-            .map(|child| {
-                let summary = &child.usage;
-                let (input, cache_read, cache_write) = match &child.by_model {
-                    Some(models) => (
-                        models.iter().map(|model| model.input).sum(),
-                        models.iter().map(|model| model.cache_read).sum(),
-                        models.iter().map(|model| model.cache_write).sum(),
-                    ),
-                    None => (summary.input_tokens, 0, 0),
-                };
-                let usage = usage_value(
-                    input,
-                    summary.output_tokens,
-                    cache_read,
-                    cache_write,
-                    summary.cost,
-                );
+            .filter_map(|(edge, total)| {
+                crate::session_usage::session_usage_summary_from(total)?;
+                let usage = serde_json::to_value(total).ok()?;
+                let child = crate::lease::canonical_session_path(Path::new(&edge.child));
                 // Its own id namespace: a live child reusing the id must
                 // never collide with (or invalidate) the deleted spend.
                 let mut node = json!({
-                    "id": format!("deleted:{}", child.child_file),
-                    "label": child.name,
+                    "id": format!("deleted:{}", child.to_string_lossy()),
+                    "label": edge.name,
                     "status": "deleted",
                     "deleted": true,
                     "ownUsage": usage,
                     "totalUsage": usage,
                     "children": [],
                 });
-                if let Some(tag) = &child.factory {
+                if let Some(tag) = &edge.factory {
                     node["factory"] = json!(tag);
                 }
-                if let Some(models) = &child.by_model {
-                    let buckets: Vec<Value> = models
-                        .iter()
-                        .map(|model| {
-                            json!({
-                                "provider": model.provider,
-                                "id": model.id,
-                                "ownUsage": usage_value(
-                                    model.input,
-                                    model.output,
-                                    model.cache_read,
-                                    model.cache_write,
-                                    model.cost,
-                                ),
-                            })
-                        })
-                        .collect();
-                    node["ownUsageByModel"] = json!(buckets);
-                }
-                node
+                Some(node)
             })
             .collect()
     }
-}
-
-/// The `Usage` wire shape for one token split and its billed total (the
-/// ledger keeps no per-category cost).
-fn usage_value(input: u64, output: u64, cache_read: u64, cache_write: u64, cost: f64) -> Value {
-    json!({
-        "input": input,
-        "output": output,
-        "cacheRead": cache_read,
-        "cacheWrite": cache_write,
-        "totalTokens": input + output + cache_read + cache_write,
-        "cost": {
-            "input": 0,
-            "output": 0,
-            "cacheRead": 0,
-            "cacheWrite": 0,
-            "total": cost,
-        },
-    })
 }
 
 /// The artifact tree root every session's children live under
