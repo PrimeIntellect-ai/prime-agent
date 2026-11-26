@@ -187,10 +187,20 @@ if [ -n "$installed_already" ]; then
     echo "${PA_TARBALL_SHA256}  $PA_TARBALL_PATH" | sha256sum -c - >/dev/null
     mkdir -p /root/.prime-agent-bot-tarball
     cp "$PA_TARBALL_PATH" "$preserve"
-  elif [ -n "${PA_TARBALL_BYTES:-}" ]; then
+  elif [ -z "${PA_TARBALL_PATH:-}" ] && [ -n "${PA_TARBALL_BYTES:-}" ]; then
+    # The exec-stream fallback only: an upload-path rerun (the consumed
+    # upload) must not read an empty stdin over the kept archive.
     mkdir -p /root/.prime-agent-bot-tarball
     head -c "$PA_TARBALL_BYTES" > "$preserve"
     echo "${PA_TARBALL_SHA256}  $preserve" | sha256sum -c - >/dev/null
+  fi
+  if [ -f "$preserve" ]; then
+    tarball_version="$(tar -xOzf "$preserve" package.json \
+      | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')"
+    if [ "$tarball_version" != "$PA_VERSION" ]; then
+      echo "the bot tarball is prime-agent ${tarball_version}, not ${PA_VERSION}" >&2
+      exit 4
+    fi
   fi
 else
   asset="prime-agent-${PA_VERSION}-linux-x64.tar.gz"
