@@ -21,6 +21,9 @@
 )]
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -82,14 +85,7 @@ fn spawn_worker(dir: &Path, socket: &Path, token: &str) -> WorkerGuard {
 }
 
 fn wait_socket_ready(socket: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if socket.exists() {
-            return;
-        }
-        assert!(Instant::now() < deadline, "worker socket never came up");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(15));
 }
 
 /// A raw private-frame client for the worker socket (the same wire the supervisor's request pump

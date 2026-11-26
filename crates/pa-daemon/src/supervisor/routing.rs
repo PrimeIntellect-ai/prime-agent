@@ -407,7 +407,18 @@ impl Supervisor {
                                 | DaemonCommand::Rename { .. }
                                 | DaemonCommand::WaitForIdle { .. }
                         ) {
-                            match self.wake_saved_session(&selector).await {
+                            // An attaching client's telemetry opt-out rides the wake: the
+                            // attach gate admits it only to a worker that kept the opt-out.
+                            let telemetry_disabled = match command {
+                                DaemonCommand::Attach {
+                                    telemetry_disabled, ..
+                                }
+                                | DaemonCommand::Reattach {
+                                    telemetry_disabled, ..
+                                } => telemetry_disabled.filter(|disabled| *disabled),
+                                _ => None,
+                            };
+                            match self.wake_saved_session(&selector, telemetry_disabled).await {
                                 WakeRoute::Woken(resident) => {
                                     rebound_to = Some(
                                         self.rebind_connection(&selector, &resident, attached)
@@ -968,14 +979,21 @@ impl Supervisor {
 
     /// The saved-session wake for a passivated session (TS's tier-2 relaunch); a selector
     /// that resolves to no saved session falls through to the unknown-session error.
-    pub(super) async fn wake_saved_session(self: &Arc<Self>, selector: &str) -> WakeRoute {
+    pub(super) async fn wake_saved_session(
+        self: &Arc<Self>,
+        selector: &str,
+        telemetry_disabled: Option<bool>,
+    ) -> WakeRoute {
         let resolve_error = anyhow!("Unknown active session: {selector}");
-        match self.wake_saved_target(&resolve_error, selector, None).await {
+        match self
+            .wake_saved_target(&resolve_error, selector, None, telemetry_disabled)
+            .await
+        {
             crate::messaging::WakeOutcome::Woken(resident) => WakeRoute::Woken(resident),
             crate::messaging::WakeOutcome::Unknown => {
                 // The routing selector is the session's ACTIVE id (the registry key), which
                 // the catalog and ledger edges do not carry — the ROSTER row does.
-                match self.wake_roster_session(selector).await {
+                match self.wake_roster_session(selector, telemetry_disabled).await {
                     Some(crate::messaging::WakeOutcome::Woken(resident)) => {
                         WakeRoute::Woken(resident)
                     }
@@ -999,6 +1017,7 @@ impl Supervisor {
     async fn wake_roster_session(
         self: &Arc<Self>,
         selector: &str,
+        telemetry_disabled: Option<bool>,
     ) -> Option<crate::messaging::WakeOutcome> {
         let mut files: Vec<String> = {
             let roster = self.roster.lock().unwrap();
@@ -1089,7 +1108,7 @@ impl Supervisor {
             no_session: None,
             name: None,
             config: Some(config),
-            telemetry_disabled: None,
+            telemetry_disabled,
             runtime_metadata: Some(runtime_metadata),
             lifecycle: None,
             env: None,

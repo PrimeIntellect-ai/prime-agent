@@ -261,6 +261,7 @@ impl AgentView {
                     detail,
                     &self.theme,
                     width,
+                    true,
                 )
             }
             ChatEntry::ShellCompletion(row) => {

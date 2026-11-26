@@ -24,6 +24,9 @@
 #![allow(clippy::too_many_lines)]
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -495,36 +498,9 @@ struct Client {
     writer: UnixStream,
 }
 
-/// Connect to `socket`, retrying until a listener accepts.
-///
-/// A spawned supervisor can be bound but not yet accepting when the test
-/// connects: `bind(2)` creates the socket file before `listen(2)` starts
-/// queueing, and a loaded host can delay the accept loop. Retry for up to
-/// five seconds, then panic naming the path and the elapsed time.
-fn connect_waiting(socket: &Path) -> UnixStream {
-    const ATTEMPT_INTERVAL: Duration = Duration::from_millis(100);
-    const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-    let started = Instant::now();
-    loop {
-        match UnixStream::connect(socket) {
-            Ok(stream) => return stream,
-            Err(error) => {
-                let elapsed = started.elapsed();
-                assert!(
-                    elapsed < CONNECT_TIMEOUT,
-                    "no daemon accepted a connection at {} after {elapsed:?} \
-                     (last error: {error})",
-                    socket.display()
-                );
-                std::thread::sleep(ATTEMPT_INTERVAL);
-            }
-        }
-    }
-}
-
 impl Client {
     fn connect(socket: &Path) -> Client {
-        let stream = connect_waiting(socket);
+        let stream = UnixStream::connect(socket).expect("connect");
         let writer = stream.try_clone().expect("clone");
         let mut client = Client {
             reader: BufReader::new(stream),
@@ -687,17 +663,11 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path, kernel_venv: &Path) -> Daemon {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Daemon {
-                child,
-                socket: socket.to_path_buf(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(15));
+    Daemon {
+        child,
+        socket: socket.to_path_buf(),
     }
-    panic!("supervisor socket never appeared");
 }
 
 #[test]
@@ -1656,20 +1626,28 @@ fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
     drop(supervisor);
 }
 
-/// The retry is load-bearing: the listener binds only after the first
-/// connect attempt was already refused, so a one-shot connect would panic here.
+/// The readiness wait holds while the socket path exists but nothing
+/// listens (the gap between bind and listen), and returns once a listener
+/// accepts its connect.
 #[test]
-fn connect_waits_for_a_listener_that_appears_after_the_first_attempt() {
+fn the_readiness_wait_holds_until_a_listener_accepts() {
     let root = tempfile::TempDir::new().expect("temp dir");
     let socket = root.path().join("late-listener.sock");
+    std::fs::write(&socket, "").expect("placeholder at the socket path");
     let late_socket = socket.clone();
     let listener = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(250));
+        std::fs::remove_file(&late_socket).expect("drop the placeholder");
         std::os::unix::net::UnixListener::bind(&late_socket).expect("bind late listener")
     });
 
-    let stream = connect_waiting(&socket);
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(5));
 
-    drop(stream);
-    drop(listener.join().expect("late listener thread"));
+    let listener = listener.join().expect("late listener thread");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    listener
+        .accept()
+        .expect("the wait connected to the listener");
 }

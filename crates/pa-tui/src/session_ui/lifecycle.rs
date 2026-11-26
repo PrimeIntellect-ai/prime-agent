@@ -294,10 +294,16 @@ impl SessionUi {
                     text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
                     kind: crate::chat::StatusKind::Info,
                 }),
+                // A supervisor that kept serving (an abandoned update) names no update.
                 _ => view.push_entry(crate::chat::ChatEntry::Status {
-                    text: format!(
-                        "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
-                    ),
+                    text: if update_id.is_empty() {
+                        "Reconnected to Prime Agent — your session and queued work resumed."
+                            .to_string()
+                    } else {
+                        format!(
+                            "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
+                        )
+                    },
                     kind: crate::chat::StatusKind::Info,
                 }),
             },

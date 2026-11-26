@@ -251,20 +251,9 @@ impl AgentSessionEngine {
                     .block_on(async { engine.turn_boundary.take_compaction().await })
             })
             .and_then(|pending| pending.instructions);
-        if !emit(EngineEvent::CompactionStart {
-            event: crate::compaction::compaction_start_event(
-                "overflow",
-                custom_instructions.as_deref(),
-            ),
-        }) {
-            return OverflowAttempt::Cancelled;
-        }
-        pa_core::session_engine::compaction_trace::trace(
-            "auto.overflow_start_emitted",
-            &serde_json::Value::Null,
-        );
         // The overflow run shares the auto-compaction abort slot: an
-        // `abort_compaction` command cancels the in-flight summarizer.
+        // `abort_compaction` command cancels the in-flight summarizer. The
+        // slot is set before the start event, so an abort sent on that event lands.
         let controller = std::sync::Arc::new(AbortController::new());
         let signal = controller.signal();
         {
@@ -273,6 +262,19 @@ impl AgentSessionEngine {
                 .lock()
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
+        if !emit(EngineEvent::CompactionStart {
+            event: crate::compaction::compaction_start_event(
+                "overflow",
+                custom_instructions.as_deref(),
+            ),
+        }) {
+            self.clear_auto_compaction_abort(&controller);
+            return OverflowAttempt::Cancelled;
+        }
+        pa_core::session_engine::compaction_trace::trace(
+            "auto.overflow_start_emitted",
+            &serde_json::Value::Null,
+        );
         let (model, api_key) = self.resolve_request_target(model);
         // The lock covers the clone only; the summarizer call below must not ride it.
         let engine = self.session.blocking_lock().clone();
@@ -399,7 +401,6 @@ mod tests {
     use crate::agent_engine::tests::{admit, faux_engine_with_settings};
     use crate::agent_engine::{AgentEngineConfig, AgentSessionEngine};
     use crate::engine::EngineEvent;
-    use crate::engine::SessionEngine;
     use serde_json::{json, Value};
 
     /// The TS overflow error shape: an Anthropic token-overflow message.
@@ -843,22 +844,10 @@ mod tests {
             &mut seed_events,
         );
 
-        let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = std::sync::Arc::default();
-        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let admission = crate::agent_engine::tests::admit_parked(
+        let events = crate::agent_engine::tests::admit_aborting_at_compaction_start(
             &engine,
             format!("overflow probe {}", "x".repeat(48_000)),
-            std::sync::Arc::clone(&events),
-            std::sync::Arc::clone(&started),
         );
-        crate::agent_engine::tests::wait_for_compaction_start(&started);
-        engine.abort_auto_compaction();
-        admission.join().expect("the aborted admission settles");
-
-        let events = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         let starts = compaction_starts(&events);
         assert_eq!(starts.len(), 1);
         assert_eq!(starts[0]["reason"], "overflow");
