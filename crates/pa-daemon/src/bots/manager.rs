@@ -196,7 +196,7 @@ python3 -c "$BOT_CLIENT" create
 "#;
 
 /// A minimal client for the daemon's JSONL socket protocol.
-const BOT_CLIENT: &str = r#"import json, os, socket, sys
+pub(super) const BOT_CLIENT: &str = r#"import json, os, socket, sys
 def connect():
     sock = socket.socket(socket.AF_UNIX)
     sock.settimeout(60)
@@ -220,6 +220,11 @@ if not session_file and os.path.exists(marker):
     session_file = open(marker).read().strip()
 if session_file and os.path.exists(session_file):
     command["sessionPath"] = session_file
+    # A reopened session keeps its own model and thinking: the config's
+    # are the spawn-time ones, and the session file pins every later
+    # switch; an explicit create flag would override them.
+    for key in ("provider", "model", "thinking"):
+        command["config"].pop(key, None)
 envelope = {"type": "command", "id": "bot-bootstrap", "protocol": hello["protocol"],
             "clientId": "bot-bootstrap", "command": command}
 stream.write((json.dumps(envelope) + "\n").encode())
@@ -620,6 +625,32 @@ impl BotManager {
             .cloned()
             .ok_or_else(|| anyhow!("unknown bot {bot_id}"))?;
         record.last_turn_at = Some(now_ms());
+        registry.put(record)
+    }
+
+    /// Adopt the guest session's live model and thinking into the record
+    /// (from its `get_state` summary): the /bots row shows them, and the
+    /// next create provisions the model's provider key. A summary without
+    /// a model leaves the record alone. The read-modify-write sits under
+    /// one registry lock, so a concurrent lifecycle save cannot resurrect
+    /// a stale snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when the registry cannot be written.
+    pub fn adopt_guest_model(&self, bot_id: &str, state: &Value) -> Result<()> {
+        let Some((model, thinking)) = guest_model_choice(state) else {
+            return Ok(());
+        };
+        let mut registry = lock(&self.registry);
+        let Some(record) = registry.get(bot_id) else {
+            return Ok(());
+        };
+        if record.model == model && record.thinking == thinking {
+            return Ok(());
+        }
+        let mut record = record.clone();
+        record.model = model;
+        record.thinking = thinking;
         registry.put(record)
     }
 
@@ -2348,6 +2379,27 @@ pub fn idempotency_key(bot_id: &str, generation: u32, source: &str) -> String {
     sha256_hex(format!("{bot_id}:{generation}:{source}").as_bytes())[..32].to_string()
 }
 
+/// The guest session's model and thinking, as the record's fields: the
+/// `get_state` summary's model (its provider and id, joined like a spawn
+/// selector) and its effective thinking level. `None` when the summary
+/// carries no model; a `"default"` (unset) level keeps the record's
+/// thinking.
+fn guest_model_choice(state: &Value) -> Option<(Option<String>, Option<String>)> {
+    let model = state.get("model").and_then(|model| {
+        let id = model.get("id").and_then(Value::as_str)?;
+        Some(match model.get("provider").and_then(Value::as_str) {
+            Some(provider) => format!("{provider}/{id}"),
+            None => id.to_string(),
+        })
+    })?;
+    let thinking = state
+        .get("thinkingLevel")
+        .and_then(Value::as_str)
+        .filter(|level| *level != "default")
+        .map(str::to_string);
+    Some((Some(model), thinking))
+}
+
 /// The provider the guest's model belongs to.
 fn guest_provider(record: &BotRecord) -> &str {
     record
@@ -2417,6 +2469,9 @@ fn pause_secret_name(bot_id: &str) -> String {
 }
 
 fn bootstrap_env(record: &BotRecord, self_pause: &SelfPauseSettings) -> BTreeMap<String, String> {
+    // The model and thinking seed a NEW session only: the guest client
+    // drops them when it reopens an existing session file, because that
+    // session pins its own (every guest `set_model` lands there).
     let mut config = json!({ "cwd": "/root" });
     if let Some(model) = &record.model {
         match model.split_once('/') {
