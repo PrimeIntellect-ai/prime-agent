@@ -107,10 +107,11 @@ pub(crate) fn settled_answer(
     }))
 }
 
-/// Whether the guest session runs anything: a turn, compaction, a shell,
-/// tools, children, queued input, background kernel work, or an active
-/// factory run.
-fn guest_busy_flags(state: &Value) -> bool {
+/// Whether the guest session runs turn work: a turn, compaction, a shell,
+/// tools, children, or queued input. The delivery lane reads it: a
+/// settled turn's answer is deliverable once this is false, even while
+/// background kernel work or a factory run outlives the turn.
+fn guest_turn_busy_flags(state: &Value) -> bool {
     let flag = |name: &str| state[name].as_bool().unwrap_or(false);
     [
         "isStreaming",
@@ -119,8 +120,6 @@ fn guest_busy_flags(state: &Value) -> bool {
         "isRunningTools",
         "hasRunningSubagents",
         "hasRunningRlmChildren",
-        "hasBackgroundKernelWork",
-        "hasActiveFactoryRuns",
     ]
     .into_iter()
     .any(flag)
@@ -129,15 +128,40 @@ fn guest_busy_flags(state: &Value) -> bool {
             .is_some_and(|count| count > 0)
 }
 
-async fn guest_busy<G: GuestCommands>(guest: &mut G, session: &str) -> Result<bool> {
-    let state = guest
+/// Whether the guest session holds off the idle pause: turn work, or
+/// background kernel work or an active factory run that outlives the
+/// settled turn. Only the pause verdict reads it — never the delivery
+/// lane, whose answers must not wait on work the turn already ended
+/// with.
+fn guest_pause_busy_flags(state: &Value) -> bool {
+    let flag = |name: &str| state[name].as_bool().unwrap_or(false);
+    guest_turn_busy_flags(state)
+        || ["hasBackgroundKernelWork", "hasActiveFactoryRuns"]
+            .into_iter()
+            .any(flag)
+}
+
+/// The guest session's live state over the link.
+async fn guest_state<G: GuestCommands>(guest: &mut G, session: &str) -> Result<Value> {
+    guest
         .command(&DaemonCommand::GetState {
             id: None,
             active_session_id: session.to_string(),
             rest: Map::default(),
         })
-        .await?;
-    Ok(guest_busy_flags(&state))
+        .await
+}
+
+/// Whether the guest session runs turn work (the delivery lane's
+/// settle gate).
+async fn guest_turn_busy<G: GuestCommands>(guest: &mut G, session: &str) -> Result<bool> {
+    Ok(guest_turn_busy_flags(&guest_state(guest, session).await?))
+}
+
+/// Whether the guest session holds off the idle pause (the pause
+/// verdict's gate).
+async fn guest_pause_busy<G: GuestCommands>(guest: &mut G, session: &str) -> Result<bool> {
+    Ok(guest_pause_busy_flags(&guest_state(guest, session).await?))
 }
 
 /// The guest daemon commands a sync needs; [`GuestClient`] over the link.
@@ -183,7 +207,8 @@ enum Delivery {
     OutboxLine(u64, u64),
 }
 
-/// Wait until the guest session settles, then deliver the settled run's
+/// Wait until the guest session's turn work settles (background work and
+/// factory runs never delay delivery), then deliver the settled run's
 /// answer and each new outbox line once: `sending` (fsynced), deliver, then
 /// `sent`. A run in which the bot messaged its owner has those messages as
 /// its answer; its own final answer is not delivered. Write times of
@@ -213,7 +238,7 @@ where
     // A page read while a new run started is read again once that run
     // settles, so a mid-run step is never taken for an answer.
     let page = loop {
-        if guest_busy(guest, session).await? {
+        if guest_turn_busy(guest, session).await? {
             tokio::time::sleep(SETTLE_POLL).await;
             continue;
         }
@@ -228,7 +253,7 @@ where
                 rest: Map::default(),
             })
             .await?;
-        if !guest_busy(guest, session).await? {
+        if !guest_turn_busy(guest, session).await? {
             break page;
         }
     };
@@ -751,6 +776,8 @@ pub(crate) enum PauseVerdict {
 
 /// The decision at the end of the grace period after a settled turn.
 /// `quiet` answers whether no send arrived and no TUI is attached.
+/// Background kernel work and factory runs hold the pause here even
+/// though the turn's answer was already delivered.
 pub(crate) async fn pause_verdict<G: GuestCommands>(
     guest: &mut G,
     session: &str,
@@ -759,7 +786,7 @@ pub(crate) async fn pause_verdict<G: GuestCommands>(
     if !quiet() {
         return Ok(PauseVerdict::Keep);
     }
-    Ok(if guest_busy(guest, session).await? {
+    Ok(if guest_pause_busy(guest, session).await? {
         PauseVerdict::FollowAgain
     } else if quiet() {
         PauseVerdict::Pause
