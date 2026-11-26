@@ -1,0 +1,1 @@
+- a2a: reject malformed loopback `Host` suffixes, vary the Agent Card on `Host`, and accept `A2A-Version` as a query parameter (ports from #4251).
