@@ -730,8 +730,10 @@ impl Supervisor {
 
 /// Serializes the `/secrets` changes.
 static SECRETS_CHANGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-/// Serializes the rules refreshes: the last one to finish is current.
+/// Serializes the rules refresh passes.
 static RULES_REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// The newest refresh run: an older run stops retrying once a newer one starts.
+static RULES_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// The bots that kept old header rules after the last refresh, with why.
 static RULES_FAILURES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -749,8 +751,11 @@ fn lock_failures() -> std::sync::MutexGuard<'static, Vec<String>> {
 
 /// Send every bot its new header rules; retry while some bot kept its old
 /// ones. The bots still failing after the retries are listed by `/secrets`.
+/// A retry waits without the refresh lock, and a newer change ends the
+/// older run's retries, so a new change reaches the bots at once.
 async fn refresh_bot_rules(agent_dir: std::path::PathBuf) {
-    let _refresh = RULES_REFRESH.lock().await;
+    use std::sync::atomic::Ordering;
+    let generation = RULES_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let manager = match super::manager_for(&agent_dir) {
         Ok(manager) => manager,
         Err(error) => {
@@ -758,19 +763,27 @@ async fn refresh_bot_rules(agent_dir: std::path::PathBuf) {
             return;
         }
     };
-    let mut failures = manager.refresh_network_rules().await;
-    for delay in RULES_RETRY_DELAYS {
-        if failures.is_empty() {
-            break;
+    let delays = std::iter::once(None).chain(RULES_RETRY_DELAYS.into_iter().map(Some));
+    for delay in delays {
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        let _refresh = RULES_REFRESH.lock().await;
+        if RULES_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let failures = manager.refresh_network_rules().await;
+        let done = failures.is_empty();
+        if done || delay == RULES_RETRY_DELAYS.last().copied() {
+            for failure in &failures {
+                eprintln!("bot secrets: kept the old header rules for {failure}");
+            }
         }
         *lock_failures() = failures;
-        tokio::time::sleep(delay).await;
-        failures = manager.refresh_network_rules().await;
+        if done {
+            return;
+        }
     }
-    for failure in &failures {
-        eprintln!("bot secrets: kept the old header rules for {failure}");
-    }
-    *lock_failures() = failures;
 }
 
 /// The Prime account fingerprint that names its GitHub secrets; empty
