@@ -23,6 +23,34 @@ use serde::Deserialize;
 /// bytes (TS `MAX_ERROR_BODY_BYTES`).
 pub const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
+/// Transfer cap for upload payloads (TS `MAX_TRANSFER_BYTES`).
+pub const MAX_TRANSFER_BYTES: usize = 200 * 1024 * 1024;
+
+/// A gateway upload request.
+#[derive(Debug, Clone)]
+pub struct UploadRequest {
+    /// The absolute path inside the sandbox where the file is written.
+    pub path: String,
+    /// The multipart file name; a single path segment.
+    pub filename: String,
+    /// The file bytes; bounded to [`MAX_TRANSFER_BYTES`].
+    pub content: Vec<u8>,
+}
+
+/// A gateway upload response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadResult {
+    /// Always true on the success path (a `false` body is a typed
+    /// `invalid_response`).
+    pub success: bool,
+    /// The path the gateway reports.
+    pub path: String,
+    /// The uploaded size.
+    pub size: i64,
+    /// The gateway's ISO-8601 timestamp (non-empty wire string).
+    pub timestamp: String,
+}
+
 /// Per-sandbox gateway credentials (the `POST /sandbox/{id}/auth`
 /// response; `snake_case` wire form). The token is sandbox-bound and
 /// short-lived; callers own caching and expiry refresh (TS contract).
@@ -101,9 +129,180 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
         })
     }
 
+    /// Upload bytes to a path inside the sandbox through the multipart
+    /// gateway upload endpoint. One request carries the whole file, so a
+    /// release tarball costs one round trip instead of one per exec chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxErrorCode::TooLarge`] when the content exceeds
+    /// [`MAX_TRANSFER_BYTES`] (nothing is sent),
+    /// [`SandboxErrorCode::InvalidRequest`] for invalid paths, filenames,
+    /// or gateway auth, a status-mapped error for non-2xx responses, and
+    /// [`SandboxErrorCode::InvalidResponse`] for malformed bodies.
+    pub async fn upload_file(
+        &self,
+        sandbox_id: &str,
+        request: UploadRequest,
+        options: &GatewayOptions,
+    ) -> Result<UploadResult, SandboxError> {
+        assert_sandbox_id(sandbox_id)?;
+        validate_sandbox_file_path(&request.path)?;
+        if request.filename.is_empty() || request.filename.contains(['/', '\\', '\0']) {
+            return Err(SandboxError::invalid_request(
+                "filename must be a non-empty path-segment string",
+            ));
+        }
+        if request.content.len() > MAX_TRANSFER_BYTES {
+            return Err(SandboxError::too_large(format!(
+                "Upload of {} exceeds the {MAX_TRANSFER_BYTES} byte limit",
+                request.path
+            )));
+        }
+        let auth = self.get_sandbox_auth(sandbox_id, options).await?;
+        let url = gateway_query_url(
+            &gateway_url(&auth, "upload"),
+            &[("path", request.path.as_str()), ("sandbox_id", sandbox_id)],
+        )?;
+        let boundary = uuid::Uuid::new_v4().simple().to_string();
+        let body = build_multipart(&request.filename, &request.content, &boundary);
+        let headers = gateway_headers(&auth, &format!("multipart/form-data; boundary={boundary}"));
+        self.request_json(
+            Method::Post,
+            url,
+            headers,
+            Some(body),
+            self.request_timeout_or(options.request_timeout),
+            gateway_secrets(&auth, self.api_key.as_str()),
+            "Sandbox upload",
+            parse_upload_result,
+        )
+        .await
+    }
+
     fn request_timeout_or(&self, override_timeout: Option<Duration>) -> Duration {
         override_timeout.unwrap_or(self.request_timeout)
     }
+}
+
+/// The gateway endpoint URL `{gateway}/{ns}/{job}/{endpoint}`.
+fn gateway_url(auth: &GatewayAuth, endpoint: &str) -> String {
+    format!(
+        "{}/{}/{}/{}",
+        auth.gateway_url, auth.namespace, auth.job_id, endpoint
+    )
+}
+
+/// The gateway call headers: the sandbox-bound Bearer token and the
+/// caller's content type.
+fn gateway_headers(auth: &GatewayAuth, content_type: &str) -> Vec<(String, String)> {
+    vec![
+        (
+            "Authorization".to_string(),
+            format!("Bearer {}", auth.token),
+        ),
+        ("Content-Type".to_string(), content_type.to_string()),
+    ]
+}
+
+/// The secrets an error preview must redact: the API key and the
+/// sandbox-bound token.
+fn gateway_secrets<'a>(auth: &'a GatewayAuth, api_key: &'a str) -> Vec<&'a str> {
+    vec![api_key, auth.token.as_str()]
+}
+
+/// Validate a sandbox file path (TS `validateSandboxFilePath`):
+/// non-empty, at most 4096 bytes, NUL-free.
+fn validate_sandbox_file_path(path: &str) -> Result<(), SandboxError> {
+    if path.is_empty() || path.len() > 4096 || path.contains('\0') {
+        return Err(SandboxError::invalid_request(
+            "Sandbox file path must be a non-empty NUL-free string",
+        ));
+    }
+    Ok(())
+}
+
+/// Append URL-encoded query parameters to a gateway endpoint URL, in
+/// order (TS `searchParams.set` order: `path`, then `sandbox_id`).
+fn gateway_query_url(endpoint: &str, params: &[(&str, &str)]) -> Result<String, SandboxError> {
+    let mut url = url::Url::parse(endpoint).map_err(|error| {
+        SandboxError::invalid_response(format!("Gateway URL is malformed: {error}"))
+    })?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        for (name, value) in params {
+            pairs.append_pair(name, value);
+        }
+    }
+    Ok(url.to_string())
+}
+
+/// Escape a multipart filename the way the WHATWG `multipart/form-data`
+/// encoding algorithm (and the TS module's `FormData`) does: `"` ->
+/// `%22`, `\r` -> `%0D`, `\n` -> `%0A`.
+fn escape_multipart_filename(value: &str) -> String {
+    value
+        .replace('"', "%22")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+/// Build the multipart body for the gateway upload: one `file` part with
+/// the exact disposition the TS `FormData` emits (name `file`, the
+/// filename, no per-part content type), closed by the boundary.
+fn build_multipart(filename: &str, content: &[u8], boundary: &str) -> Vec<u8> {
+    let mut body = Vec::with_capacity(content.len() + boundary.len() * 2 + 96);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"");
+    body.extend_from_slice(escape_multipart_filename(filename).as_bytes());
+    body.extend_from_slice(b"\"\r\n\r\n");
+    body.extend_from_slice(content);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+/// The upload response contract (TS `uploadFile` parse): `success` must
+/// be exactly true, `size` a non-negative integer, `path` and
+/// `timestamp` non-empty strings.
+fn parse_upload_result(value: serde_json::Value) -> Result<UploadResult, SandboxError> {
+    #[derive(Deserialize)]
+    struct RawUploadResult {
+        success: bool,
+        path: String,
+        size: i64,
+        timestamp: String,
+    }
+    if !value.is_object() {
+        return Err(SandboxError::invalid_response(
+            "Sandbox upload response must be a JSON object",
+        ));
+    }
+    let raw: RawUploadResult = serde_json::from_value(value).map_err(|error| {
+        SandboxError::invalid_response(format!(
+            "Sandbox upload response record is malformed: {error}"
+        ))
+    })?;
+    if !raw.success {
+        return Err(SandboxError::invalid_response(
+            "Sandbox upload response reported failure",
+        ));
+    }
+    if raw.path.is_empty() || raw.timestamp.is_empty() {
+        return Err(SandboxError::invalid_response(
+            "Sandbox upload response path and timestamp must be non-empty strings",
+        ));
+    }
+    if raw.size < 0 {
+        return Err(SandboxError::invalid_response(
+            "Sandbox upload response size must be non-negative",
+        ));
+    }
+    Ok(UploadResult {
+        success: true,
+        path: raw.path,
+        size: raw.size,
+        timestamp: raw.timestamp,
+    })
 }
 
 /// The auth response contract (TS `getSandboxAuth` parse): `snake_case`
@@ -202,6 +401,64 @@ pub(crate) fn validate_gateway_credentials(
 mod tests {
     use super::*;
     use crate::error::SandboxErrorCode;
+
+    #[test]
+    fn multipart_bodies_match_the_undici_form() {
+        let body = build_multipart("x.tar", &[1, 2, 3, 4], "bnd");
+        let expected: Vec<u8> = b"--bnd\r\n\
+            Content-Disposition: form-data; name=\"file\"; filename=\"x.tar\"\r\n\
+            \r\n\
+            \x01\x02\x03\x04\r\n\
+            --bnd--\r\n"
+            .to_vec();
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn multipart_filenames_apply_whatwg_escaping() {
+        assert_eq!(escape_multipart_filename("a\"b"), "a%22b");
+        assert_eq!(escape_multipart_filename("a\nb"), "a%0Ab");
+        assert_eq!(escape_multipart_filename("a\rb"), "a%0Db");
+        assert_eq!(escape_multipart_filename("plain.tar.gz"), "plain.tar.gz");
+    }
+
+    #[test]
+    fn upload_responses_parse_strictly() {
+        let ok = serde_json::json!({
+            "success": true,
+            "path": "/tmp/x.tar",
+            "size": 4,
+            "timestamp": "2026-09-16T00:00:00Z",
+        });
+        assert_eq!(
+            parse_upload_result(ok).unwrap(),
+            UploadResult {
+                success: true,
+                path: "/tmp/x.tar".to_string(),
+                size: 4,
+                timestamp: "2026-09-16T00:00:00Z".to_string(),
+            }
+        );
+        let failure = serde_json::json!({
+            "success": false,
+            "path": "/x",
+            "size": 1,
+            "timestamp": "2026-09-16T00:00:00Z",
+        });
+        assert_eq!(
+            parse_upload_result(failure).unwrap_err().code(),
+            SandboxErrorCode::InvalidResponse
+        );
+        let missing_size = serde_json::json!({
+            "success": true,
+            "path": "/x",
+            "timestamp": "2026-09-16T00:00:00Z",
+        });
+        assert_eq!(
+            parse_upload_result(missing_size).unwrap_err().code(),
+            SandboxErrorCode::InvalidResponse
+        );
+    }
 
     #[test]
     fn gateway_credentials_validate_the_origin_and_segments() {

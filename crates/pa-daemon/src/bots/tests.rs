@@ -62,6 +62,10 @@ pub(crate) struct FakeState {
     pub links: Vec<(tokio::io::DuplexStream, tokio::io::DuplexStream)>,
     /// Every guest command: its script and environment.
     pub execs: Vec<(String, BTreeMap<String, String>)>,
+    /// Every transfer-endpoint upload: sandbox, guest path, byte count.
+    pub uploads: Vec<(String, String, usize)>,
+    /// The transfer endpoint fails (the install falls back to the exec stream).
+    pub upload_fails: bool,
     /// API-key rule hosts each credentials request returns.
     pub key_hosts: usize,
     /// Platform secrets by name, and how many puts ran.
@@ -401,6 +405,25 @@ impl BotPlatform for FakePlatform {
                 .to_string();
             }
             Ok(output)
+        }
+        .boxed()
+    }
+
+    fn upload<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        path: &'a str,
+        bytes: &'a [u8],
+    ) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            let mut state = self.state();
+            state
+                .uploads
+                .push((sandbox_id.to_string(), path.to_string(), bytes.len()));
+            if state.upload_fails {
+                return Err(PlatformError::Transient("upload refused".into()));
+            }
+            Ok(())
         }
         .boxed()
     }
@@ -1632,9 +1655,11 @@ async fn a_failed_install_fails_spawn_and_cleans_up() {
 }
 
 /// A local tarball that appears only after the manager was created is
-/// used: the release source is resolved at install time, not cached.
+/// used, and it rides the gateway transfer endpoint. A guest whose gateway
+/// refuses that endpoint still gets the build through the exec stream.
+/// One test, one environment override: the tarball variable is global.
 #[tokio::test(start_paused = true)]
-async fn a_tarball_placed_after_manager_creation_is_used() {
+async fn a_local_tarball_rides_the_upload_endpoint_or_the_exec_stream() {
     let (dir, platform, manager) = setup();
     let bytes = b"not really a tarball".to_vec();
     let tarball = dir.path().join("bot.tar.gz");
@@ -1644,9 +1669,18 @@ async fn a_tarball_placed_after_manager_creation_is_used() {
         Some(tarball.display().to_string()),
     )]);
 
-    manager.spawn(&spec("bot-tarball")).await.unwrap();
+    let spawned = manager.spawn(&spec("bot-tarball")).await.unwrap();
 
+    let sandbox_id = spawned.sandbox_id.clone().unwrap();
     assert_eq!(platform.state().installs, 1);
+    assert_eq!(
+        platform.state().uploads,
+        [(
+            sandbox_id,
+            version::Install::UPLOAD_PATH.to_string(),
+            bytes.len(),
+        )]
+    );
     let (_, install) = platform
         .state()
         .execs
@@ -1656,6 +1690,24 @@ async fn a_tarball_placed_after_manager_creation_is_used() {
         .expect("an install ran");
     assert_eq!(install["PA_TARBALL_BYTES"], bytes.len().to_string());
     assert_eq!(install["PA_TARBALL_SHA256"], super::sha256_hex(&bytes));
+    assert_eq!(install["PA_TARBALL_PATH"], version::Install::UPLOAD_PATH);
+
+    // The guest gateway refuses the transfer endpoint: the next install
+    // falls back to the exec stream.
+    platform.state().upload_fails = true;
+    manager.spawn(&spec("bot-upload-fallback")).await.unwrap();
+
+    let state = platform.state();
+    assert_eq!(state.uploads.len(), 2, "the fast path was tried twice");
+    let (_, install) = state
+        .execs
+        .iter()
+        .rev()
+        .find(|(script, _)| script.as_str() == INSTALL_SCRIPT)
+        .cloned()
+        .expect("an install ran");
+    assert!(!install.contains_key("PA_TARBALL_PATH"));
+    assert_eq!(install["PA_TARBALL_BYTES"], bytes.len().to_string());
 }
 
 #[tokio::test(start_paused = true)]
@@ -2064,6 +2116,14 @@ impl BotPlatform for ThrowawaySecret {
         stdin: Option<&'a [u8]>,
     ) -> BoxFuture<'a, PlatformResult<ExecOutput>> {
         self.inner.exec(sandbox_id, script, env, stdin)
+    }
+    fn upload<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        path: &'a str,
+        bytes: &'a [u8],
+    ) -> BoxFuture<'a, PlatformResult<()>> {
+        self.inner.upload(sandbox_id, path, bytes)
     }
     fn open_stream<'a>(
         &'a self,
