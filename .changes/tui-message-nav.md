@@ -1,0 +1,1 @@
+- The transcript supports ctrl+up/ctrl+down message navigation: with an empty editor, ctrl+up jumps to the previous user message and ctrl+down to the next, re-anchoring the transcript window on the landed message.

@@ -108,12 +108,6 @@ pub struct AgentView {
     /// The read-only info panel (operator directive 2026-09-26: the
     /// `/context`-family displays dock instead of flooding the transcript).
     pub info_panel: Option<crate::info_panel::InfoPanel>,
-    /// The session's build tree (the ctrl+alt+b builds panel's data): output is
-    /// pushed through the [`crate::builds_view::BuildsSink`] seam.
-    pub builds: crate::builds_view::BuildsState,
-    /// The ctrl+alt+b builds panel: while set, it owns the editor dock like the
-    /// info panel.
-    pub builds_panel: Option<crate::builds_view::BuildsPanel>,
     /// The `terminal.showImages` setting (default true): image blocks
     /// render metadata rows when set, `[Image: ...]` placeholders otherwise.
     pub show_images: bool,
@@ -275,7 +269,6 @@ impl AgentView {
             || self.bash_view.is_some()
             || self.goal_panel.is_some()
             || self.info_panel.is_some()
-            || self.builds_panel.is_some()
             || self.fork_selector.is_some()
             || self.confirm.is_some()
             || self.share_loader.is_some()
@@ -325,8 +318,6 @@ impl AgentView {
             side_pane: None,
             settings_menu: None,
             info_panel: None,
-            builds: crate::builds_view::BuildsState::default(),
-            builds_panel: None,
             show_images: true,
             show_hardware_cursor: false,
             splash_suppressed: false,
@@ -527,8 +518,27 @@ impl AgentView {
             .iter()
             .map(|index| index + count)
             .collect();
-        self.message_nav = self.message_nav.map(|index| index + count);
         self.note_prepended_entries(count, seam_before, cursor_spacing_before);
+         self.entry_layout.splice(
+             range.clone(),
+             std::iter::repeat_n([None, None, None], inserted),
+         );
+         self.entry_heights.splice(
+             range.clone(),
+             std::iter::repeat_n([None, None, None], inserted),
+         );
++        self.message_nav = self.message_nav.and_then(shift);
+         self.chat.splice(range, entries);
+     }
+ 
+     /// The first and last chat entries the last frame showed.
+     pub(crate) fn visible_entries(&self) -> Option<(usize, usize)> {
+         let entries = self
+             .click
+             .window_sections
+             .iter()
+             .map(|section| section.entry);
+         Some((entries.clone().min()?, entries.max()?))
     }
 
     /// Drop the whole transcript and its cached layout (a fresh snapshot
