@@ -1,0 +1,17 @@
+[package]
+name = "pa-factory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The factory machine directory format: loader, type checker, validator, and compiler."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -24,6 +24,9 @@
 #![allow(clippy::too_many_lines)]
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -660,17 +663,11 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path, kernel_venv: &Path) -> Daemon {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Daemon {
-                child,
-                socket: socket.to_path_buf(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(15));
+    Daemon {
+        child,
+        socket: socket.to_path_buf(),
     }
-    panic!("supervisor socket never appeared");
 }
 
 #[test]
@@ -1627,4 +1624,30 @@ fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
     );
     drop(client);
     drop(supervisor);
+}
+
+/// The readiness wait holds while the socket path exists but nothing
+/// listens (the gap between bind and listen), and returns once a listener
+/// accepts its connect.
+#[test]
+fn the_readiness_wait_holds_until_a_listener_accepts() {
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let socket = root.path().join("late-listener.sock");
+    std::fs::write(&socket, "").expect("placeholder at the socket path");
+    let late_socket = socket.clone();
+    let listener = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        std::fs::remove_file(&late_socket).expect("drop the placeholder");
+        std::os::unix::net::UnixListener::bind(&late_socket).expect("bind late listener")
+    });
+
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(5));
+
+    let listener = listener.join().expect("late listener thread");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    listener
+        .accept()
+        .expect("the wait connected to the listener");
 }

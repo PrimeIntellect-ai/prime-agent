@@ -1234,7 +1234,7 @@ mod tests {
     }
 
     /// The cost-ledger contract, pinned: a served decision's answer row
-    /// carries the completion's usage, so the child-usage ledger bills the
+    /// carries the completion's usage, so the usage ledger bills the
     /// decision — a row without usage reads as a free call in the parent's
     /// totals and /context.
     #[cfg(unix)]
@@ -1355,7 +1355,7 @@ mod tests {
             "the agent_end frame must carry the accepted row and the decision row: {agent_end:?}"
         );
         // The row bills: stored the way the turn loop persists message
-        // rows, the child-usage ledger attributes the decision's cost
+        // rows, the usage ledger records the decision's cost
         // instead of skipping the row.
         let entry = crate::session_store::SessionEntry {
             type_: "message".to_string(),
@@ -1364,11 +1364,10 @@ mod tests {
             timestamp: "2026-10-27T00:00:00.000Z".to_string(),
             fields: json!({ "message": answer }),
         };
-        let (batches, _) =
-            crate::rlm_child_usage::child_usage_batches(std::slice::from_ref(&entry), 0);
-        assert_eq!(batches.len(), 1, "a decision must bill in the cost ledger");
+        let (billed, _) = crate::session_usage::store_usage_row(&entry)
+            .expect("a decision must bill in the cost ledger");
         assert_eq!(
-            batches[0].1.input,
+            billed.input,
             usage["input"].as_u64().unwrap(),
             "the ledger must bill the completion's usage"
         );
@@ -1466,7 +1465,7 @@ mod tests {
 
     /// The refused-reply bill, pinned: a completed call whose reply the
     /// answer validation refuses still spent its tokens, so its row
-    /// persists with the call's usage and the child-usage ledger bills
+    /// persists with the call's usage and the usage ledger bills
     /// it, while the turn settles with the refusal.
     #[test]
     fn a_refused_reply_still_bills_the_decision_call() {
@@ -1550,15 +1549,10 @@ mod tests {
             timestamp: "2026-11-19T00:00:00.000Z".to_string(),
             fields: json!({ "message": row }),
         };
-        let (batches, _) =
-            crate::rlm_child_usage::child_usage_batches(std::slice::from_ref(&entry), 0);
-        assert_eq!(
-            batches.len(),
-            1,
-            "a refused call must bill in the cost ledger"
-        );
+        let (billed, _) = crate::session_usage::store_usage_row(&entry)
+            .expect("a refused call must bill in the cost ledger");
         assert!(
-            batches[0].1.input > 0 && batches[0].1.output > 0,
+            billed.input > 0 && billed.output > 0,
             "the ledger must bill the refused call's usage: {row}"
         );
     }

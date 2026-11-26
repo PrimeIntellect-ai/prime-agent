@@ -9,10 +9,13 @@
 //! thousands of rows and a compaction, attached headlessly and scrolled to the top.
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use pa_tui::interactive::{
     run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
@@ -91,14 +94,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor { child, socket };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(15));
+    Supervisor { child, socket }
 }
 
 fn marker(turn: usize) -> String {

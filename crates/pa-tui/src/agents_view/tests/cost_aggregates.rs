@@ -11,6 +11,7 @@ use super::*;
 fn the_summary_line_renders_the_aggregate_in_the_cost_column() {
     let mut parent = parent_summary("p");
     parent["usage"] = serde_json::json!({ "cost": 0.25 });
+    parent["totalUsage"] = serde_json::json!({ "cost": 5.0 });
     let mut runner = child_summary("r1", "p", "runner");
     runner["usage"] = serde_json::json!({ "cost": 1.25 });
     let mut grandchild = child_summary("gc", "r1", "grandkid");
@@ -68,11 +69,12 @@ fn the_summary_line_renders_the_aggregate_in_the_cost_column() {
 }
 
 /// A query that matches only the parent still bills the parent's row the whole family's spend:
-/// only the rows are filtered, never the rollup input.
+/// the total is the parent's own published field.
 #[test]
 fn a_search_keeps_the_rows_totals() {
     let mut parent = parent_summary("p");
     parent["usage"] = serde_json::json!({ "cost": 0.25 });
+    parent["totalUsage"] = serde_json::json!({ "cost": 1.5 });
     let mut child = child_summary("c1", "p", "worker one");
     child["usage"] = serde_json::json!({ "cost": 1.25 });
     let mut mode = mode_with_parent_and_child();
@@ -130,6 +132,7 @@ fn the_summary_line_renders_zero_when_nothing_bills() {
 fn the_summary_line_renders_the_aggregate_in_the_all_done_state() {
     let mut parent = parent_summary("p");
     parent["usage"] = serde_json::json!({ "cost": 0.25 });
+    parent["totalUsage"] = serde_json::json!({ "cost": 2.25 });
     let mut idle_child = child_summary("i1", "p", "idle worker");
     idle_child["usage"] = serde_json::json!({ "cost": 1.25 });
     let mut inactive_child = child_summary("x1", "p", "old worker");
@@ -179,6 +182,7 @@ fn the_summary_line_renders_the_aggregate_in_the_all_done_state() {
 fn aggregate_survives_the_incident_notice_render_path() {
     let mut parent = parent_summary("p");
     parent["usage"] = serde_json::json!({ "cost": 0.25 });
+    parent["totalUsage"] = serde_json::json!({ "cost": 1.5 });
     let mut idle_child = child_summary("i1", "p", "idle worker");
     idle_child["usage"] = serde_json::json!({ "cost": 1.25 });
     let mut mode = mode_with_parent_and_child();
@@ -224,6 +228,7 @@ fn aggregate_survives_the_click_surface_render_path() {
     crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
     let mut parent = parent_summary("p");
     parent["usage"] = serde_json::json!({ "cost": 0.25 });
+    parent["totalUsage"] = serde_json::json!({ "cost": 1.5 });
     let mut idle_child = child_summary("i1", "p", "idle worker");
     idle_child["usage"] = serde_json::json!({ "cost": 1.25 });
     let mut mode = mode_with_parent_and_child();

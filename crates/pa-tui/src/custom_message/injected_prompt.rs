@@ -111,15 +111,20 @@ pub(crate) fn injected_prompt_row(
 }
 
 /// One injected-prompt row (TS `InjectedPromptMessageComponent`): a leading
-/// blank, the kind's header, then the guttered markdown body below it when
-/// expanded (the kernel-state row stays header-only in both states).
+/// blank when `leading`, the kind's header, then the guttered markdown body
+/// below it when expanded (the kernel-state row stays header-only in both
+/// states).
 pub(crate) fn render_injected_prompt(
     row: &InjectedPromptRow,
     detail: Detail,
     theme: &Theme,
     width: usize,
+    leading: bool,
 ) -> Vec<Line> {
-    let mut out = vec![spacer()];
+    let mut out = Vec::new();
+    if leading {
+        out.push(spacer());
+    }
     let header = prompt_header(row, theme);
     out.extend(text_rows(&header, width));
     if let Some(body) = expanded_prompt_body(row, detail) {
@@ -190,6 +195,7 @@ pub(crate) fn count_injected_prompt(
     detail: Detail,
     theme: &Theme,
     width: usize,
+    leading: bool,
 ) -> usize {
     let header = prompt_header(row, theme);
     let body = expanded_prompt_body(row, detail).map_or(0, |body| {
@@ -199,7 +205,7 @@ pub(crate) fn count_injected_prompt(
             width,
         )
     });
-    1 + super::geometry::text_row_count(&header, width) + body
+    usize::from(leading) + super::geometry::text_row_count(&header, width) + body
 }
 
 fn expanded_prompt_body(row: &InjectedPromptRow, detail: Detail) -> Option<&str> {
@@ -280,7 +286,7 @@ mod tests {
             },
             body: Some("nudge".to_string()),
         };
-        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60);
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60, true);
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert!(rows[0].is_empty());
         assert_eq!(
@@ -302,7 +308,7 @@ mod tests {
             },
             body: Some("continue".to_string()),
         };
-        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60);
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60, true);
         assert_eq!(
             flat(&rows[1]).trim_end(),
             " Goal continuation \u{b7} ship it today"
@@ -320,7 +326,7 @@ mod tests {
                 },
                 body: None,
             };
-            let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60);
+            let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60, true);
             assert_eq!(flat(&rows[1]).trim_end(), format!(" {label}"));
         }
         // A long objective truncates to the 70-column budget after whitespace collapsing;
@@ -333,7 +339,7 @@ mod tests {
             },
             body: None,
         };
-        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 120);
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 120, true);
         let rendered = flat(&rows[1]);
         let meta = rendered.trim_end();
         assert!(meta.ends_with("..."), "ellipsized meta: {meta:?}");
@@ -357,7 +363,7 @@ mod tests {
             },
             body: Some("[python-skills-unavailable]\n\n...".to_string()),
         };
-        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 80);
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 80, true);
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert_eq!(
             flat(&rows[1]).trim_end(),
@@ -366,7 +372,7 @@ mod tests {
         assert_eq!(rows[1][1].style, theme().fg_style(ThemeColor::Muted));
         assert_eq!(rows[1][2].style, theme().fg_style(ThemeColor::Dim));
         // Expanded: no hint, the full report renders as the body.
-        let rows = render_injected_prompt(&row, Detail::All, &theme(), 80);
+        let rows = render_injected_prompt(&row, Detail::All, &theme(), 80, true);
         assert!(rows.len() > 2, "body renders expanded: {rows:?}");
         assert_eq!(
             flat(&rows[1]).trim_end(),
@@ -377,7 +383,7 @@ mod tests {
             kind: InjectedPromptKind::PythonSkillsUnavailable { skills: long },
             body: None,
         };
-        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 120);
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 120, true);
         let row_text = flat(&rows[1]);
         let meta = row_text.trim_end();
         let names = meta.trim_start_matches(" Python skills unavailable \u{b7} ");
@@ -388,7 +394,7 @@ mod tests {
             kind: InjectedPromptKind::PythonSkillsUnavailable { skills: Vec::new() },
             body: None,
         };
-        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 80);
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 80, true);
         assert_eq!(flat(&rows[1]).trim_end(), " Python skills unavailable");
     }
 
@@ -402,7 +408,7 @@ mod tests {
                 kind: InjectedPromptKind::KernelRestored { restored },
                 body: None,
             };
-            let rows = render_injected_prompt(&row, Detail::All, &theme(), 60);
+            let rows = render_injected_prompt(&row, Detail::All, &theme(), 60, true);
             assert_eq!(rows.len(), 2, "{rows:?}");
             assert_eq!(flat(&rows[1]).trim_end(), format!(" \u{25c6} {label}"));
         }

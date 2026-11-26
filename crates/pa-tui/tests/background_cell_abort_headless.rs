@@ -1,8 +1,6 @@
-//! Headless e2e for the idle backgrounded-cell cancel's gesture contract:
-//! the scoped `abort` rides ONLY the bare Escape press (the tree shortcut
-//! already spent) — never the first Escape that arms the tree/clear
-//! repeat, never the Ctrl+C that arms the exit pair — and the response
-//! reports whether a cell was stopped.
+//! Headless e2e for the idle backgrounded-cell cancel: a single Escape or
+//! Ctrl+C on an idle session sends the scoped `abort`, like the press that
+//! stops a foreground cell, and a stopped cell is noted.
 #![cfg(unix)]
 // The headless harness's serve/setup helpers exceed the 100-line lint; the
 // file-level allow matches the other daemon e2e suites.
@@ -108,37 +106,6 @@ impl RecordingSupervisor {
                     "get_session_stats" => json!({
                         "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
                         "cost": 0.01,
-                    }),
-                    "get_session_tree" => json!({
-                        "flatNodes": [
-                            {
-                                "entry": {
-                                    "type": "message",
-                                    "id": "n0",
-                                    "parentId": null,
-                                    "timestamp": "2024-01-01T00:00:00.000Z",
-                                    "message": {
-                                        "role": "user",
-                                        "content": "first",
-                                        "timestamp": 0,
-                                    },
-                                },
-                            },
-                            {
-                                "entry": {
-                                    "type": "message",
-                                    "id": "n1",
-                                    "parentId": "n0",
-                                    "timestamp": "2024-01-01T00:00:01.000Z",
-                                    "message": {
-                                        "role": "assistant",
-                                        "content": "second",
-                                        "timestamp": 1,
-                                    },
-                                },
-                            },
-                        ],
-                        "leafId": "n1",
                     }),
                     "abort" => json!({ "stoppedBackgroundCell": true }),
                     _ => json!({}),
@@ -392,54 +359,38 @@ fn scoped_aborts(commands: &Arc<Mutex<Vec<Value>>>) -> Vec<Value> {
         .collect()
 }
 
-/// The arming presses never send the scoped abort: one first Escape
-/// (arms the tree repeat), one first Ctrl+C (arms the exit pair) at an
-/// idle session — no `abort` command with scope `background_cell` may
-/// leave the TUI.
+/// One idle Escape stops the parked cell, and the response's
+/// stopped-report lands as a note.
 #[test]
-fn the_arming_presses_never_stop_the_backgrounded_cell() {
-    let steps = vec![
-        HeadlessStep::WaitMs(300),
-        esc(),
-        HeadlessStep::WaitMs(150),
-        ctrl_c(),
-        HeadlessStep::WaitMs(300),
-    ];
-    let (_frames, commands) = run_plan(steps);
-    assert!(
-        scoped_aborts(&commands).is_empty(),
-        "the arming gestures never sent the scoped abort: {:?}",
-        scoped_aborts(&commands)
-    );
-}
-
-/// The bare press sends it: the tree-shortcut-spent Escape stops the
-/// parked cell, and the response's stopped-report lands as a note.
-#[test]
-fn the_bare_escape_stops_the_parked_cell_and_reports_it() {
-    // Esc Esc opens the tree (the shortcut fires), Esc leaves it; the
-    // NEXT idle Escape arms nothing (the tree shortcut is spent) and
-    // stops the parked cell.
-    let steps = vec![
-        HeadlessStep::WaitMs(300),
-        esc(),
-        esc(),
-        HeadlessStep::WaitMs(150),
-        esc(),
-        HeadlessStep::WaitMs(150),
-        esc(),
-        HeadlessStep::WaitMs(400),
-    ];
+fn one_escape_stops_the_parked_cell_and_reports_it() {
+    let steps = vec![HeadlessStep::WaitMs(300), esc(), HeadlessStep::WaitMs(400)];
     let (frames, commands) = run_plan(steps);
     let aborts = scoped_aborts(&commands);
     assert_eq!(
         aborts.len(),
         1,
-        "exactly the bare press sent the scoped abort: {aborts:?}"
+        "the one Escape sent the scoped abort: {aborts:?}"
     );
     let last = frames.last().expect("the run captured frames");
     assert!(
         last.contains("the backgrounded cell was stopped"),
         "the response's stopped-report lands as a note: {last}"
+    );
+}
+
+/// One idle Ctrl+C stops the parked cell too.
+#[test]
+fn one_ctrl_c_stops_the_parked_cell() {
+    let steps = vec![
+        HeadlessStep::WaitMs(300),
+        ctrl_c(),
+        HeadlessStep::WaitMs(400),
+    ];
+    let (_frames, commands) = run_plan(steps);
+    let aborts = scoped_aborts(&commands);
+    assert_eq!(
+        aborts.len(),
+        1,
+        "the one Ctrl+C sent the scoped abort: {aborts:?}"
     );
 }

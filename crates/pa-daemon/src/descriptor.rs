@@ -100,17 +100,19 @@ pub fn worker_launch_env(
     if let Some(script) = script {
         env.insert(crate::worker::WORKER_SCRIPT_ENV.to_string(), script);
     }
-    if descriptor
-        .create_command
-        .rest
-        .get("decisionChild")
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        env.insert(
-            crate::worker::WORKER_DECISION_CHILD_ENV.to_string(),
-            "1".to_string(),
-        );
+    for (key, env_key) in [
+        ("refineChild", crate::worker::WORKER_REFINE_CHILD_ENV),
+        ("decisionChild", crate::worker::WORKER_DECISION_CHILD_ENV),
+    ] {
+        if descriptor
+            .create_command
+            .rest
+            .get(key)
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            env.insert(env_key.to_string(), "1".to_string());
+        }
     }
     if let Some(orphan_journal_path) = &descriptor.orphan_process_journal_path {
         env.insert(

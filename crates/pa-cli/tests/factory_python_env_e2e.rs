@@ -35,10 +35,19 @@ esac
     std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
     let marker = root.path().join("factory-dispatched");
     let path = std::env::join_paths([Path::new("."), &project, &trusted]).unwrap();
+    // `import` is the factory command that asks the kernel Python (its
+    // validator checks the spec's structure).
+    let machine = root.path().join("MACHINE.md");
+    std::fs::write(
+        &machine,
+        "---\nname: probe\ndescription: Probe.\n---\n```machine-spec\n{\"states\": []}\n```\n",
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
-        .args(["factory", "list", "--json"])
+        .args(["factory", "import", machine.to_str().unwrap(), "--json"])
         .current_dir(&project)
+        .env("PRIME_AGENT_CODING_AGENT_DIR", root.path().join("agent"))
         .env("PRIME_AGENT_KERNEL_PYTHON", &python)
         .env("PYTHONPATH", path)
         .env("PYTHONHOME", &project)

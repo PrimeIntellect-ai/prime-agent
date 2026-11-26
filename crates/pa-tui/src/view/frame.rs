@@ -16,6 +16,9 @@ impl AgentView {
     /// Compose the fullscreen frame: top bar, transcript window, dock —
     /// exactly `height` rows.
     pub fn render_frame(&mut self, width: usize, height: usize) -> Vec<Line> {
+        if self.terminal_rows != height as u16 {
+            self.set_terminal_rows(height as u16);
+        }
         // The fullscreen compose forces image components to their textual fallback: re-emitting
         // an image placement each repaint would corrupt the display.
         let frame = crate::image_component::with_fullscreen_image_fallback(|| {
@@ -48,6 +51,18 @@ impl AgentView {
                 self.apply_frame_selection(&mut frame, 0, width);
                 return frame;
             }
+            // The machines and run pages claim the main area under the top bar (the agents-view
+            // precedent: full-height layout, no empty transcript band above the page).
+            Some(Overlay::Library(page)) => {
+                page.set_viewport_rows(height.saturating_sub(1));
+                let rows = page.render(&self.theme, width, kb);
+                return self.full_height_page(rows, width, height);
+            }
+            Some(Overlay::Factory { run, .. }) => {
+                run.set_viewport_rows(height.saturating_sub(1));
+                let rows = run.render(&self.theme, width, kb);
+                return self.full_height_page(rows, width, height);
+            }
             Some(Overlay::ModelPicker(picker)) => {
                 dock.extend(picker.render(&self.theme, width, kb));
                 // The pane's item rows are clickable: the recorded span
@@ -72,10 +87,6 @@ impl AgentView {
             }
             Some(Overlay::Mcp(mcp_view)) => {
                 dock.extend(mcp_view.render(&self.theme, width, kb));
-                Some(dock)
-            }
-            Some(Overlay::Factory(factory_view)) => {
-                dock.extend(factory_view.render(&self.theme, width, kb));
                 Some(dock)
             }
             Some(Overlay::Heartbeats(picker)) => {
@@ -269,6 +280,26 @@ impl AgentView {
             let covered = toasts.len().min(window_height);
             self.click.mask_rows(top_rows, top_rows + covered);
         }
+        frame
+    }
+
+    /// A full-height page's frame: the top bar, then the page's rows, padded to `height`.
+    fn full_height_page(&mut self, rows: Vec<Line>, width: usize, height: usize) -> Vec<Line> {
+        let mut frame = Vec::with_capacity(height);
+        frame.push(pad_row(
+            render_top_bar(&self.chrome, &self.theme, width),
+            width,
+        ));
+        frame.extend(
+            rows.into_iter()
+                .take(height.saturating_sub(1))
+                .map(|line| pad_row(line, width)),
+        );
+        while frame.len() < height {
+            frame.push(vec![Span::raw(" ".repeat(width))]);
+        }
+        self.frame_rows = frame.len();
+        self.apply_frame_selection(&mut frame, 1, width);
         frame
     }
 

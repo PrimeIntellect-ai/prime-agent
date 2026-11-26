@@ -8,6 +8,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use super::query_param;
+
 pub(crate) const CALLBACK_HOST_ENV: &str = "PI_OAUTH_CALLBACK_HOST";
 
 /// The registered redirect port (the registration's, not a scan
@@ -248,42 +250,6 @@ async fn write_response(
     stream.flush().await
 }
 
-/// One decoded query parameter (`+` as space, percent-decoded).
-fn query_param(query: &str, name: &str) -> Option<String> {
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if percent_decode(&key.replace('+', " ")) == name {
-            return Some(percent_decode(&value.replace('+', " ")));
-        }
-    }
-    None
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            // The two bytes after `%` are decoded as bytes — a string slice there could split a
-            // multi-byte character, so malformed escapes fall through to the literal byte.
-            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    out.push(byte);
-                    index += 3;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).to_string()
-}
-
 fn escape_html(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for character in value.chars() {
@@ -490,21 +456,6 @@ mod tests {
         assert!(CodexCallbackServer::bind("127.0.0.1", port, "s")
             .await
             .is_err());
-    }
-
-    #[test]
-    fn query_and_percent_decoding() {
-        assert_eq!(percent_decode("a%20b"), "a b");
-        assert_eq!(percent_decode("bad%2"), "bad%2");
-        // A `%` escape that would split a multi-byte character decodes
-        // as the literal bytes.
-        assert_eq!(percent_decode("%9\u{e9}"), "%9\u{e9}");
-        assert_eq!(
-            query_param("code=1&state=2", "state"),
-            Some("2".to_string())
-        );
-        assert_eq!(query_param("code=a+b", "code"), Some("a b".to_string()));
-        assert_eq!(query_param("code", "state"), None);
     }
 
     #[test]

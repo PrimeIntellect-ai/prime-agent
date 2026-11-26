@@ -367,6 +367,7 @@ impl Worker {
                 // A TS replacement runtime has no semantic spawn.
                 semantic_spawn: None,
                 factory_child: false,
+                factory_contract: None,
             }) {
             Ok(()) => self.reseed_rlm_children().await,
             Err(error) => eprintln!("pa-daemon: replacement identity rebind failed: {error:#}"),
@@ -600,8 +601,12 @@ impl Worker {
                 // the goal-continue branch defers to that turn's boundary instead of
                 // interleaving before it.
                 let engine = std::sync::Arc::clone(&self.engine);
-                let refined = if goal_continue_scheduled {
-                    Ok(None)
+                // The round is the refinement child's spawn — fire-and-wake;
+                // the child's proposal applies on its reply's arrival (the
+                // reply's wake emits the outcome rows and the
+                // `refine_complete` event).
+                let spawned = if goal_continue_scheduled {
+                    Ok(())
                 } else {
                     tokio::task::spawn_blocking(move || engine.consume_compact_auto_refine())
                         .await
@@ -609,43 +614,12 @@ impl Worker {
                             Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
                         })
                 };
-                match refined {
-                    Ok(Some(result)) => {
-                        let outcome_row =
-                            pa_core::session_engine::refine::create_refinement_outcome_message(
-                                &result,
-                            );
-                        if let Ok(value) = serde_json::to_value(
-                            pa_types::session::AgentMessage::Custom(outcome_row),
-                        ) {
-                            self.emit_custom_row(&value);
-                        }
-                        if result.applied_edits.iter().any(|edit| edit.applied) {
-                            let notice =
-                                pa_core::session_engine::refine::create_refinement_notice_message(
-                                    &result,
-                                    pa_core::session_engine::refine::RefinementSource::Auto,
-                                );
-                            if let Ok(value) = serde_json::to_value(
-                                pa_types::session::AgentMessage::Custom(notice),
-                            ) {
-                                self.emit_custom_row(&value);
-                            }
-                        }
-                        crate::user_bash::emit_session_event_frame(
-                            &self.core,
-                            &self.events,
-                            crate::worker::refine_complete_event(&result),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
-                        self.emit_worker_event(json!({
-                            "type": "refine_failed",
-                            "error": format!("{error:#}"),
-                        }));
-                    }
+                if let Err(error) = spawned {
+                    eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                    self.emit_worker_event(json!({
+                        "type": "refine_failed",
+                        "error": format!("{error:#}"),
+                    }));
                 }
                 response_success(None, "compact", Some(run.result))
             }
@@ -795,11 +769,21 @@ impl Worker {
     ///
     /// Panics when the session-core mutex is poisoned.
     pub(crate) fn outstanding_background_jobs(&self) -> u64 {
+        let core = self.core.lock().unwrap();
+        self.outstanding_background_jobs_locked(&core)
+    }
+
+    /// The same count over a held session-core guard: a caller that also reads
+    /// the session summary takes both from one snapshot, so a completion
+    /// notice cannot be dequeued into a new turn between the two reads. A
+    /// finished handle's notice is admitted before the handle leaves the live
+    /// set, so reading the live count first cannot miss a delivery.
+    pub(crate) fn outstanding_background_jobs_locked(&self, core: &SessionCore) -> u64 {
         let live = self
             .agent_engine
             .as_ref()
             .map_or(0, |engine| engine.background_work_count());
-        (live + queued_completion_deliveries(&self.core.lock().unwrap())) as u64
+        (live + queued_completion_deliveries(core)) as u64
     }
 
     /// The background completions still owed to this run: detached cells
@@ -820,7 +804,7 @@ impl Worker {
     }
 
     /// Detached cells whose terminal notice is not yet admitted.
-    fn pending_detached_completions(&self) -> usize {
+    pub(crate) fn pending_detached_completions(&self) -> usize {
         self.agent_engine
             .as_ref()
             .and_then(|engine| engine.live_handles())

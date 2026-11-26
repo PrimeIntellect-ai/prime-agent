@@ -15,6 +15,9 @@
 //! `script` seam is the faux provider contract; the product never sets it.
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
@@ -434,14 +437,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         });
     }
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_mins(1);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor { child, socket };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(&socket, Duration::from_mins(1));
+    Supervisor { child, socket }
 }
 
 /// Create a live session through the daemon protocol, writing the scripted engine config first.

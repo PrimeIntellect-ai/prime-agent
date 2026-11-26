@@ -251,8 +251,41 @@ struct Block {
 }
 
 fn parse_blocks(text: &str) -> Vec<Block> {
+    parse_blocks_with_starts(text).0
+}
+
+/// Each fenced code block in `text` whose info string's first word is `lang`, read by the block
+/// parse [`render_markdown`] renders with: its source line range (through the blank lines after
+/// it) and its code.
+pub(crate) fn fenced_code_blocks(text: &str, lang: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let (blocks, starts) = parse_blocks_with_starts(&normalize_source(text));
+    let line_count = text.lines().count();
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            let BlockKind::Code { lang: Some(info) } = &block.kind else {
+                return None;
+            };
+            if info.split_whitespace().next() != Some(lang) {
+                return None;
+            }
+            let end = starts.get(index + 1).copied().unwrap_or(line_count);
+            let mut code = String::new();
+            for line in &block.lines {
+                code.push_str(line);
+                code.push('\n');
+            }
+            Some((starts[index]..end, code))
+        })
+        .collect()
+}
+
+/// [`parse_blocks`] with each block's first source line.
+fn parse_blocks_with_starts(text: &str) -> (Vec<Block>, Vec<usize>) {
     let src_lines: Vec<&str> = text.lines().collect();
     let mut blocks = Vec::new();
+    let mut starts = Vec::new();
     let mut i = 0usize;
     while i < src_lines.len() {
         let line = src_lines[i];
@@ -261,6 +294,8 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             i += 1;
             continue;
         }
+        // Every branch below parses exactly one block from this line.
+        starts.push(i);
         let sep_blank = i > 0
             && src_lines[..i]
                 .iter()
@@ -415,7 +450,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             lines: para_lines,
         });
     }
-    blocks
+    (blocks, starts)
 }
 
 /// A heading line start: `#`s followed by a space (the depth cap lives where the

@@ -1,0 +1,1 @@
+- Fixed factory budgets around pauses: the run budget no longer counts the time a run sits paused waiting for the owner, and a state budget now measures the child's own run time, so finished work is never thrown away because an escalation pause delayed its collection.

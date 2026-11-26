@@ -215,9 +215,9 @@ impl AgentSession {
         let busy = state.is_streaming || self.agent.has_active_run();
         // The `skill_use_count` session counter counts at the admission
         // seam: an admitted user turn whose text IS a skill block counts
-        // once. A pre-expanded block (the daemon emits the accepted row
-        // before admission) counts here too — the block parse carries the
-        // skill identity.
+        // once. A pre-expanded block (the daemon expands `/skill:` before
+        // admission) counts here too — the block parse carries the skill
+        // identity.
         let skill_used = !used_skills.is_empty()
             || pa_types::skill_blocks::parse_skill_block(&normalized)
                 .is_some_and(|block| self.skills.iter().any(|skill| skill.name == block.name));

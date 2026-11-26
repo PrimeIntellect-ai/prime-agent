@@ -29,20 +29,6 @@ pub struct SessionUsageSummary {
 
 impl Eq for SessionUsageSummary {}
 
-/// One model's share of a session's own usage, with the cache split the
-/// summary folds away (the deleted-child capture's per-model snapshot).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelUsageSummary {
-    pub provider: String,
-    pub id: String,
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_write: u64,
-    pub cost: f64,
-}
-
 /// `None` (absent wire field) when the session recorded no billable work at all.
 #[must_use]
 pub fn session_usage_summary_from(usage: &Usage) -> Option<SessionUsageSummary> {
@@ -220,6 +206,7 @@ pub struct UsageScan {
     attributed_child_ids: std::collections::HashSet<String>,
     #[serde(with = "usage_bits")]
     billed_row_usage: Usage,
+    billed_rows: u64,
 }
 
 impl UsageScan {
@@ -267,7 +254,15 @@ impl UsageScan {
     pub(crate) fn fold_billed_row(&mut self, row: Option<BilledRow>) {
         if let Some(row) = row {
             add_assistant_usage(&mut self.billed_row_usage, &row.usage);
+            self.billed_rows += 1;
         }
+    }
+
+    /// How many rows carry usage (distinct assistant rows plus billed rows):
+    /// the count the session's usage-ledger shard holds once it is complete.
+    #[must_use]
+    pub fn usage_rows(&self) -> u64 {
+        self.assistant_usage_by_id.len() as u64 + self.billed_rows
     }
 
     /// The totals behind [`summary`](Self::summary): `own` subtracts the attributed child spend,
@@ -325,6 +320,23 @@ struct ScanMessage {
 }
 
 impl ScanEntry {
+    /// The usage this row bills when it is a usage row: an assistant message
+    /// with a usage block, or a [`BilledRow`] (the rows
+    /// [`UsageScan::usage_rows`] counts).
+    fn usage_row(&self, billed: Option<&BilledRow>) -> Option<Usage> {
+        match self.type_.as_str() {
+            "message" => {
+                let message = self.message.as_ref()?;
+                if message.role.as_deref() != Some("assistant") {
+                    return None;
+                }
+                message.usage.map(Usage::from)
+            }
+            "child_usage_attributed" => None,
+            _ => billed.map(|row| row.usage),
+        }
+    }
+
     /// Fold this parsed entry into a scan (the same fold the listing scan
     /// drives); `billed` is the entry's [`BilledRow`], if any.
     fn fold_into(&self, scan: &mut UsageScan, billed: Option<BilledRow>) {
@@ -346,10 +358,10 @@ impl ScanEntry {
     }
 }
 
-/// Whole-file scan over every parsable line; invalid lines contribute nothing.
-fn scan_file(path: &Path) -> Option<UsageScan> {
+/// Every parsable line of a transcript in file order, with the line's
+/// [`BilledRow`]; invalid lines are skipped. `None` when the file cannot be read.
+fn each_scan_entry(path: &Path, mut visit: impl FnMut(ScanEntry, Option<BilledRow>)) -> Option<()> {
     let file = fs::File::open(path).ok()?;
-    let mut scan = UsageScan::default();
     let mut reader = BufReader::new(file);
     let mut line = String::new();
     loop {
@@ -365,24 +377,71 @@ fn scan_file(path: &Path) -> Option<UsageScan> {
             continue;
         };
         let billed = billed_line(&entry.type_, trimmed);
-        entry.fold_into(&mut scan, billed);
+        visit(entry, billed);
     }
+    Some(())
+}
+
+/// Whole-file scan over every parsable line; invalid lines contribute nothing.
+fn scan_file(path: &Path) -> Option<UsageScan> {
+    let mut scan = UsageScan::default();
+    each_scan_entry(path, |entry, billed| entry.fold_into(&mut scan, billed))?;
     Some(scan)
 }
 
-/// Whole-file own usage (the saved-row summary) for the one-off readers
-/// outside the resumable scan: the saved-delete capture
-/// (`saved_session_commands`), which reads the file once while it is
-/// still alive. The listing surfaces, the worker's live row, and the
-/// spawn ledger's tombstone fallback (`rlm_ledger`) all read the
-/// resumable `session_store::read_session_info` instead.
+/// Every usage row of a transcript as `(entry id, own usage)`, in file
+/// order: the rows the usage ledger records for the session. An older
+/// build's `child_usage_attributed` row nets out of its target the way
+/// [`UsageScan`] does (the target bills the latest aggregate minus the
+/// attributed child spend), so a rewrite that persisted the folded
+/// aggregate never bills the children's spend twice.
+#[must_use]
+pub fn read_usage_rows(path: &Path) -> Option<Vec<(String, Usage)>> {
+    let mut rows: Vec<(String, Usage)> = Vec::new();
+    let mut child_spend: Vec<Usage> = Vec::new();
+    let mut assistant_rows: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut attribution_ids = std::collections::HashSet::new();
+    each_scan_entry(path, |entry, billed| {
+        if entry.type_ == "child_usage_attributed" {
+            let (Some(&at), Some(child), Some(aggregate)) = (
+                entry
+                    .target_id
+                    .as_deref()
+                    .and_then(|target| assistant_rows.get(target)),
+                entry.child_usage,
+                entry.aggregate_usage,
+            ) else {
+                return;
+            };
+            rows[at].1 = aggregate.into();
+            if entry.id.is_empty() || attribution_ids.insert(entry.id) {
+                add_assistant_usage(&mut child_spend[at], &child.into());
+            }
+            return;
+        }
+        if let Some(usage) = entry.usage_row(billed.as_ref()) {
+            if entry.type_ == "message" {
+                assistant_rows.insert(entry.id.clone(), rows.len());
+            }
+            rows.push((entry.id, usage));
+            child_spend.push(Usage::default());
+        }
+    })?;
+    for ((_, usage), child) in rows.iter_mut().zip(&child_spend) {
+        subtract_assistant_usage(usage, child);
+    }
+    Some(rows)
+}
+
+/// Whole-file own usage from one full scan (the listing surfaces read the
+/// resumable `session_store::read_session_info` instead).
 #[must_use]
 pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
     scan_file(path).and_then(|scan| scan.summary())
 }
 
-/// Whole-file own + total usage: the deletion capture reads both from the
-/// child's frozen file (own row + the parent's attribution spend).
+/// Whole-file own + total usage from one full scan.
 #[must_use]
 pub fn read_session_usage(path: &Path) -> Option<SessionUsageTotals> {
     scan_file(path).map(|scan| scan.totals())
@@ -406,6 +465,20 @@ pub(crate) fn own_usage_summary_of(
         parsed.fold_into(&mut scan, billed_store_row(entry));
     }
     scan.summary()
+}
+
+/// The usage one in-memory store row bills (the selection
+/// [`read_usage_rows`] makes), with the row's [`BilledRow`].
+pub(crate) fn store_usage_row(
+    entry: &crate::session_store::SessionEntry,
+) -> Option<(Usage, Option<BilledRow>)> {
+    // `type` lives on the envelope (`#[serde(flatten)] fields` keeps only
+    // the rest); the usage-bearing fields deserialize borrowed.
+    let mut parsed = ScanEntry::deserialize(&entry.fields).ok()?;
+    parsed.type_.clone_from(&entry.type_);
+    let billed = billed_store_row(entry);
+    let usage = parsed.usage_row(billed.as_ref())?;
+    Some((usage, billed))
 }
 
 #[cfg(test)]
@@ -733,6 +806,29 @@ mod tests {
                 cost: 0.0
             })
         );
+    }
+
+    /// The ledger import nets an older build's attribution out of its target
+    /// whether the target row still holds its own call or a rewrite already
+    /// persisted the folded aggregate.
+    #[test]
+    fn read_usage_rows_nets_attributed_child_spend_out_of_the_target() {
+        let dir = std::env::temp_dir().join(format!("session-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let attributed = attribution("a", usage(30, 3, 0.3), usage(130, 13, 1.3));
+        for (name, row) in [
+            ("raw", usage(100, 10, 1.0)),
+            ("rewritten", usage(130, 13, 1.3)),
+        ] {
+            let path = dir.join(format!("{name}.jsonl"));
+            let assistant = message("a", "assistant", &serde_json::to_value(row).unwrap());
+            std::fs::write(&path, format!("{assistant}\n{attributed}\n")).unwrap();
+            let rows = read_usage_rows(&path).unwrap();
+            assert_eq!(rows.len(), 1, "{name}");
+            assert_eq!((rows[0].1.input, rows[0].1.output), (100, 10), "{name}");
+            assert!((rows[0].1.cost.total.as_f64() - 1.0).abs() < 1e-9, "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
