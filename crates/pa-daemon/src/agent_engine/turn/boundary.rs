@@ -72,19 +72,10 @@ impl AgentSessionEngine {
                 None => None,
             }
         };
-        if let Some(pending) = scheduled {
-            if !emit(EngineEvent::CompactionStart {
-                event: crate::compaction::compaction_start_event(
-                    "requested",
-                    pending.instructions.as_deref(),
-                ),
-            }) {
-                return BoundaryRun::Cancelled;
-            }
-        }
         // The requested run owns the abort slot for its duration: an
         // `abort_compaction` lands in the slot and cancels the in-flight
-        // summarizer.
+        // summarizer. The slot is set before the start event, so an abort
+        // sent on that event lands.
         let controller = std::sync::Arc::new(AbortController::new());
         let signal = controller.signal();
         {
@@ -92,6 +83,17 @@ impl AgentSessionEngine {
                 .auto_compaction_abort
                 .lock()
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
+        }
+        if let Some(pending) = scheduled {
+            if !emit(EngineEvent::CompactionStart {
+                event: crate::compaction::compaction_start_event(
+                    "requested",
+                    pending.instructions.as_deref(),
+                ),
+            }) {
+                self.clear_auto_compaction_abort(&controller);
+                return BoundaryRun::Cancelled;
+            }
         }
         let compaction = {
             let engine = self.session.blocking_lock().clone();

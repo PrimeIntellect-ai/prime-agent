@@ -2,7 +2,7 @@
 //! The session subscribes persistence listeners on the caller's reactor, so
 //! `create_session` is async.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pa_agent::agent::{Agent, AgentInitialState, AgentOptions};
@@ -45,7 +45,7 @@ pub struct SessionEngineConfig {
     pub additional_prompt_paths: Vec<String>,
     pub extra_builtin_skill_overrides: Vec<String>,
     pub rlm_subagent_host: Option<Arc<dyn super::rlm_host::RlmSubagentHost>>,
-    pub rlm_usage_store: Option<Arc<dyn super::rlm_usage::RlmChildUsageStore>>,
+    pub usage_store: Option<Arc<dyn super::usage_store::UsageStore>>,
     /// The daemon-owned agent inbox whose `rlm.inbox.read`/`rlm.inbox.count`
     /// host requests register when supplied; daemonless embeddings pass
     /// `None` and keep their direct notice-row steering.
@@ -56,11 +56,16 @@ pub struct SessionEngineConfig {
     /// The session's depth in the RLM recursion tree (0 for top-level
     /// sessions); gates the `refine.*` host requests.
     pub rlm_depth: Option<u32>,
-    /// What this child session's final message is for: a factory state's
-    /// child selects the prompt's factory line; a refinement child's final
-    /// message is the proposal its parent applies, and its kernel refuses
-    /// harness writes.
-    pub child_role: crate::prompts::ChildRole,
+    /// Whether this session is a factory state's child (its spawn carried a
+    /// factory run tag); selects the child prompt's factory line.
+    pub factory_child: bool,
+    /// A factory child's output contract (its spawn's `factoryContract`):
+    /// registers the child's `factory.emit` and `factory.inputs`, and
+    /// selects the child prompt's emit line when it declares outputs.
+    pub factory_contract: Option<serde_json::Value>,
+    /// Whether this session is a refinement child: its final message is the
+    /// proposal its parent applies, and its kernel refuses harness writes.
+    pub refine_child: bool,
     /// Whether the session runs without a daemon: nothing outside the
     /// session itself (no scheduler, no bash-completion wake) starts a
     /// turn. Set explicitly by the embedding; print sessions are
@@ -148,9 +153,8 @@ pub struct SessionEngine {
     pub turn_boundary: std::sync::Arc<super::turn_boundary::TurnBoundaryRequests>,
     /// `None` when telemetry is disabled or the session is not depth 0.
     pub telemetry: Option<std::sync::Arc<super::telemetry::SessionTelemetry>>,
-    /// The kernel `rlm.spawn` handler registers spawn targets into it; the
-    /// embedding wires the child-observation sink onto it after the build.
-    pub rlm_usage: std::sync::Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    /// The session's durable usage store.
+    pub usage_store: std::sync::Arc<dyn super::usage_store::UsageStore>,
     /// The factory host bridge (`/factory` view lane): the daemon/TUI
     /// request surface over the kernel's factory runs, built from the
     /// session facts captured in `create_session` (the #3184 capture
@@ -243,19 +247,39 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     if let Some(traces) = traces {
         session_manager.on_persist(Box::new(move |path| traces.persisted(path)));
     }
-    let wiring = super::runtime_wiring::wire_session_runtime(
+    // A factory child's accepted outputs live beside its session file,
+    // where the parent's executor reads them. A daemon worker's engine
+    // session is not persisted (the worker owns the durable file), so the
+    // conversation-log path gives the directory there. A `--no-session`
+    // print child has neither; its in-memory manager is pinned to the
+    // child's own directory, the spawn handle's `session_dir`.
+    let factory_outputs_dir = session_manager
+        .get_session_file()
+        .or(config.conversation_log_path.as_deref())
+        .and_then(Path::parent)
+        .unwrap_or_else(|| session_manager.get_session_dir())
+        .to_path_buf();
+    let mut wiring = super::runtime_wiring::wire_session_runtime(
         session_manager,
         &config.agent_dir,
         super::runtime_wiring::RlmWiring {
             model_registry: None,
             subagent_host: config.rlm_subagent_host.clone(),
-            usage_store: config.rlm_usage_store.clone(),
+            usage_store: config.usage_store.clone(),
             progress_note_emit: config.progress_note_emit.clone(),
             inbox: config.inbox.clone(),
         },
         config.queued_goal_context_purge.clone(),
         config.cron_store.clone(),
     );
+    if let Some(contract) = config.factory_contract.clone() {
+        super::factory_host::register_factory_emit_host_handlers(
+            contract,
+            factory_outputs_dir,
+            config.cwd.clone(),
+            &mut wiring.handlers,
+        );
+    }
 
     // A handle that outlives the move into the resource loader: the
     // refinement gate and the system prompt read it.
@@ -520,7 +544,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         on_unavailable_skills,
         on_bootstrap_result,
         config.kernel_ready_gate.clone(),
-        config.child_role == crate::prompts::ChildRole::Refinement,
+        config.daemonless,
+        config.refine_child,
     );
     let mut tools = config.tools.clone();
     if !tools.iter().any(|tool| tool.name() == PYTHON_TOOL_NAME) {
@@ -596,7 +621,18 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             // A spawned child's prompt must read "depth: N (not root)" with
             // the child-agent reply doctrine, never the root identity.
             rlm_depth: config.rlm_depth.unwrap_or(0),
-            child_role: config.child_role,
+            // An empty contract (a state with no outputs) has nothing to emit.
+            factory_child: config.factory_child.then_some(
+                if config.factory_contract.as_ref().is_some_and(|contract| {
+                    pa_factory::Contract::from_json(contract)
+                        .is_ok_and(|contract| !contract.outputs.is_empty())
+                }) {
+                    crate::prompts::FactoryChild::Emit
+                } else {
+                    crate::prompts::FactoryChild::FinalMessage
+                },
+            ),
+            refine_child: config.refine_child,
             daemonless: config.daemonless,
             can_spawn: config.rlm_subagent_host.is_some(),
         },
@@ -808,7 +844,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     )));
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
     session.set_agent_dir(config.agent_dir.clone());
-    session.set_usage_store(wiring.rlm_usage.store());
+    session.set_usage_store(std::sync::Arc::clone(&wiring.usage_store));
     // Keep the context descriptor even while disabled, so re-enabling can load it.
     session.harness_digest = Some(digest_context);
     session.refinement_settings = Some(refinement_settings);
@@ -925,9 +961,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // whether this session reports at all).
     if let Some(telemetry) = telemetry.as_ref() {
         session.set_skill_telemetry(telemetry.clone());
-        // Same lifetime for the `rlm_child_*` session counters: the
-        // producer's flush counts through this handle.
-        wiring.rlm_usage.set_telemetry(telemetry.clone());
     }
     let goal_driver = wiring.runtime.goal_driver().clone();
     // Each row the session's durable store appends that bills a model call
@@ -935,8 +968,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let charge_goal = goal_driver.lock().await.billed_row_recorder();
     let charge_run = telemetry.clone();
     wiring
-        .rlm_usage
-        .store()
+        .usage_store
         .observe_billed_rows(std::sync::Arc::new(
             move |row: &crate::session::billed_row::BilledRow| {
                 charge_goal(&row.usage);
@@ -972,7 +1004,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         mcp_manager,
         turn_boundary,
         telemetry,
-        rlm_usage: wiring.rlm_usage,
+        usage_store: wiring.usage_store,
         factory_host,
         rlm_progress_notes: Arc::clone(&wiring.rlm.notes),
         provisioner,
@@ -1100,11 +1132,12 @@ impl SessionEngine {
     }
 
     /// One factory activity over this session's live kernel: the `/factory`
-    /// view's bridge lane (graph/status/watch/run/stop/resume). A `run`
-    /// prefights the spec's declared models first (allowlist pin, request
-    /// auth) so a doomed run fails before any child spawns; then the
-    /// out-of-band frame carries the request into the kernel's executor,
-    /// which owns the run registry.
+    /// view's bridge lane (graph/status/watch/run/stop/resume, plus the
+    /// machine library's list/graph reads, and the arming-free `peek`
+    /// the all-session overview polls through). A `run` prefights the spec's
+    /// declared models first (allowlist pin, request auth) so a doomed run
+    /// fails before any child spawns; then the out-of-band frame carries
+    /// the request into the kernel's executor, which owns the run registry.
     ///
     /// # Errors
     ///
@@ -1117,9 +1150,11 @@ impl SessionEngine {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        entry: Option<&serde_json::Value>,
+        instance: Option<&serde_json::Value>,
     ) -> anyhow::Result<serde_json::Value> {
         let request = super::factory_host::FactoryActivityRequest::parse(
-            action, run_id, spec_id, timeout_ms,
+            action, run_id, spec_id, timeout_ms, entry, instance,
         )?;
         if request.action == "run" {
             let spec_id = request
@@ -1138,16 +1173,24 @@ impl SessionEngine {
                 .map_err(|join| anyhow::anyhow!("factory run preflight join failed: {join}"))?;
             preflight?;
         }
-        let manager = self
-            .provisioner
-            .manager()
-            .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
+        // The machines page's drill-in (`library` with a machine name) is an
+        // explicit open: it starts the kernel that builds the machine's
+        // graph. Every other action (the dock's run polling among them)
+        // never builds one.
+        let manager = if request.action == "library" {
+            self.provisioner.ensure(None, None).await?
+        } else {
+            self.provisioner
+                .manager()
+                .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?
+        };
         manager
             .factory_activity(
                 request.action,
                 request.run_id.as_deref(),
                 request.spec_id.as_deref(),
                 request.timeout_ms,
+                request.selector,
             )
             .await
     }

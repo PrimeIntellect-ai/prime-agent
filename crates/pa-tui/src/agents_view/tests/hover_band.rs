@@ -77,6 +77,13 @@ fn a_motion_over_a_heading_or_hint_never_hovers() {
     let row = row_of(&lines, "plain roster").expect("the row renders");
     mode.handle_mouse(&hover_motion(row));
     assert_eq!(mode.hover_row, Some(row));
+    mode.handle_mouse(&hover_motion(0));
+    assert_eq!(
+        mode.hover_row, None,
+        "the nav bar is not a click row either"
+    );
+    mode.handle_mouse(&hover_motion(row));
+    assert_eq!(mode.hover_row, Some(row));
     mode.handle_mouse(&hover_motion(lines.len() - 1));
     assert_eq!(mode.hover_row, None);
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");

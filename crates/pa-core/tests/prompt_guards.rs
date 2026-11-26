@@ -18,7 +18,7 @@ use std::path::Path;
 use pa_core::prompts::layers::{CORE_LAYER, OPINIONATED_LAYER, USAGE_LAYER};
 use pa_core::prompts::model_prompts::MODEL_PROMPTS_TOML;
 use pa_core::prompts::system_prompt::{
-    system_prompt_breakdown, BuildSystemPromptOptions, SegmentKind,
+    system_prompt_breakdown, BuildSystemPromptOptions, FactoryChild, SegmentKind,
 };
 use pa_core::resources::{ContextFile, LoadedResources};
 use pa_core::settings::{Settings, SettingsManager};
@@ -65,7 +65,8 @@ fn session_options<'a>(
         messages_path: Some("/log.jsonl".to_string()),
         generic_mcp_servers: Vec::new(),
         rlm_depth: 0,
-        child_role: pa_core::prompts::ChildRole::Subagent,
+        factory_child: None,
+        refine_child: false,
         daemonless: false,
         can_spawn: false,
     }
@@ -486,11 +487,20 @@ fn required_surface_tokens() -> BTreeSet<String> {
     required
 }
 
-/// Surface tokens documented in the core layer: bullet entries whose first
-/// backtick token is a lowercase module path.
+/// Surface tokens documented in the core layer and in a factory emit
+/// child's dynamic tail (the only prompt that needs `factory.emit` and
+/// `factory.inputs`): bullet entries whose first backtick token is a
+/// lowercase module path.
 fn documented_surface_tokens() -> BTreeSet<String> {
+    let settings = default_settings();
+    let resources = LoadedResources::default();
+    let mut emit_child = session_options(&settings, &resources, &[]);
+    emit_child.rlm_depth = 1;
+    emit_child.factory_child = Some(FactoryChild::Emit);
+    let breakdown = system_prompt_breakdown(&emit_child);
+    let dynamic_tail = &breakdown.assembled[breakdown.cached_prefix_len..];
     let mut documented = BTreeSet::new();
-    for line in CORE_LAYER.lines() {
+    for line in CORE_LAYER.lines().chain(dynamic_tail.lines()) {
         let Some(rest) = line.trim_start().strip_prefix("- `") else {
             continue;
         };

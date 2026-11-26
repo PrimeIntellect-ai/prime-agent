@@ -622,8 +622,8 @@ fn render_inbox_messages(
                 || render::render_shell_completion(row, level, theme, width, leading),
             ),
             ChatEntry::InjectedPrompt(row) => lines.rows(
-                || injected_prompt::count_injected_prompt(row, level, theme, width),
-                || injected_prompt::render_injected_prompt(row, level, theme, width),
+                || injected_prompt::count_injected_prompt(row, level, theme, width, leading),
+                || injected_prompt::render_injected_prompt(row, level, theme, width, leading),
             ),
             ChatEntry::CustomPanel(row) => lines.rows(
                 || geometry::custom_panel_row_count(row, theme, width),

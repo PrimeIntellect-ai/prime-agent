@@ -64,6 +64,17 @@ pub struct SystemPromptBreakdown {
     pub cached_prefix_len: usize,
 }
 
+/// How a factory state's child hands its outputs back; selects the child
+/// prompt's factory line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactoryChild {
+    /// The factory reads the child's final message.
+    FinalMessage,
+    /// The state's `emit` contract declares outputs: the child calls
+    /// `rlm.factory.emit`, and its final message is not read.
+    Emit,
+}
+
 /// Inputs for one session's prompt. Only `resources.system_prompt` and
 /// `model_prompt_extras` select the cached prefix; everything else,
 /// settings included, feeds the dynamic tail. A conditional tail piece
@@ -86,8 +97,12 @@ pub struct BuildSystemPromptOptions<'a> {
     /// Enabled user-configured generic MCP servers.
     pub generic_mcp_servers: Vec<String>,
     pub rlm_depth: u32,
-    /// What a child's final message is for (the reply line it reads).
-    pub child_role: ChildRole,
+    /// Set when this child runs one factory state: it hands its outputs to
+    /// the factory, so it does not reply to the parent.
+    pub factory_child: Option<FactoryChild>,
+    /// Whether this child is a refinement child: its parent applies its
+    /// final message as the refinement proposal.
+    pub refine_child: bool,
     /// Whether the session runs without a daemon (no scheduler, no
     /// heartbeat firing). The wake-up facts the daemonless line states
     /// must match the embedding's wiring.
@@ -96,19 +111,6 @@ pub struct BuildSystemPromptOptions<'a> {
     /// daemonless print host or a daemon worker); a daemonless session
     /// without one cannot spawn at all.
     pub can_spawn: bool,
-}
-
-/// What a spawned child's final message is for.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ChildRole {
-    /// An ordinary subagent: it replies to its parent with `agent_message.send`.
-    #[default]
-    Subagent,
-    /// One factory state: the factory reads its final message.
-    FactoryState,
-    /// A refinement child: its parent applies its final message as the
-    /// refinement proposal.
-    Refinement,
 }
 
 /// Build the system prompt (assembled text only).
@@ -347,17 +349,28 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
             "You are a child agent spawned by your parent agent. Task prompts are labeled `[task from parent]`."
                 .to_string(),
         );
-        match options.child_role {
-            ChildRole::FactoryState => lines.push(
+        if options.factory_child == Some(FactoryChild::FinalMessage) {
+            lines.push(
                 "Your final message is this state's output, which the factory reads; do not message the parent.".to_string(),
-            ),
-            ChildRole::Refinement => lines.push(
+            );
+        } else if options.factory_child == Some(FactoryChild::Emit) {
+            lines.push(
+                "Hand this state's outputs back with `await rlm.factory.emit(...)` before you finish; your final message is not read as output. Do not message the parent.".to_string(),
+            );
+            lines.push(
+                "- `factory.emit(**outputs: Any) -> dict[str, Any]`: one call, one keyword per output port (`await rlm.factory.emit(verdict={...})`); every value is checked against the state's declared type before anything is kept, and a wrong value raises `FactoryEmitError` naming the field — fix it and call again".to_string(),
+            );
+            lines.push(
+                "- `factory.inputs() -> dict[str, Any]`: this state's bound inputs (and the machine's params) as values".to_string(),
+            );
+        } else if options.refine_child {
+            lines.push(
                 "Your final message is the refinement proposal your parent applies; do not message the parent.".to_string(),
-            ),
-            ChildRole::Subagent if has_ipython => lines.push(
+            );
+        } else if has_ipython {
+            lines.push(
                 "When a task calls for an answer, reply explicitly with `await agent_message.send(message, receiver_role=\"parent\")`. Not every message or task needs a reply; continue cleanup after sending and go idle normally.".to_string(),
-            ),
-            ChildRole::Subagent => {}
+            );
         }
         if has_ipython {
             lines.push(
@@ -479,7 +492,8 @@ mod tests {
                 messages_path: Some("/log.jsonl".to_string()),
                 generic_mcp_servers: Vec::new(),
                 rlm_depth: 0,
-                child_role: ChildRole::Subagent,
+                factory_child: None,
+                refine_child: false,
                 daemonless: false,
                 can_spawn: false,
             }
@@ -553,17 +567,22 @@ mod tests {
     #[test]
     fn factory_child_gets_the_factory_line_instead_of_the_reply_line() {
         const REPLY: &str = "reply explicitly with `await agent_message.send(";
-        const FACTORY: &str = "Your final message is this state's output";
+        const FINAL_MESSAGE: &str = "Your final message is this state's output";
+        const EMIT: &str = "`await rlm.factory.emit(...)` before you finish";
         let fixture = Fixture::new();
         let mut child = fixture.options();
         child.rlm_depth = 1;
         let normal = build_system_prompt(&child);
         assert!(normal.contains(REPLY));
-        assert!(!normal.contains(FACTORY));
-        child.child_role = ChildRole::FactoryState;
+        assert!(!normal.contains(FINAL_MESSAGE) && !normal.contains(EMIT));
+        child.factory_child = Some(FactoryChild::FinalMessage);
         let factory = build_system_prompt(&child);
-        assert!(factory.contains(FACTORY));
-        assert!(!factory.contains(REPLY));
+        assert!(factory.contains(FINAL_MESSAGE));
+        assert!(!factory.contains(REPLY) && !factory.contains(EMIT));
+        child.factory_child = Some(FactoryChild::Emit);
+        let emit = build_system_prompt(&child);
+        assert!(emit.contains(EMIT));
+        assert!(!emit.contains(REPLY) && !emit.contains(FINAL_MESSAGE));
     }
 
     #[test]

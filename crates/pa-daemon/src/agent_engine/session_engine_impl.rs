@@ -3,12 +3,11 @@
 //! turn state machine, and the export/telemetry reads.
 
 use super::{
-    artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
-    BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
-    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, GoalWakeKind,
-    ParentIdentity, PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine,
-    SideQuestionOutcome, SideQuestionRequest, StartupScope, TurnPrompt, Value,
-    DEFAULT_RLM_MAX_DEPTH,
+    artifact_reference, json, map_thinking_level, AgentSessionEngine, Arc, BranchSummaryOutcome,
+    BranchSummaryRequest, BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun,
+    EngineEvent, EngineModelSelection, GoalWakeKind, ParentIdentity, PromptContextBoundary,
+    PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome, SideQuestionRequest,
+    StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -398,6 +397,7 @@ impl SessionEngine for AgentSessionEngine {
 
     fn configure_model(&self, selection: EngineModelSelection) {
         // Merge like the TS runtime config: explicit wire flags replace; absent fields keep.
+        let replaces_key = selection.api_key.is_some();
         {
             let mut current = self.selection.write().expect("model selection lock");
             if selection.provider.is_some() {
@@ -412,6 +412,9 @@ impl SessionEngine for AgentSessionEngine {
             if selection.thinking.is_some() {
                 current.thinking = selection.thinking;
             }
+        }
+        if replaces_key {
+            self.bind_selection_api_key();
         }
         // The merge may have changed the selection: drop the cached level;
         // later summary/state calls stay side-effect-free.
@@ -534,10 +537,14 @@ impl SessionEngine for AgentSessionEngine {
         Some(self.effective_thinking().wire_name().to_string())
     }
 
-    /// The built session's assembled prompt (the export embeds it); best-effort.
-    fn export_system_prompt(&self) -> Option<String> {
-        let session = self.session.try_lock().ok()?;
-        session.as_deref().map(|core| core.system_prompt.clone())
+    /// The built session's assembled prompt (the export embeds it).
+    fn export_system_prompt(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+        Box::pin(async move {
+            let session = self.session.lock().await.clone()?;
+            Some(session.system_prompt.clone())
+        })
     }
 
     /// The built session's live tool registry mapped to the export's tools
@@ -548,8 +555,8 @@ impl SessionEngine for AgentSessionEngine {
         Box::pin(async move {
             let model = self.resolve_model().ok()?;
             self.ensure_core_session_async(&model).await.ok()?;
-            let session = self.session.try_lock().ok()?;
-            let state = session.as_deref()?.session.agent().state().await;
+            let session = self.session.lock().await.clone()?;
+            let state = session.session.agent().state().await;
             Some(pa_core::export_html::tools_section(&state.tools))
         })
     }
@@ -563,8 +570,8 @@ impl SessionEngine for AgentSessionEngine {
         Box::pin(async move {
             let model = self.resolve_model().ok()?;
             self.ensure_core_session_async(&model).await.ok()?;
-            let session = self.session.try_lock().ok()?;
-            let state = session.as_deref()?.session.agent().state().await;
+            let session = self.session.lock().await.clone()?;
+            let state = session.session.agent().state().await;
             let renderer = crate::session_export::ExportToolRenderer {
                 tools: &state.tools,
             };
@@ -583,6 +590,11 @@ impl SessionEngine for AgentSessionEngine {
             patterns,
             is_continuing,
         });
+        // The create's model selection is complete (the saved-model restore,
+        // then this scope): bind an explicit key to the model it selected.
+        if self.current_selection().api_key.is_some() {
+            self.bind_selection_api_key();
+        }
         // The scope changed the startup decisions: drop the stale level; the
         // next read re-resolves against the scope.
         *self
@@ -897,7 +909,13 @@ impl SessionEngine for AgentSessionEngine {
         // This session's own depth gates the kernel `refine.*` host requests (depth-0 only).
         self.rlm_depth
             .store(identity.rlm_depth, std::sync::atomic::Ordering::Relaxed);
-        *self.child_role.lock().expect("child role lock") = identity.child_role;
+        self.factory_child
+            .store(identity.factory_child, std::sync::atomic::Ordering::Relaxed);
+        identity
+            .factory_contract
+            .clone_into(&mut self.factory_contract.lock().expect("factory contract lock"));
+        self.refine_child
+            .store(identity.refine_child, std::sync::atomic::Ordering::Relaxed);
         if let Some(thinking) = &identity.thinking {
             pa_ai::models::thinking_level_from_str(thinking)
                 .ok_or_else(|| anyhow::anyhow!("unknown thinking level \"{thinking}\""))?;
@@ -961,7 +979,7 @@ impl SessionEngine for AgentSessionEngine {
                 session_file: identity.session_file.clone(),
                 thinking: identity.thinking.clone(),
                 child_script: identity.child_script,
-                refine_child: identity.child_role == pa_core::prompts::ChildRole::Refinement,
+                refine_child: identity.refine_child,
             };
             children.set_identity(parent);
         }
@@ -992,17 +1010,6 @@ impl SessionEngine for AgentSessionEngine {
             .prompt_context_boundary
             .lock()
             .expect("prompt context boundary lock") = None;
-        self.runtime.block_on(async {
-            let core = self.session.lock().await.clone();
-            if let Some(core) = core {
-                core.session
-                    .shared_persistence()
-                    .lock()
-                    .await
-                    .replay_admitted_user_rows(Vec::new())
-                    .expect("clearing admitted rows cannot fail");
-            }
-        });
         if let Some(children) = &self.children {
             children.notify_turn_done();
         }
@@ -1376,14 +1383,14 @@ impl SessionEngine for AgentSessionEngine {
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
         let mut emit = self.goal_tracking_emit(emit);
-        // The accepted-turn row carries the skill-expanded text (the
+        // The admitted user row carries the skill-expanded text (the
         // transcript renders the skill card).
         if request.message.starts_with("/skill:") {
             request.message = self.expand_skill_submission(&request.message);
         }
-        // The batched rows expand in place BEFORE the accepted rows emit:
-        // the core's batch admission re-expands each row itself, so the raw
-        // command must never reach it.
+        // The batched rows expand in place before admission: the core's
+        // batch admission re-expands each row itself, so the raw command must
+        // never reach it.
         for row in &mut request.batch {
             if row.text.starts_with("/skill:") {
                 row.text = self.expand_skill_submission(&row.text);
@@ -1472,54 +1479,13 @@ impl SessionEngine for AgentSessionEngine {
             }
             None => None,
         };
-        // The accepted turn row: an injected custom row replaces the user
-        // message; the plain turn records the accepted row, images after.
-        // The injected row the client sees IS the parsed row (one
-        // normalized representation): the frames carry exactly what the
-        // model context holds, a default-filled clock included.
-        let accepted = if let Some(parsed) = &injected {
-            EngineEvent::CustomMessage(crate::session_commands::custom_message_value(parsed))
-        } else {
-            let mut content = vec![json!({ "type": "text", "text": request.message })];
-            for image in &request.images {
-                let mut block = match serde_json::to_value(image) {
-                    Ok(Value::Object(block)) => Value::Object(block),
-                    _ => continue,
-                };
-                if let Some(object) = block.as_object_mut() {
-                    object.insert("type".to_string(), json!("image"));
-                }
-                content.push(block);
-            }
-            EngineEvent::UserMessage(json!({
-                "role": "user",
-                "content": content,
-                "timestamp": now_millis(),
-            }))
-        };
-        if !emit(accepted) {
-            return;
-        }
-        // The batched co-delivery rows: one accepted user row per batched
-        // message, in delivery order, already expanded above.
-        for row in &request.batch {
-            let text = row.text.clone();
-            let mut content = vec![json!({ "type": "text", "text": text })];
-            for image in &row.images {
-                let mut block = match serde_json::to_value(image) {
-                    Ok(Value::Object(block)) => Value::Object(block),
-                    _ => continue,
-                };
-                if let Some(object) = block.as_object_mut() {
-                    object.insert("type".to_string(), json!("image"));
-                }
-                content.push(block);
-            }
-            if !emit(EngineEvent::UserMessage(json!({
-                "role": "user",
-                "content": content,
-                "timestamp": now_millis(),
-            }))) {
+        // An injected custom row is host-emitted here. User rows come from the
+        // core's MessageEnd after admission (`run_turn_once`), so a prompt that
+        // fails before admission leaves no row.
+        if let Some(parsed) = &injected {
+            if !emit(EngineEvent::CustomMessage(
+                crate::session_commands::custom_message_value(parsed),
+            )) {
                 return;
             }
         }

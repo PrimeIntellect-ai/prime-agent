@@ -1,0 +1,1 @@
+- Fixed `/export` and `/share` sometimes leaving out the session's tools section and system prompt when another request touched the session at the same moment.

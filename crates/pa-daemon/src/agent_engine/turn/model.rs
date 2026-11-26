@@ -49,7 +49,11 @@ impl AgentSessionEngine {
         let preflight_model = self
             .armed_image_route()
             .map_or_else(|| model.clone(), |route| route.target.model);
-        if self.config.faux_script.is_none() && self.current_selection().api_key.is_none() {
+        if self.config.faux_script.is_none()
+            && self
+                .selection_api_key_for(&preflight_model.provider)
+                .is_none()
+        {
             let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
             let registry = pa_core::models::ModelRegistry::create(
                 auth,
@@ -167,19 +171,17 @@ impl AgentSessionEngine {
             Some(&mut move |message| {
                 let engine = recovery_engine.as_ref().and_then(std::sync::Weak::upgrade);
                 let provider = message.provider.clone();
+                let error = message.error_message.clone().unwrap_or_default();
                 Box::pin(async move {
                     use pa_core::session_engine::auto_retry::AuthRecovery;
                     let Some(engine) = engine else {
                         return AuthRecovery::Retry;
                     };
-                    let refreshed = tokio::task::spawn_blocking(move || {
-                        engine.refresh_rejected_request_auth(&provider)
+                    tokio::task::spawn_blocking(move || {
+                        engine.recover_rejected_request_auth(&provider, &error)
                     })
-                    .await;
-                    match refreshed {
-                        Ok(Err(failure)) => AuthRecovery::EndTurn(failure.to_string()),
-                        Ok(Ok(())) | Err(_) => AuthRecovery::Retry,
-                    }
+                    .await
+                    .unwrap_or(AuthRecovery::Retry)
                 })
             });
         let park: Option<pa_core::session_engine::provider_park::ParkDecisionCallback> =

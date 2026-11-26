@@ -6,6 +6,8 @@
 mod accept_loop;
 mod adoption;
 mod clients;
+mod factory_overview;
+mod known_sessions;
 mod launch_budget;
 mod notes;
 mod options;
@@ -31,6 +33,8 @@ mod handshake_tests;
 #[cfg(test)]
 mod spawn_record_tests;
 #[cfg(test)]
+mod spend_invariant_tests;
+#[cfg(test)]
 mod tests;
 
 // Read only by this facade's in-file tests; the lib-target import is flagged unused.
@@ -54,6 +58,7 @@ pub(crate) use clients::client_command_payload;
 // (external callers: supervisor_parent_death, create_reuse, prompt_admission, update_restore).
 pub(crate) use routing::{
     client_route_timeout, ROUTE_TIMEOUT_MS, SUMMARY_TIMEOUT_MS, WORKER_NOT_CONNECTED,
+    WORKER_READ_TIMED_OUT,
 };
 
 // Called only by the supervision sibling module and in-file tests; lib-target unused.
@@ -99,7 +104,6 @@ use crate::registry::{
     WorkerTransition,
 };
 use crate::saved_session_commands::{name_unavailable_error, reservation_key, NameScope};
-use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
 use crate::update_prepare::{
     marker_expires_at_iso, update_gate_refuses, write_prepared_artifacts, AbortOutcome,
@@ -194,6 +198,9 @@ pub struct Supervisor {
     /// Memoized ledger over the default sessions dir (ledgers are per
     /// sessions-dir families; another dir gets a fresh instance).
     rlm_ledger: tokio::sync::Mutex<Option<std::sync::Arc<crate::rlm_ledger::RlmSpawnLedger>>>,
+    /// The usage ledger this supervisor alone writes, folded over the
+    /// default sessions dir's spawn ledger.
+    pub(crate) usage_ledger: Arc<crate::usage_ledger::UsageLedger>,
     /// The update-prepare transaction: at most one per supervisor;
     /// empty = `Serving`.
     update_prepare: PrepareCoordinator,
@@ -225,6 +232,21 @@ pub struct Supervisor {
     /// cleared by a landed `compaction_end`.
     pub(crate) compaction_journal:
         std::sync::Mutex<Option<crate::compaction_supervision::TerminalCompactionJournal>>,
+    /// The factory overview's live half: the last rows each resident
+    /// owner's kernel answered through the non-arming `peek` read, each
+    /// stamped with its read time, plus the live warnings that carry a
+    /// real read failure. The overview request SERVES this snapshot and
+    /// never awaits a kernel read; guarded per-owner background refreshes
+    /// update it, so one busy owner can neither stall the reply nor hold
+    /// another owner's refresh back — and rows older than two page poll
+    /// windows serve with the saved marker, never as unqualified live.
+    pub(crate) factory_live: std::sync::Mutex<factory_overview::FactoryLiveCache>,
+    /// The overview's durable-record cache: the last projection of every
+    /// record file the catalog scan read, keyed by path with the file's
+    /// last-seen modification time (`factory_overview` owns the scan's
+    /// use). Each scan prunes entries for records it no longer projects,
+    /// so the cache holds exactly the records the page still lists.
+    pub(crate) factory_records: std::sync::Arc<factory_overview::FactoryRecordsCache>,
 }
 
 impl Supervisor {
@@ -254,6 +276,21 @@ impl Supervisor {
             &options.socket_path,
             &options.agent_dir,
         ));
+        let spawn_log = paths::RotatingLog::new(paths::daemon_log_path(
+            &options.socket_path,
+            &options.agent_dir,
+        ));
+        let rlm_ledger = Arc::new(crate::rlm_ledger::RlmSpawnLedger::new(
+            &options.agent_dir,
+            &paths::sessions_dir(&options.agent_dir)?,
+            move |message| {
+                spawn_log.append(&format!("[{}] {message}", util::now_iso()));
+            },
+        ));
+        let usage_ledger = Arc::new(crate::usage_ledger::UsageLedger::new(
+            &options.agent_dir,
+            Arc::clone(&rlm_ledger),
+        ));
         Ok(Supervisor {
             options,
             descriptor_dir,
@@ -267,7 +304,9 @@ impl Supervisor {
             events,
             session_subscribers: subscribers::SessionSubscribers::new(),
             client_connections: std::sync::Mutex::new(std::collections::HashMap::new()),
-            roster: std::sync::Mutex::new(crate::agent_roster::AgentRoster::new()),
+            roster: std::sync::Mutex::new(crate::agent_roster::AgentRoster::new(Arc::clone(
+                &usage_ledger,
+            ))),
             last_published_roster: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_registration_seeds: std::sync::Mutex::new(Vec::new()),
             pending_session_names: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -277,7 +316,8 @@ impl Supervisor {
             accept_exit: AtomicBool::new(false),
             shutdown_notify: tokio::sync::Notify::new(),
             log,
-            rlm_ledger: tokio::sync::Mutex::new(None),
+            rlm_ledger: tokio::sync::Mutex::new(Some(rlm_ledger)),
+            usage_ledger,
             update_prepare: PrepareCoordinator::new(),
             mutation_drain: MutationDrainLatch::new(),
             update_budget: UpdateTimeoutBudget::from_env(),
@@ -288,6 +328,8 @@ impl Supervisor {
             passive_scan_pending: std::sync::atomic::AtomicBool::new(false),
             passive_catalog_epoch: std::sync::atomic::AtomicU64::new(0),
             compaction_journal: std::sync::Mutex::new(None),
+            factory_live: std::sync::Mutex::new(factory_overview::FactoryLiveCache::default()),
+            factory_records: std::sync::Arc::new(factory_overview::FactoryRecordsCache::default()),
         })
     }
 

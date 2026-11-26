@@ -359,11 +359,19 @@ impl SupervisorChildSessionsInner {
 
     /// The child's live session summary (`get_state`): the busy verdict,
     /// the note, and the tool count read one round trip.
-    pub(super) async fn child_state(&self, active_session_id: &str) -> Result<Value> {
+    pub(super) async fn child_state(
+        &self,
+        active_session_id: &str,
+        factory_task_observation: bool,
+    ) -> Result<Value> {
+        let mut rest = Map::default();
+        if factory_task_observation {
+            rest.insert("taskObservation".to_string(), json!("factory"));
+        }
         let command = DaemonCommand::GetState {
             id: None,
             active_session_id: active_session_id.to_string(),
-            rest: Map::default(),
+            rest,
         };
         self.command(&command, STATE_TIMEOUT_MS).await
     }
@@ -373,7 +381,7 @@ impl SupervisorChildSessionsInner {
     /// running while any descendant does). `Err` means the child cannot be
     /// reached right now.
     pub(super) async fn child_busy(&self, active_session_id: &str) -> Result<bool> {
-        let state = self.child_state(active_session_id).await?;
+        let state = self.child_state(active_session_id, false).await?;
         Ok(child_busy_flags(&state))
     }
 
@@ -453,7 +461,7 @@ impl SupervisorChildSessionsInner {
                 return false;
             }
         }
-        let (active_session_id, direct_observation, recheck_idle, session_file, running) = {
+        let (active_session_id, direct_observation, recheck_idle, session_file, running, factory) = {
             let record = record.lock().await;
             (
                 record.active_session_id.clone(),
@@ -462,6 +470,7 @@ impl SupervisorChildSessionsInner {
                     || matches!(record.run.verdict(), Some(RunVerdict::Cancelled(_))),
                 record.session_file.clone().filter(|path| !path.is_empty()),
                 record.run.is_running(),
+                record.factory,
             )
         };
         let state = {
@@ -469,7 +478,7 @@ impl SupervisorChildSessionsInner {
             let request_order = self
                 .observation_requests
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let state = self.child_state(&active_session_id).await;
+            let state = self.child_state(&active_session_id, factory).await;
             if let Ok(state) = &state {
                 self.observe_live_state(
                     record,
@@ -478,6 +487,14 @@ impl SupervisorChildSessionsInner {
                     ChildObservationSource::Direct,
                 )
                 .await;
+            }
+            // The task-activity flag belongs to this same direct read: write
+            // it while the direct-observation lock still serializes the
+            // worker round trips, so a concurrent refresh cannot apply a
+            // stale capture after a fresher one.
+            if factory {
+                record.lock().await.factory_task_busy =
+                    state.as_ref().ok().and_then(factory_task_busy);
             }
             state
         };
@@ -497,7 +514,12 @@ impl SupervisorChildSessionsInner {
         // a crash) does not undo the idle read.
         if recheck_idle {
             tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
+            let _direct = direct_observation.lock().await;
             if matches!(self.child_busy(&active_session_id).await, Ok(true)) {
+                // The busy re-check supersedes the idle read's task flag.
+                if factory {
+                    record.lock().await.factory_task_busy = Some(true);
+                }
                 return true;
             }
         }
@@ -555,9 +577,6 @@ impl SupervisorChildSessionsInner {
             if record.lock().await.retirement.closed_by_parent() {
                 return;
             }
-            // Slice-top usage flush: rows of turns that completed since the
-            // last slice land here (crash loss is bounded to one slice).
-            self.emit_child_usage(record).await;
             let active_session_id = record.lock().await.active_session_id.clone();
             // One bounded idle-wait slice: a timeout while the child still
             // runs re-slices; a returned slice means the queue drained.
@@ -592,9 +611,6 @@ impl SupervisorChildSessionsInner {
                 if busy {
                     continue;
                 }
-                // The run's final rows are attributed before the terminal
-                // notice rides the parent's follow-up route.
-                self.emit_final_child_usage(record).await;
                 // TS records the return before delivering the notice: the
                 // pending edge must be on the parent's ledger before the
                 // notice's follow-up turn mints its own request.
@@ -652,9 +668,6 @@ impl SupervisorChildSessionsInner {
             } else {
                 unreachable_polls += 1;
                 if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
-                    // A dead child keeps whatever rows its file already
-                    // holds; capture them before the terminal notice.
-                    self.emit_final_child_usage(record).await;
                     if self
                         .settle_failed(record, "Child worker unreachable".to_string())
                         .await
@@ -1113,6 +1126,17 @@ mod background_busy_tests {
         // A summary that predates the field keeps the old rules only.
         assert!(!child_busy_flags(&json!({})));
     }
+}
+
+/// Factory task observers require the opt-in field; absence cannot prove the
+/// background lanes quiescent and therefore keeps that child unsettled. A
+/// settled child that runs a follow-up turn (a `[bash-done]` notice, a
+/// repair message) is task work too: its run never reopens.
+fn factory_task_busy(state: &Value) -> Option<bool> {
+    state
+        .get("outstandingBackgroundJobs")
+        .and_then(Value::as_u64)
+        .map(|count| count > 0 || child_busy_flags(state))
 }
 
 #[cfg(test)]

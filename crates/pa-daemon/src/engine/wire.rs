@@ -275,10 +275,16 @@ pub struct RlmSessionIdentity {
     /// file is a top-level runtime and spawns no edge, and a replacement
     /// runtime has none.
     pub semantic_spawn: Option<SemanticSpawnOrigin>,
-    /// What the child's final message is for, from the create's runtime
-    /// metadata: a factory run tag makes it a factory state, the `refine`
-    /// kind a refinement child.
-    pub child_role: pa_core::prompts::ChildRole,
+    /// The create's runtime metadata carries a factory run tag: the
+    /// session runs one factory state.
+    pub factory_child: bool,
+    /// The factory state's output contract from the create's runtime
+    /// metadata (`factoryContract`): the child's `factory.emit` checks
+    /// against it.
+    pub factory_contract: Option<serde_json::Value>,
+    /// The create's runtime metadata kind is `refine`: the session is a
+    /// refinement child.
+    pub refine_child: bool,
 }
 
 /// A created session's semantic-edge provenance (TS

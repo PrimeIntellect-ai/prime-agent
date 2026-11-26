@@ -66,16 +66,13 @@ mod core_state;
 
 mod artifacts;
 
-pub(crate) use artifacts::{artifact_reference, now_millis};
+pub(crate) use artifacts::artifact_reference;
 
 pub use config::AgentEngineConfig;
 pub(crate) use config::AutonomousAdmission;
 pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
-use config::{
-    GoalRuntimeHandles, ModelResolutionWarning, ProducerUsageSink, RestoredSessionModel,
-    StartupScope,
-};
+use config::{GoalRuntimeHandles, ModelResolutionWarning, RestoredSessionModel, StartupScope};
 
 mod reload;
 mod session_engine_impl;
@@ -238,6 +235,10 @@ pub struct AgentSessionEngine {
     /// failed `reload()` keeps the last read's data — a transiently-held
     /// document lock or a corrupt auth.json is not a logout.
     pub(crate) request_auth_registry: std::sync::Mutex<Option<pa_core::models::ModelRegistry>>,
+    /// The provider the selection's explicit key was configured for: the
+    /// key serves that provider only (see
+    /// [`Self::selection_api_key_for`]).
+    pub(crate) selection_api_key_provider: std::sync::RwLock<Option<String>>,
     /// One shared supervisor-link client: agent messaging and RLM children
     /// multiplex the same connection.
     link: Arc<crate::supervisor_link::SupervisorLink>,
@@ -264,14 +265,8 @@ pub struct AgentSessionEngine {
     /// build; `None` without a worker pump.
     progress_note_emit:
         std::sync::Mutex<Option<pa_core::session_engine::rlm_host::RlmProgressNoteEmit>>,
-    /// The attribution producer the children registry's sink last got:
-    /// children outlive a rebuild, so their spawn registrations are adopted
-    /// forward.
-    usage_producer: std::sync::Mutex<
-        Option<std::sync::Arc<pa_core::session_engine::rlm_usage::RlmChildUsageAttributions>>,
-    >,
-    rlm_usage_store: std::sync::Mutex<
-        Option<std::sync::Arc<dyn pa_core::session_engine::rlm_usage::RlmChildUsageStore>>,
+    usage_store: std::sync::Mutex<
+        Option<std::sync::Arc<dyn pa_core::session_engine::usage_store::UsageStore>>,
     >,
     own_summary: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
     pub(crate) create_resources: std::sync::RwLock<CreateSessionResources>,
@@ -304,10 +299,16 @@ pub struct AgentSessionEngine {
     /// This session's RLM recursion depth (0 for top-level): gates the kernel `refine.*` host
     /// requests.
     rlm_depth: std::sync::atomic::AtomicU32,
-    /// What this child's final message is for (its create's runtime
-    /// metadata): a factory state's output, or a refinement child's
-    /// proposal, which also makes its kernel refuse harness writes.
-    child_role: std::sync::Mutex<pa_core::prompts::ChildRole>,
+    /// Whether this session runs a factory state (its create carried a
+    /// factory run tag): selects the child prompt's factory line.
+    factory_child: std::sync::atomic::AtomicBool,
+    /// The factory state's output contract from the create, which the
+    /// engine registers as the child's `factory.emit` and `factory.inputs`.
+    factory_contract: std::sync::Mutex<Option<serde_json::Value>>,
+    /// Whether this session is a refinement child (its create's
+    /// runtimeMetadata kind is `refine`): its final message is the proposal
+    /// its parent applies, and it neither writes harness entries nor spawns.
+    refine_child: std::sync::atomic::AtomicBool,
     /// The depth bound's source stamp (`default` | `env` | `global` |
     /// `inherited` | `chat`).
     rlm_max_depth_source: std::sync::Mutex<&'static str>,

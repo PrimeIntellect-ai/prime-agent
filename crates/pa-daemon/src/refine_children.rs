@@ -145,10 +145,6 @@ impl AgentSessionEngine {
                     source,
                 },
             );
-        // The child's run bills on the parent's totals: register the spawn
-        // with the usage attribution (the kernel path's own
-        // `register_spawn`), so the child's rows fold in as it runs.
-        self.register_refine_child_usage(&rlm_child_id).await;
         children.release_child_prompt(&rlm_child_id).await;
         Ok(rlm_child_id)
     }

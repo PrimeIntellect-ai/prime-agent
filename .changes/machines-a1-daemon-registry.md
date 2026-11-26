@@ -1,0 +1,1 @@
+- The factory daemon registry keeps a machine's sessions discoverable across a restart.

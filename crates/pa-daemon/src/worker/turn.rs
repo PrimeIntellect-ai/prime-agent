@@ -498,6 +498,11 @@ impl TurnRunner {
         let herdr_run_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let herdr_run_end_seen = Arc::clone(&herdr_run_end);
         let batch_len = items.len();
+        // A plain prompt's accepted rows are the core's admitted user rows, so
+        // a notice row emitted before admission must not take a slot. An
+        // injected row or a session command's echo row is a host custom row.
+        let custom_accepted_row = request.custom_message.is_some()
+            || crate::session_commands::parse_prompt_session_command(&request.message).is_some();
         // The arrival row's accepted transcript row consumes what it shows.
         let arrival_row = items
             .iter()
@@ -603,9 +608,14 @@ impl TurnRunner {
                     engine.on_turn_done();
                 }
                 // Durable model cleanup is independent of visual abort-row
-                // suppression and emits no client-facing frame.
+                // suppression and emits no client-facing frame. An admitted user
+                // row passes too: the core put it in the live context, so the
+                // transcript must keep it.
                 if core.abort_requested
-                    && !matches!(&event, EngineEvent::ModelChange(_))
+                    && !matches!(
+                        &event,
+                        EngineEvent::ModelChange(_) | EngineEvent::UserMessage(_)
+                    )
                     && (core.suppress_aborted_row || !(abort_settle || aborted_row))
                 {
                     return false;
@@ -773,10 +783,8 @@ impl TurnRunner {
                 let mut action_frame: Option<SessionActionSnapshot> = None;
                 if !emitting_prefix_rows.get()
                     && accepted_rows < batch_len
-                    && matches!(
-                        event,
-                        EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
-                    )
+                    && (matches!(event, EngineEvent::UserMessage(_))
+                        || (custom_accepted_row && matches!(event, EngineEvent::CustomMessage(_))))
                 {
                     accepted_rows += 1;
                     accepted_prefix_seen.store(accepted_rows, std::sync::atomic::Ordering::SeqCst);
@@ -1181,8 +1189,9 @@ impl TurnRunner {
                 }
             }
             emitting_prefix_rows.set(false);
-            // Sample the worker-owned leaf in memory before accepted rows
-            // persist. The engine stays lazy and the accepted event stays first.
+            // Sample the worker-owned leaf in memory before the turn runs: the
+            // lazy engine restores context through it. Accepted user rows
+            // persist only after core admission, inside the run.
             let (file_backed, prompt_context_leaf) = {
                 let core = core.lock().unwrap();
                 core.store.as_ref().map_or((false, None), |store| {

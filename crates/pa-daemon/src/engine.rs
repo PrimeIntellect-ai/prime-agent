@@ -313,14 +313,15 @@ pub trait SessionEngine: Send + Sync {
         None
     }
 
-    /// The session's assembled system prompt, when the engine can produce
-    /// it synchronously (the HTML export embeds it).
-    fn export_system_prompt(&self) -> Option<String> {
-        None
+    /// The session's assembled system prompt (the HTML export embeds it).
+    fn export_system_prompt(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+        Box::pin(async { None })
     }
 
     /// The session's registered tools for the export's tools section: built
-    /// now when not yet built; `None` mid-turn.
+    /// now when not yet built.
     fn export_tools(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<Value>>> + Send + '_>> {

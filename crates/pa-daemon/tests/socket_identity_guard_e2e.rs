@@ -33,6 +33,9 @@
 //! and the oracle is never vacuous on inode reuse.
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -193,11 +196,7 @@ fn spawn_worker(
 }
 
 fn wait_worker_socket(socket: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "worker socket never appeared");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(15));
 }
 
 /// A raw private-frame client for the worker socket (the same wire the
