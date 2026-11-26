@@ -6,10 +6,12 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{json_response, redirect_response, MockServer};
+use common::{json_response, redirect_response, MockServer, ScriptedResponse};
 use pa_sandbox::transport::{ReqwestSandboxTransport, SandboxTransport, TransportRequest};
 use pa_sandbox::types::Method;
-use pa_sandbox::{ClientOptions, PrimeSandboxClient, SandboxErrorCode};
+use pa_sandbox::{
+    ClientOptions, GatewayOptions, PrimeSandboxClient, SandboxErrorCode, UploadRequest,
+};
 use serde_json::json;
 
 fn request(method: Method, url: String) -> TransportRequest {
@@ -72,6 +74,48 @@ async fn unresponsive_servers_lose_the_deadline_race() {
             Method::Get,
             format!("http://127.0.0.1:{port}/api/v1/sandbox/sb-1"),
         ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), SandboxErrorCode::Timeout);
+    assert!(started.elapsed() < Duration::from_secs(5), "hard abort");
+}
+
+#[tokio::test]
+async fn the_upload_deadline_override_wins_the_race() {
+    // The bot install rides one multipart upload whose deadline comes from
+    // `GatewayOptions`, not the client default. The platform auth hands
+    // out loopback gateway credentials, the upload's reply stalls, and the
+    // per-request override must abort the call.
+    let server = MockServer::start(Vec::new()).await;
+    let credentials = serde_json::json!({
+        "gateway_url": server.url(""),
+        "user_ns": "ns_user1",
+        "job_id": "job_abc",
+        "token": "gw-token-1",
+        "expires_at": "2026-09-16T01:00:00Z",
+    });
+    server.push_raw(json_response(200, "OK", &credentials.to_string()));
+    server.push(ScriptedResponse {
+        head_delay: Duration::from_secs(8),
+        raw: Vec::new(),
+        stream: Vec::new(),
+        close: false,
+        hold: false,
+    });
+    let client = loopback_client(&server);
+    let started = Instant::now();
+    let error = client
+        .upload_file(
+            "sb-1",
+            UploadRequest {
+                path: "/root/.prime-agent-install.tar.gz".to_string(),
+                filename: "bot-tarball.tar.gz".to_string(),
+                content: vec![0_u8; 1024],
+            },
+            &GatewayOptions {
+                request_timeout: Some(Duration::from_millis(250)),
+            },
+        )
         .await
         .unwrap_err();
     assert_eq!(error.code(), SandboxErrorCode::Timeout);

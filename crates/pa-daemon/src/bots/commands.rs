@@ -253,15 +253,16 @@ pub async fn resume_bot(manager: &BotManager, bot_id: &str) -> Result<BotRecord>
 /// daemon's prime-agent version, in place. Bots that do not run are not
 /// selected, and a bot that pauses while the refresh waits for its lock
 /// is skipped, never woken: it installs the version on its next wake.
-/// The bots refresh concurrently, each under [`BOT_DEADLINE`], so one
-/// slow sandbox cannot stretch the pass by every bot's budget. Each row
-/// reports one bot: refreshed to a version, skipped with its status, or
-/// failed with the error.
+/// Mirrored children another bot's daemon owns are not selected either:
+/// their parent bot refreshes them. The bots refresh concurrently, each
+/// under [`BOT_DEADLINE`], so one slow sandbox cannot stretch the pass by
+/// every bot's budget. Each row reports one bot: refreshed to a version,
+/// skipped with its status, or failed with the error.
 pub async fn refresh_bots(manager: &BotManager) -> Vec<Value> {
     let running: Vec<BotRecord> = manager
         .list()
         .into_iter()
-        .filter(|record| record.status == BotStatus::Running)
+        .filter(|record| record.status == BotStatus::Running && manager.manages(record))
         .collect();
     futures::future::join_all(running.into_iter().map(|record| async move {
         let (bot_id, name) = (record.bot_id.clone(), record.name.clone());
@@ -1011,5 +1012,48 @@ mod tests {
 
         // An unknown bot is an error, not a silent skip.
         assert!(manager.refresh_running("bot-x").await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_bots_leaves_mirrored_children_to_their_parent() {
+        let (_dir, platform, manager) = setup();
+        manager.spawn(&spec("bot-a")).await.unwrap();
+        // A mirrored child of a bot's own daemon: running in this
+        // registry, but this daemon does not own its lifecycle.
+        let row = serde_json::json!({
+            "botId": "bot-c", "name": "helper", "ownerSessionId": "guest-session",
+            "sandboxId": "sbx-9", "status": "running", "createdAt": 1_i64,
+            "guestSessionId": "guest-sbx-9", "closedRunningMs": 1000_i64,
+            "github": false,
+        });
+        manager.merge_children("bot-a", &[row]).await.unwrap();
+        // The Mac upgraded while the daemon's own bot ran.
+        let sandbox = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+        platform
+            .state()
+            .guest_versions
+            .insert(sandbox, "0.0.1".into());
+        let installs = platform.state().installs;
+
+        let rows = refresh_bots(&manager).await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "only the daemon's own bot was selected: {rows:?}"
+        );
+        assert_eq!(rows[0]["botId"], "bot-a");
+        assert_eq!(rows[0]["outcome"], "refreshed");
+        assert_eq!(platform.state().installs, installs + 1);
+        // The mirror was left exactly as it was.
+        let mirrored = manager.get("bot-c").unwrap();
+        assert_eq!(mirrored.sandbox_id.as_deref(), Some("sbx-9"));
+        assert_eq!(mirrored.status, BotStatus::Running);
+
+        // A direct refresh of the mirror is refused, like pause and resume.
+        let refused = manager.refresh_running("bot-c").await.unwrap_err();
+        assert!(
+            refused.to_string().contains("belongs to another bot"),
+            "{refused:#}"
+        );
     }
 }

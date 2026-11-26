@@ -756,11 +756,18 @@ impl BotManager {
     /// the bot's lock, so a pause that completes first is never undone.
     ///
     /// # Errors
-    /// Returns an error for an unknown bot or a failed upgrade.
+    /// Returns an error for an unknown bot, a bot another bot's daemon
+    /// owns, or a failed upgrade.
     pub async fn refresh_running(&self, bot_id: &str) -> Result<BotRefresh> {
         let bot_lock = self.lock_for(bot_id);
         let _held = bot_lock.lock().await;
         let record = self.record(bot_id)?;
+        if !self.manages(&record) {
+            bail!(
+                "the bot {} belongs to another bot; its parent bot refreshes it",
+                record.name
+            );
+        }
         if record.status != BotStatus::Running {
             return Ok(BotRefresh::Skipped(record));
         }
