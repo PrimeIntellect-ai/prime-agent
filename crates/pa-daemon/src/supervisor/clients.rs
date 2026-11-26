@@ -815,6 +815,10 @@ impl Supervisor {
                 vec![response_line(&self.handle_list_bots(&command_id, command))],
                 false,
             ),
+            DaemonCommand::RefreshBots { .. } => (
+                vec![response_line(&self.handle_refresh_bots(&command_id).await)],
+                false,
+            ),
             DaemonCommand::ListBotSecrets { .. }
             | DaemonCommand::SetBotSecretInject { .. }
             | DaemonCommand::AddBotSecret { .. }

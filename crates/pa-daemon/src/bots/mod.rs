@@ -42,7 +42,7 @@ use pa_core::settings::BotGitIdentity;
 use pa_sandbox::{ClientOptions, PrimeSandboxClient, DEFAULT_BASE_URL};
 use sha2::{Digest, Sha256};
 
-pub use manager::{AttachGuard, BotManager};
+pub use manager::{AttachGuard, BotManager, BotRefresh};
 pub use registry::{BotRecord, BotStatus};
 
 /// The image a new bot boots: the team bot image, which already carries the

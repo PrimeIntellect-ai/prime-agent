@@ -1,16 +1,21 @@
 //! `prime-agent bots github set|clear|status`: the GitHub token that bots
 //! use. The token stays on this machine; bots get it through platform
 //! header rules, never inside the sandbox.
+//!
+//! `prime-agent bots refresh`: upgrade every running bot in place to this
+//! binary's prime-agent version, through the daemon.
 
 use std::io::{BufRead, IsTerminal};
 use std::path::Path;
 
+use pa_daemon::bots::commands::BOT_DEADLINE;
 use pa_daemon::bots::github;
+use pa_types::daemon::DaemonCommand;
 
 use crate::config::get_agent_dir;
 
-const USAGE: &str =
-    "Usage: prime-agent bots github <set|clear|status> | prime-agent bots allow-spawns <bot>";
+const USAGE: &str = "Usage: prime-agent bots refresh | prime-agent bots github <set|clear|status> \
+     | prime-agent bots allow-spawns <bot>";
 
 /// Run the `bots` command; returns the process exit code.
 pub fn run_bots_command(args: &[String]) -> i32 {
@@ -24,6 +29,8 @@ pub fn run_bots_command(args: &[String]) -> i32 {
             Ok(())
         }
         ["allow-spawns", bot] => allow_spawns(bot),
+        ["refresh"] => refresh(false),
+        ["refresh", "--json"] => refresh(true),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -169,6 +176,116 @@ fn allow_spawns(bot: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The whole `refresh_bots` pass's wait: the daemon upgrades every running
+/// bot concurrently, each under [`BOT_DEADLINE`], so one per-bot budget
+/// plus handshake slack bounds the whole pass.
+const REFRESH_TIMEOUT_MS: u64 = 120_000 + BOT_DEADLINE.as_millis() as u64;
+/// The greeting wait, matching the daemon client's own handshake timeout.
+const REFRESH_HELLO_TIMEOUT_MS: u64 = 15_000;
+
+/// Why the daemon cannot drive the refresh: it runs another prime-agent
+/// version, and it installs its own into the bots, not this binary's.
+/// `None` when the daemon's version matches.
+fn daemon_version_mismatch(hello: &serde_json::Value, local: &str) -> Option<String> {
+    let daemon = hello.get("appVersion").and_then(serde_json::Value::as_str);
+    (daemon != Some(local)).then(|| {
+        format!(
+            "the daemon runs {}; this binary is {}. Restart the daemon \
+             (prime-agent shutdown), then run bots refresh again",
+            daemon.unwrap_or("an unreported version"),
+            local
+        )
+    })
+}
+
+/// `prime-agent bots refresh`: bring every running bot to this binary's
+/// prime-agent version, in place, through the daemon. Boots the daemon
+/// when none is listening (an update stops it) and refuses one that runs
+/// another version. Bots that do not run are left alone; they install the
+/// version on their next wake.
+fn refresh(json: bool) -> Result<(), String> {
+    let socket_path = crate::config::resolve_daemon_socket_path(None);
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?
+        .block_on(crate::ensure_daemon_running(&socket_path, &cwd))
+        .map_err(|error: anyhow::Error| format!("{error:#}"))?;
+    let mut client = crate::daemon_client::DaemonClient::connect(&socket_path)
+        .map_err(|error| error.to_string())?;
+    let hello = client
+        .wait_for_hello(REFRESH_HELLO_TIMEOUT_MS)
+        .map_err(|error| error.to_string())?;
+    if let Some(mismatch) = daemon_version_mismatch(&hello, crate::config::version()) {
+        return Err(mismatch);
+    }
+    let command = DaemonCommand::RefreshBots {
+        id: None,
+        rest: serde_json::Map::new(),
+    };
+    let response = client
+        .request_with_timeout(command, REFRESH_TIMEOUT_MS)
+        .map_err(|error| error.to_string())?;
+    if !response.success {
+        let error = response.error.unwrap_or_else(|| response.command.clone());
+        return Err(format!("the daemon refused the refresh: {error}"));
+    }
+    let data = response.data.unwrap_or(serde_json::Value::Null);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&data).map_err(|error| error.to_string())?
+        );
+        return Ok(());
+    }
+    let rows = data
+        .get("bots")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if rows.is_empty() {
+        println!("No running bots.");
+        return Ok(());
+    }
+    let mut failed = 0_usize;
+    for row in &rows {
+        let name = row
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("an unnamed bot");
+        match row.get("outcome").and_then(serde_json::Value::as_str) {
+            Some("refreshed") => {
+                let version = row
+                    .get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("an unknown version");
+                println!("Refreshed {name} to {version}.");
+            }
+            Some("skipped") => {
+                let status = row
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("no longer running");
+                println!("Skipped {name} ({status}).");
+            }
+            _ => {
+                failed += 1;
+                let reason = row
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("no reason reported");
+                eprintln!("Warning: {name} was not refreshed: {reason}.");
+            }
+        }
+    }
+    match failed {
+        0 => Ok(()),
+        1 => Err("1 bot was not refreshed".to_string()),
+        failed => Err(format!("{failed} bots were not refreshed")),
+    }
+}
+
 fn status(agent_dir: &Path) {
     let enabled =
         pa_core::settings::SettingsManager::create(agent_dir, agent_dir).get_bots_github();
@@ -216,6 +333,20 @@ mod tests {
                 None => std::env::remove_var("PRIME_API_KEY"),
             }
         }
+    }
+
+    /// A daemon that runs another version must not drive the refresh: it
+    /// installs its own version into the bots, not this binary's. A
+    /// daemon that reports no version cannot be verified either.
+    #[test]
+    fn a_daemon_of_another_version_is_refused() {
+        let hello = serde_json::json!({ "appVersion": "0.10.3-dev-1" });
+        assert!(daemon_version_mismatch(&hello, "0.10.3-dev-2").is_some());
+        assert_eq!(daemon_version_mismatch(&hello, "0.10.3-dev-1"), None);
+        assert!(
+            daemon_version_mismatch(&serde_json::json!({}), "0.10.3-dev-1").is_some(),
+            "a daemon that reports no version is refused"
+        );
     }
 
     /// A platform delete that fails must fail the `clear`: exiting 0 would

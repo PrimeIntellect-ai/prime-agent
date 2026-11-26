@@ -1,6 +1,6 @@
-//! The supervisor's bot commands: `spawn_bot`, `delete_bot`, `list_bots`.
-//! Workers send them over their supervisor link; the bot manager lives
-//! only in the supervisor process.
+//! The supervisor's bot commands: `spawn_bot`, `delete_bot`, `list_bots`,
+//! `refresh_bots`. Workers send them over their supervisor link; the bot
+//! manager lives only in the supervisor process.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use pa_types::daemon::DaemonCommand;
 use serde_json::{json, Value};
 
-use super::{BotManager, BotRecord, BotSpec, BotStatus};
+use super::{BotManager, BotRecord, BotRefresh, BotSpec, BotStatus};
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::supervisor::Supervisor;
 
@@ -192,6 +192,15 @@ pub fn bot_row(
     })
 }
 
+/// The `refresh_bots` reply: one row per bot the registry said ran, and
+/// the version a refreshed bot now runs.
+fn refresh_reply(rows: &[Value]) -> Value {
+    json!({
+        "bots": rows,
+        "version": super::version::local_version(),
+    })
+}
+
 /// A bot this daemon manages. A bot that another bot spawned is only a
 /// mirror here, unless this daemon runs in that parent bot: the parent
 /// bot's daemon owns its lifecycle.
@@ -238,6 +247,53 @@ pub async fn pause_bot(manager: &BotManager, bot_id: &str) -> Result<BotRecord> 
 pub async fn resume_bot(manager: &BotManager, bot_id: &str) -> Result<BotRecord> {
     own_bot(manager, bot_id)?;
     manager.ensure_running(bot_id).await
+}
+
+/// `refresh_bots`: bring every bot the registry says runs to this
+/// daemon's prime-agent version, in place. Bots that do not run are not
+/// selected, and a bot that pauses while the refresh waits for its lock
+/// is skipped, never woken: it installs the version on its next wake.
+/// The bots refresh concurrently, each under [`BOT_DEADLINE`], so one
+/// slow sandbox cannot stretch the pass by every bot's budget. Each row
+/// reports one bot: refreshed to a version, skipped with its status, or
+/// failed with the error.
+pub async fn refresh_bots(manager: &BotManager) -> Vec<Value> {
+    let running: Vec<BotRecord> = manager
+        .list()
+        .into_iter()
+        .filter(|record| record.status == BotStatus::Running)
+        .collect();
+    futures::future::join_all(running.into_iter().map(|record| async move {
+        let (bot_id, name) = (record.bot_id.clone(), record.name.clone());
+        match tokio::time::timeout(BOT_DEADLINE, manager.refresh_running(&bot_id)).await {
+            Ok(Ok(BotRefresh::Refreshed(record))) => json!({
+                "botId": record.bot_id,
+                "name": record.name,
+                "outcome": "refreshed",
+                "status": record.status.as_str(),
+                "version": record.version,
+            }),
+            Ok(Ok(BotRefresh::Skipped(record))) => json!({
+                "botId": record.bot_id,
+                "name": record.name,
+                "outcome": "skipped",
+                "status": record.status.as_str(),
+            }),
+            Ok(Err(error)) => json!({
+                "botId": bot_id,
+                "name": name,
+                "outcome": "failed",
+                "error": format!("{error:#}"),
+            }),
+            Err(_) => json!({
+                "botId": bot_id,
+                "name": name,
+                "outcome": "failed",
+                "error": format!("the bot did not refresh within {BOT_DEADLINE:?}"),
+            }),
+        }
+    }))
+    .await
 }
 
 impl Supervisor {
@@ -590,6 +646,26 @@ impl Supervisor {
         }
     }
 
+    /// `refresh_bots`: bring every running bot to this daemon's version,
+    /// in place.
+    pub(crate) async fn handle_refresh_bots(self: &Arc<Self>, command_id: &str) -> DaemonResponse {
+        let type_name = "refresh_bots";
+        // No registry: no bot was ever spawned here, so skip the credential
+        // read and answer empty (the caller prints "no running bots").
+        if !super::registry::BotRegistry::path_in(&self.options.agent_dir).exists() {
+            let empty = refresh_reply(&[]);
+            return response_success(Some(command_id), type_name, Some(empty));
+        }
+        let manager = match super::manager_for(&self.options.agent_dir) {
+            Ok(manager) => manager,
+            Err(error) => {
+                return response_failure(Some(command_id), type_name, &format!("{error:#}"), None)
+            }
+        };
+        let rows = refresh_bots(&manager).await;
+        response_success(Some(command_id), type_name, Some(refresh_reply(&rows)))
+    }
+
     /// `list_bots`: every bot, or one owner's.
     pub(crate) fn handle_list_bots(
         self: &Arc<Self>,
@@ -806,6 +882,7 @@ async fn blocking<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{setup, spec};
+    use super::super::version;
     use super::*;
 
     #[tokio::test(start_paused = true)]
@@ -887,5 +964,52 @@ mod tests {
         let resumed = manager.ensure_running("bot-a").await.unwrap();
         let grace = i64::try_from(super::super::replies::PAUSE_GRACE.as_millis()).unwrap();
         assert_eq!(resumed.running_ms, grace, "only the idle grace counts");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_bots_upgrades_the_running_bot_and_skips_the_paused_one() {
+        let (_dir, platform, manager) = setup();
+        manager.spawn(&spec("bot-a")).await.unwrap();
+        manager.spawn(&spec("bot-b")).await.unwrap();
+        pause_bot(&manager, "bot-b").await.unwrap();
+        // The Mac upgraded while one bot ran and the other slept: both
+        // guests report an older version than this binary.
+        let sandboxes: Vec<String> = ["bot-a", "bot-b"]
+            .into_iter()
+            .map(|bot| manager.get(bot).unwrap().sandbox_id.unwrap())
+            .collect();
+        for sandbox in &sandboxes {
+            platform
+                .state()
+                .guest_versions
+                .insert(sandbox.clone(), "0.0.1".into());
+        }
+        let installs = platform.state().installs;
+
+        let rows = refresh_bots(&manager).await;
+        assert_eq!(rows.len(), 1, "only the running bot was selected: {rows:?}");
+        assert_eq!(rows[0]["name"], "helper");
+        assert_eq!(rows[0]["outcome"], "refreshed");
+        assert_eq!(rows[0]["version"], version::local_version());
+        assert_eq!(platform.state().installs, installs + 1);
+        assert_eq!(
+            platform.state().guest_versions[&sandboxes[0]],
+            version::local_version()
+        );
+        // The paused bot slept through the refresh: old guest, still paused.
+        assert_eq!(platform.state().guest_versions[&sandboxes[1]], "0.0.1");
+        assert_eq!(manager.get("bot-b").unwrap().status, BotStatus::Paused);
+
+        // A bot that no longer runs is skipped, never woken: it installs
+        // the version on its next wake.
+        pause_bot(&manager, "bot-a").await.unwrap();
+        let BotRefresh::Skipped(skipped) = manager.refresh_running("bot-a").await.unwrap() else {
+            panic!("a bot that paused meanwhile is skipped");
+        };
+        assert_eq!(skipped.status, BotStatus::Paused);
+        assert_eq!(platform.state().installs, installs + 1, "no upgrade ran");
+
+        // An unknown bot is an error, not a silent skip.
+        assert!(manager.refresh_running("bot-x").await.is_err());
     }
 }

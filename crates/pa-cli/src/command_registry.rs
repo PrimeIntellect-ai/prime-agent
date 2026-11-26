@@ -313,15 +313,18 @@ without its project Python code.",
     ]),
     CommandSpec::new(
         &["bots"],
-        "bots github <set|clear|status>",
-        "Manage the GitHub token bots use",
+        "bots refresh | bots github <set|clear|status> | bots allow-spawns <bot>",
+        "Refresh running bots, or manage the GitHub token bots use",
     )
     .description(
-        "Bots reach GitHub through Prime header rules; the token never enters a bot. \
+        "Bots run the owner's exact prime-agent version. `refresh` upgrades every running bot \
+in place to this binary's version, through the daemon; bots that do not run upgrade on their next wake. \
+Bots reach GitHub through Prime header rules; the token never enters a bot. \
 `set` reads a token from stdin and stores it on this machine. Without one, bots use the gh CLI login. \
 `clear` removes the stored token and its Prime secrets. `status` shows the token source, \
 the bots.github setting, and the git author.",
-    ),
+    )
+    .options(&["--json  Print the refresh rows as JSON (bots refresh only)"]),
 ];
 
 /// Command names that once existed and now print removal guidance.

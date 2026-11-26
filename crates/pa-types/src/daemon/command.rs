@@ -697,6 +697,15 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// `refresh_bots`: bring every bot that runs to the daemon's own
+    /// prime-agent version, in place. Bots that do not run are left alone;
+    /// they install the version on their next wake.
+    RefreshBots {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     /// The `/secrets` view: every secret bots can get, with its status
     /// and hosts. The mutating commands answer with the same list.
     ListBotSecrets {
