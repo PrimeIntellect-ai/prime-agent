@@ -598,9 +598,14 @@ pub fn register_factory_compile_host_handler(handlers: &mut HostRequestHandlers,
 /// `factory.validate`: the errors of `spec`, then of `name` and
 /// `description`, each checked only when present.
 fn validate_factory(data: &Value) -> Value {
-    let mut errors = data.get("spec").map(pa_factory::check_spec).unwrap_or_default();
+    let mut errors = data
+        .get("spec")
+        .map(pa_factory::check_spec)
+        .unwrap_or_default();
     if let Some(name) = data.get("name") {
-        errors.extend(pa_factory::machine_name_errors(name.as_str().unwrap_or_default()));
+        errors.extend(pa_factory::machine_name_errors(
+            name.as_str().unwrap_or_default(),
+        ));
     }
     if let Some(description) = data.get("description") {
         errors.extend(pa_factory::machine_description_errors(description.as_str()));

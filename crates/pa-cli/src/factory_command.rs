@@ -511,7 +511,7 @@ mod tests {
         let source = dir.path().join("MACHINE.md");
         std::fs::write(
             &source,
-            "---\nname: sweep\ndescription: Sweep.\n---\n```machine-spec\n{\"states\": []}\n```\n",
+            "---\nname: sweep\ndescription: Sweep.\n---\n```machine-spec\n{\"states\": [{\"id\": \"a\", \"entry\": true, \"subagent\": \"w\"}]}\n```\n",
         )
         .unwrap();
         let user = dir.path().join("machines");
