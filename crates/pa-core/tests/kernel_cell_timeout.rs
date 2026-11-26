@@ -349,6 +349,18 @@ async fn repl_call(tool: &pa_core::ToolDefinition, args: Value) -> anyhow::Resul
         .join("\n"))
 }
 
+/// The next background-cell completion, bounded.
+async fn next_outcome(
+    outcomes: &mut tokio::sync::mpsc::UnboundedReceiver<
+        pa_core::kernel::shared::BackgroundCellOutcome,
+    >,
+) -> pa_core::kernel::shared::BackgroundCellOutcome {
+    tokio::time::timeout(std::time::Duration::from_secs(10), outcomes.recv())
+        .await
+        .expect("a background completion")
+        .expect("the provisioner is alive")
+}
+
 /// The cell id an auto-background note names.
 fn backgrounded_cell(text: &str) -> String {
     text.split("auto-backgrounded (cell ")
@@ -372,15 +384,14 @@ async fn stop_cell_stops_only_the_named_backgrounded_cell_then_runs_the_code() {
     };
     let dir = tempfile::tempdir().expect("temp dir");
     let go = dir.path().join("go");
-    let outcomes: Outcomes = std::sync::Arc::default();
-    let sink = std::sync::Arc::clone(&outcomes);
+    let (outcome_tx, mut outcome_rx) = tokio::sync::mpsc::unbounded_channel();
     let provisioner = KernelProvisioner::new(
         dir.path(),
         IpythonKernelProvisionerOptions {
             python: Some(kernel_python),
             cell_timeout_ms: Some(60_000),
             on_background_cell: Some(std::sync::Arc::new(move |outcome| {
-                sink.lock().unwrap().push(outcome);
+                let _ = outcome_tx.send(outcome);
             })),
             ..Default::default()
         },
@@ -392,27 +403,6 @@ async fn stop_cell_stops_only_the_named_backgrounded_cell_then_runs_the_code() {
             on_late_sent_agent_message: None,
         },
     );
-    let settled = |cell: &str| {
-        outcomes
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|outcome| outcome.cell_id == cell)
-            .map(|outcome| outcome.result.clone())
-    };
-    let wait_settled = |cell: String| async move {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            if let Some(result) = settled(&cell) {
-                return result;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "cell {cell} never settled"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    };
 
     repl_call(&tool, json!({ "code": "x = 41" })).await.unwrap();
     let awaiter = backgrounded_cell(
@@ -439,13 +429,12 @@ async fn stop_cell_stops_only_the_named_backgrounded_cell_then_runs_the_code() {
     .await
     .unwrap();
     assert_eq!(text.trim_end(), format!("Stopped cell '{blocker}'.\n42"));
-    assert!(
-        settled(&awaiter).is_none(),
-        "the awaiting cell kept running"
-    );
-    let stopped = wait_settled(blocker.clone()).await;
+    // The awaiting cell cannot settle before the release below, so the first
+    // completion is the stopped cell's.
+    let stopped = next_outcome(&mut outcome_rx).await;
+    assert_eq!(stopped.cell_id, blocker);
     assert_eq!(
-        stopped.error.map(|error| error.ename).as_deref(),
+        stopped.result.error.map(|error| error.ename).as_deref(),
         Some("KeyboardInterrupt")
     );
 
@@ -461,8 +450,16 @@ async fn stop_cell_stops_only_the_named_backgrounded_cell_then_runs_the_code() {
     );
 
     std::fs::write(&go, "").expect("release the awaiting cell");
-    let completion = wait_settled(awaiter).await;
-    assert!(completion.stdout.contains("awaiter done"), "{completion:?}");
+    let completion = next_outcome(&mut outcome_rx).await;
+    assert_eq!(completion.cell_id, awaiter);
+    assert_eq!(
+        completion.result.status,
+        pa_core::kernel::shared::ExecuteStatus::Ok
+    );
+    assert!(
+        completion.result.stdout.contains("awaiter done"),
+        "{completion:?}"
+    );
 
     let stubborn = backgrounded_cell(
         &repl_call(

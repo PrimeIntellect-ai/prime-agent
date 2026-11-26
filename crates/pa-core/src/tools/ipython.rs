@@ -576,7 +576,7 @@ pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -
                         ),
                     }),
                 };
-                let mut result = execute_ipython(
+                let result = execute_ipython(
                     &options,
                     &code,
                     timeout_arg_ms(&params),
@@ -584,10 +584,12 @@ pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -
                     on_update,
                     on_late_sent_agent_message,
                 )
-                .await?;
-                if let (Some(note), Some(ToolContentBlock::Text { text })) =
-                    (stop_note, result.content.first_mut())
-                {
+                .await;
+                let Some(note) = stop_note else {
+                    return result;
+                };
+                let mut result = result.map_err(|err| anyhow::anyhow!("{note}\n{err:#}"))?;
+                if let Some(ToolContentBlock::Text { text }) = result.content.first_mut() {
                     *text = if text.is_empty() {
                         note
                     } else {
