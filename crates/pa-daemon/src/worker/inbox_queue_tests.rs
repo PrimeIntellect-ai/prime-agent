@@ -564,7 +564,12 @@ fn live_inbox(worker: &Worker) -> (Vec<String>, Vec<String>) {
         .into_iter()
         .map(|message| message.class)
         .collect();
-    (classes, queued_arrival_covers(&worker.core.lock().unwrap()))
+    let covers = rows(worker)
+        .into_iter()
+        .find(|row| row.key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+        .map(|row| row.covers)
+        .unwrap_or_default();
+    (classes, covers)
 }
 
 /// `new_session` moves the waiting agent messages to the new session,
@@ -682,14 +687,14 @@ async fn a_switch_leaves_the_mail_with_its_session_until_it_reopens() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The covers ride the journaled row: a restored arrival row still knows
-/// its batch, so a clear after a restart takes exactly the unannounced
-/// agent messages, a pause takes none, and announced mail stays readable.
+/// A clear takes every waiting agent message, announced or not; a pause
+/// takes no inbox record at all.
 #[tokio::test]
-async fn a_clear_takes_only_the_unannounced_batch_even_after_a_restore() {
+async fn a_clear_takes_every_waiting_agent_message_and_a_pause_takes_none() {
     let fx = fixture();
     fx.worker.core.lock().unwrap().busy = true;
     assert!(deliver_agent_message(&fx.worker, "announced").await.success);
+    // The delivery: the turn runner pops the notice row off the lane.
     assert!(fx
         .worker
         .core
@@ -709,31 +714,22 @@ async fn a_clear_takes_only_the_unannounced_batch_even_after_a_restore() {
     fx.worker
         .dispatch("agent_messages_resume", &json!({}))
         .await;
-
-    let (steering, follow_up, _) = restore_queue_snapshot(
-        fx.worker.recovery.lock().unwrap().as_ref().unwrap(),
-        "target-session",
-    );
-    {
-        let mut core = fx.worker.core.lock().unwrap();
-        core.steering = steering;
-        core.follow_up = follow_up;
-    }
     let cleared = fx.worker.dispatch("agent_messages_clear", &json!({})).await;
     assert_eq!(
         cleared.data,
-        Some(json!({ "steering": ["[agent-message from peer-1]\n\nunannounced"], "followUp": [] })),
+        Some(json!({
+            "steering": [
+                "[agent-message from peer-1]\n\nannounced",
+                "[agent-message from peer-1]\n\nunannounced"
+            ],
+            "followUp": []
+        })),
+        "the clear takes every waiting agent message"
     );
-    let waiting: Vec<String> = fx
-        .inbox
-        .waiting_messages()
-        .into_iter()
-        .map(|message| message.text)
-        .collect();
-    assert_eq!(waiting, ["[agent-message from peer-1]\n\nannounced"]);
+    assert_eq!(fx.inbox.count().0, 0);
     assert!(
         rows(&fx.worker).is_empty(),
-        "the emptied batch drops its row"
+        "the emptied inbox drops its row"
     );
 }
 
@@ -1131,4 +1127,25 @@ fn the_wake_predicate_classifies_the_queued_rows() {
         .unwrap()
         .remove("wakesCell");
     assert!(row_wakes_a_cell(&item(Some(restored))));
+}
+
+/// An orphaned worker (its supervisor is lost) stores a kernel notice in
+/// the inbox without announcing it: no row, so no turn starts; the
+/// session's next open announces it.
+#[tokio::test]
+async fn an_orphaned_worker_stores_a_kernel_notice_unannounced() {
+    let fx = fixture();
+    fx.worker.core.lock().unwrap().supervisor_lost = true;
+    let sink = fx
+        .engine()
+        .kernel_notice_sink
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the worker's notice sink");
+    sink(crate::engine::KernelNotice::bash_completion(
+        4321, "make", 0,
+    ));
+    assert_eq!(fx.inbox.count().0, 1, "the notice waits in the inbox");
+    assert!(rows(&fx.worker).is_empty(), "nothing announces it");
 }

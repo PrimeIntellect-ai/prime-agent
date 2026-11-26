@@ -28,18 +28,6 @@ pub fn track_daemon_event_summary(
     client.track("daemon event", properties);
 }
 
-/// Track a deleted subagent's durable usage capture (`daemon event`, kind
-/// `deleted_child_usage_captured`): how many tombstoned edges received the usage amendment
-/// that keeps a deleted child's spend billable after its transcript goes. Source and count
-/// only, never the spend values.
-pub fn track_deleted_child_usage_captured(client: &TelemetryClient, source: &str, count: usize) {
-    let mut properties = base_properties("daemon");
-    properties.set("kind", Value::from("deleted_child_usage_captured"));
-    properties.set("source", Value::from(source));
-    properties.set("count", Value::from(count));
-    client.track("daemon event", properties);
-}
-
 /// Track a daemon model-allowlist refusal (`model refused`, schema v1): a daemon model
 /// resolution refused a model outside the settings `allowedModels` allowlist. Categories and
 /// surface only — never the refused selector, pattern content, or session payload.

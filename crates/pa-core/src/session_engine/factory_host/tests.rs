@@ -649,7 +649,7 @@ fn a_spec_without_declared_models_preflights_cleanly() {
 fn factory_activity_requests_validate_like_the_kernel_frame() {
     let parse =
         |action: &str, run_id: Option<&str>, spec_id: Option<&str>, timeout_ms: Option<u64>| {
-            FactoryActivityRequest::parse(action, run_id, spec_id, timeout_ms)
+            FactoryActivityRequest::parse(action, run_id, spec_id, timeout_ms, None, None)
         };
     // the happy shapes
     assert_eq!(
@@ -659,6 +659,7 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             run_id: None,
             spec_id: None,
             timeout_ms: None,
+            selector: None,
         }
     );
     assert_eq!(
@@ -679,6 +680,105 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             .as_deref(),
         Some("spec-1")
     );
+    assert_eq!(
+        parse("peek", None, None, None).unwrap(),
+        FactoryActivityRequest {
+            action: "peek",
+            run_id: None,
+            spec_id: None,
+            timeout_ms: None,
+            selector: None,
+        }
+    );
+    // the library action's target-free pair: the list takes no target,
+    // and the graph read names the machine through `specId` (never a
+    // `runId`, which the library never reads).
+    assert_eq!(
+        parse("library", None, None, None).unwrap(),
+        FactoryActivityRequest {
+            action: "library",
+            run_id: None,
+            spec_id: None,
+            timeout_ms: None,
+            selector: None,
+        }
+    );
+    assert_eq!(
+        parse("library", None, Some("pr-manager"), None)
+            .unwrap()
+            .spec_id
+            .as_deref(),
+        Some("pr-manager")
+    );
+    // the node view's read names the run and its state (`specId`).
+    assert_eq!(
+        parse("node", Some("run-1"), Some("review"), None).unwrap(),
+        FactoryActivityRequest {
+            action: "node",
+            run_id: Some("run-1".to_string()),
+            spec_id: Some("review".to_string()),
+            timeout_ms: None,
+            selector: None,
+        }
+    );
+    assert_eq!(
+        parse("node", None, Some("review"), None)
+            .unwrap_err()
+            .to_string(),
+        "factory activity node requires runId"
+    );
+    assert_eq!(
+        parse("node", Some("run-1"), None, None)
+            .unwrap_err()
+            .to_string(),
+        "factory activity node requires specId"
+    );
+    // the node selector: both values or neither, each a non-negative
+    // integer; a malformed value never narrows to "the latest instance".
+    let node = |entry: Option<serde_json::Value>, instance: Option<serde_json::Value>| {
+        FactoryActivityRequest::parse(
+            "node",
+            Some("run-1"),
+            Some("review"),
+            None,
+            entry.as_ref(),
+            instance.as_ref(),
+        )
+    };
+    assert_eq!(
+        node(Some(json!(0)), Some(json!(2))).unwrap().selector,
+        Some((0, 2))
+    );
+    assert_eq!(node(None, None).unwrap().selector, None);
+    for (entry, instance, error) in [
+        (
+            Some(json!(null)),
+            Some(json!(null)),
+            "factory activity node entry must be a non-negative integer",
+        ),
+        (
+            Some(json!("0")),
+            Some(json!(0)),
+            "factory activity node entry must be a non-negative integer",
+        ),
+        (
+            Some(json!(0)),
+            Some(json!(-1)),
+            "factory activity node instance must be a non-negative integer",
+        ),
+        (
+            Some(json!(0)),
+            None,
+            "factory activity node entry and instance selectors must be provided together",
+        ),
+        (
+            None,
+            Some(json!(0)),
+            "factory activity node entry and instance selectors must be provided together",
+        ),
+    ] {
+        assert_eq!(node(entry, instance).unwrap_err().to_string(), error);
+    }
     // unknown action
     assert_eq!(
         parse("bogus", None, None, None).unwrap_err().to_string(),
@@ -705,10 +805,565 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
         parse("run", None, None, None).unwrap_err().to_string(),
         "factory activity run requires specId"
     );
+    // peek takes no target: a targeted peek has no live claim behind it.
+    assert_eq!(
+        parse("peek", Some("run-1"), None, None)
+            .unwrap_err()
+            .to_string(),
+        "factory activity peek takes no runId or specId"
+    );
+    assert_eq!(
+        parse("peek", None, Some("spec-1"), None)
+            .unwrap_err()
+            .to_string(),
+        "factory activity peek takes no runId or specId"
+    );
     // the watch bound
     assert!(parse("watch", Some("r"), None, Some(60_000)).is_ok());
     let error = parse("watch", Some("r"), None, Some(60_001))
         .unwrap_err()
         .to_string();
     assert_eq!(error, "factory activity timeoutMs must be at most 60000");
+}
+
+/// `factory.compile` loads a machine directory with the shared Rust loader
+/// and answers the canonical spec, or every load problem in one error.
+#[tokio::test]
+async fn factory_compile_answers_the_spec_or_every_problem() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("hello");
+    std::fs::create_dir_all(machine_dir.join("prompts")).unwrap();
+    std::fs::write(
+        machine_dir.join("machine.toml"),
+        "format = 1\nname = \"hello\"\nversion = 1\ndescription = \"Say hello\"\n\n[params]\nwho = { type = \"text\" }\n\n[states.greet]\nentry = true\nagent = { prompt = \"prompts/greet.md\" }\noutputs = { line = \"text\" }\n",
+    )
+    .unwrap();
+    std::fs::write(machine_dir.join("prompts/greet.md"), "Greet {{who}}.\n").unwrap();
+    let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
+    super::register_factory_compile_host_handler(&mut handlers, dir.path());
+    let handler = handlers
+        .get(super::FACTORY_COMPILE_REQUEST_TYPE)
+        .unwrap()
+        .clone();
+    let call =
+        |data: serde_json::Value| handler(crate::kernel::shared::HostRequestPayload { data });
+
+    let reply =
+        call(json!({"path": machine_dir.display().to_string(), "params": {"who": "World"}}))
+            .await
+            .unwrap();
+    assert_eq!(
+        reply,
+        json!({
+            "name": "hello", "version": 1, "description": "Say hello", "author": null,
+            "spec": {
+                "run": {},
+                "params": {"who": "World"},
+                "states": [{
+                    "id": "greet", "entry": true,
+                    "subagent": {"prompt": "Greet {who}.\n\n## Outputs\n\nBefore you finish, hand back your outputs from your Python REPL:\n\n    await rlm.factory.emit(line=...)\n\n- `line`: text\n\nThe call checks every value and raises with the exact field when one is wrong; fix it and call again. Each call sets the outputs it names, and a later call replaces them. A file output takes a path, and the file is copied when you emit it."},
+                    "outputs": [{"name": "line", "type": "text"}],
+                    "emit": {"outputs": [{"name": "line", "type": "text"}], "records": {}},
+                }],
+                "transitions": [],
+            },
+            "path": machine_dir.display().to_string(),
+        })
+    );
+    let error = call(json!({"path": machine_dir.display().to_string()}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "{}: machine.toml: params.who: required: pass it when the live machine starts (who=text)",
+            machine_dir.display()
+        )
+    );
+}
+
+/// `factory.describe` resolves a library machine by name for the machines
+/// page's drill-in: a machine directory answers its template spec (param
+/// placeholders kept), its params and each state's files; a `MACHINE.md`
+/// answers its spec and one inline file per state.
+#[tokio::test]
+async fn factory_describe_answers_a_library_machine_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let machines = dir.path().join("machines");
+    let machine_dir = machines.join("hello-describe");
+    std::fs::create_dir_all(machine_dir.join("prompts")).unwrap();
+    std::fs::write(
+        machine_dir.join("machine.toml"),
+        "format = 1\nname = \"hello-describe\"\nversion = 1\ndescription = \"Say hello\"\n\n[params]\nwho = { type = \"text\" }\n\n[states.greet]\nentry = true\nagent = { prompt = \"prompts/greet.md\" }\n",
+    )
+    .unwrap();
+    std::fs::write(machine_dir.join("prompts/greet.md"), "Greet {{who}}.\n").unwrap();
+    std::fs::create_dir_all(machines.join("notes-describe")).unwrap();
+    std::fs::write(
+        machines.join("notes-describe/MACHINE.md"),
+        "---\nname: notes-describe\ndescription: Take notes.\nversion: 1\nauthor: Tester\n---\n\n```machine-spec\n{\"states\": [{\"id\": \"a\", \"entry\": true, \"subagent\": {\"prompt\": \"Write notes.\"}}], \"transitions\": []}\n```\n",
+    )
+    .unwrap();
+    let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
+    super::register_factory_compile_host_handler(&mut handlers, dir.path());
+    let describe = handlers
+        .get(super::FACTORY_DESCRIBE_REQUEST_TYPE)
+        .unwrap()
+        .clone();
+    let call = |name: &str| {
+        describe(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "name": name }),
+        })
+    };
+
+    let described = call("hello-describe").await.unwrap();
+    assert_eq!(
+        described["params"],
+        json!([{"name": "who", "type": "text"}])
+    );
+    assert_eq!(
+        (&described["files"], &described["state_files"]),
+        (
+            &json!([{"path": "prompts/greet.md", "text": "Greet {{who}}.\n"}]),
+            &json!([{"state": "greet", "paths": ["prompts/greet.md"]}])
+        )
+    );
+    assert_eq!(
+        described["spec"]["states"][0]["subagent"]["prompt"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .next(),
+        Some("Greet {who}.")
+    );
+    assert!(described["spec"].get("params").is_none());
+
+    let described = call("notes-describe").await.unwrap();
+    assert_eq!(described["spec"]["states"][0]["id"], json!("a"));
+    assert_eq!(
+        (&described["files"], &described["state_files"]),
+        (
+            &json!([{"path": "MACHINE.md \u{b7} a", "text": "Write notes."}]),
+            &json!([{"state": "a", "paths": ["MACHINE.md \u{b7} a"]}])
+        )
+    );
+
+    assert!(call("no-such-machine-describe").await.is_err());
+}
+
+/// A temp session dir, a cwd holding `DESIGN.md`, and the emit and check
+/// handlers registered for a contract with a file port and a record port.
+struct EmitFixture {
+    _dir: tempfile::TempDir,
+    session_dir: std::path::PathBuf,
+    cwd: std::path::PathBuf,
+    contract: serde_json::Value,
+    handlers: crate::kernel::shared::HostRequestHandlers,
+}
+
+impl EmitFixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session");
+        let cwd = dir.path().join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("DESIGN.md"), "# Design\n").unwrap();
+        let contract = json!({
+            "outputs": [
+                {"name": "design", "type": "file"},
+                {"name": "verdict", "type": "verdict"},
+            ],
+            "records": {"verdict": [["decision", "enum(approve, rework)"]]},
+            "inputs": {"task": "fix it", "plan": {"steps": 2}},
+        });
+        let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
+        super::register_factory_emit_host_handlers(
+            contract.clone(),
+            session_dir.clone(),
+            cwd.clone(),
+            &mut handlers,
+        );
+        super::register_factory_check_host_handler(&mut handlers);
+        Self {
+            _dir: dir,
+            session_dir,
+            cwd,
+            contract,
+            handlers,
+        }
+    }
+
+    async fn request(
+        &self,
+        request_type: &str,
+        data: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let handler = self.handlers.get(request_type).unwrap().clone();
+        handler(crate::kernel::shared::HostRequestPayload { data }).await
+    }
+
+    fn outputs_file(&self) -> std::path::PathBuf {
+        self.session_dir.join(super::FACTORY_OUTPUTS_FILE)
+    }
+
+    fn written(&self) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(self.outputs_file()).unwrap()).unwrap()
+    }
+}
+
+/// A valid emit is accepted: the file port is copied beside the session,
+/// each call merges into the outputs file, and the reply names the
+/// required ports still owed.
+#[tokio::test]
+async fn a_valid_emit_merges_into_the_outputs_file_and_copies_file_ports() {
+    let fixture = EmitFixture::new();
+    assert_eq!(
+        fixture
+            .request("factory.emit", json!({"outputs": {"design": "DESIGN.md"}}))
+            .await
+            .unwrap(),
+        json!({"accepted": ["design"], "missing": ["verdict"]})
+    );
+    let copy = std::path::PathBuf::from(fixture.written()["design"].as_str().unwrap());
+    assert!(copy.starts_with(fixture.session_dir.join("factory-files/design")));
+    assert_eq!(copy.file_name().unwrap(), "DESIGN.md");
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), "# Design\n");
+    assert_eq!(
+        fixture
+            .request(
+                "factory.emit",
+                json!({"outputs": {"verdict": {"decision": "approve"}}})
+            )
+            .await
+            .unwrap(),
+        json!({"accepted": ["verdict"], "missing": []})
+    );
+    assert_eq!(
+        fixture.written(),
+        json!({"design": copy.display().to_string(), "verdict": {"decision": "approve"}})
+    );
+}
+
+/// A wrong-typed value fails with its exact field path, in `factory.emit`
+/// and in the `factory.check` a python state's outputs pass through.
+#[tokio::test]
+async fn a_wrong_typed_emit_names_the_exact_field() {
+    let fixture = EmitFixture::new();
+    let wrong = json!({"verdict": {"decision": "ship"}});
+    let expected = "verdict.decision: \"ship\" is not one of approve, rework";
+    let error = fixture
+        .request("factory.emit", json!({"outputs": wrong}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), expected);
+    let error = fixture
+        .request(
+            "factory.check",
+            json!({"contract": fixture.contract, "outputs": wrong}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), expected);
+}
+
+/// A python state's outputs go through `factory.check`, which refuses a
+/// `file` port: only an agent child's `factory.emit` copies a file.
+#[tokio::test]
+async fn a_python_output_check_refuses_a_file_port() {
+    let fixture = EmitFixture::new();
+    let error = fixture
+        .request(
+            "factory.check",
+            json!({"contract": fixture.contract, "outputs": {"design": "DESIGN.md"}}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "design: a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session"
+    );
+}
+
+/// One bad port refuses the whole emit: the valid port in the same call
+/// is not kept, no file is copied, and the ports accepted before stay
+/// exactly as they were.
+#[tokio::test]
+async fn a_refused_emit_writes_nothing() {
+    let fixture = EmitFixture::new();
+    fixture
+        .request(
+            "factory.emit",
+            json!({"outputs": {"verdict": {"decision": "rework"}}}),
+        )
+        .await
+        .unwrap();
+    let before = std::fs::read(fixture.outputs_file()).unwrap();
+    let error = fixture
+        .request(
+            "factory.emit",
+            json!({"outputs": {"verdict": {"decision": "approve"}, "design": "MISSING.md"}}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "design: cannot read {}: No such file or directory (os error 2)",
+            fixture.cwd.join("MISSING.md").display()
+        )
+    );
+    assert_eq!(std::fs::read(fixture.outputs_file()).unwrap(), before);
+    assert!(!fixture.session_dir.join(super::FACTORY_FILES_DIR).exists());
+}
+
+/// A relative file port resolves against the directory the kernel was in
+/// at the emit, not the session's cwd from when the engine was built.
+#[tokio::test]
+async fn a_relative_file_port_resolves_against_the_emit_cwd() {
+    let fixture = EmitFixture::new();
+    let moved = fixture.cwd.join("moved");
+    std::fs::create_dir_all(&moved).unwrap();
+    std::fs::write(moved.join("PLAN.md"), "# Plan\n").unwrap();
+    fixture
+        .request(
+            "factory.emit",
+            json!({"outputs": {"design": "PLAN.md"}, "cwd": moved.display().to_string()}),
+        )
+        .await
+        .unwrap();
+    let copy = fixture.written()["design"].as_str().unwrap().to_string();
+    assert_eq!(std::fs::read_to_string(copy).unwrap(), "# Plan\n");
+}
+
+/// `factory.inputs` answers the values bound into the child's contract.
+#[tokio::test]
+async fn factory_inputs_answers_the_bound_inputs() {
+    let fixture = EmitFixture::new();
+    assert_eq!(
+        fixture.request("factory.inputs", json!({})).await.unwrap(),
+        json!({"inputs": {"task": "fix it", "plan": {"steps": 2}}})
+    );
+}
+
+/// Two emits at the same time both merge: the read-merge-write is one
+/// critical section per session dir, so neither call loses the ports of
+/// the other. A corrupt outputs file refuses instead of silently resetting
+/// every port that was accepted before.
+#[test]
+fn concurrent_emits_merge_and_a_corrupt_file_refuses() {
+    let fixture = EmitFixture::new();
+    let emits: Vec<_> = [
+        json!({"design": "DESIGN.md"}),
+        json!({"verdict": {"decision": "approve"}}),
+    ]
+    .into_iter()
+    .map(|outputs| {
+        let (contract, session_dir, cwd) = (
+            fixture.contract.clone(),
+            fixture.session_dir.clone(),
+            fixture.cwd.clone(),
+        );
+        std::thread::spawn(move || {
+            super::emit_outputs(&contract, &session_dir, &cwd, &json!({"outputs": outputs}))
+        })
+    })
+    .collect();
+    for emit in emits {
+        emit.join().unwrap().unwrap();
+    }
+    let mut ports: Vec<String> = fixture
+        .written()
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    ports.sort();
+    assert_eq!(ports, ["design", "verdict"]);
+
+    // A corrupt outputs file refuses: the earlier ports were NOT reset.
+    std::fs::write(fixture.outputs_file(), b"{ not json").unwrap();
+    let error = super::emit_outputs(
+        &fixture.contract,
+        &fixture.session_dir,
+        &fixture.cwd,
+        &json!({"outputs": {"verdict": {"decision": "approve"}}}),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("factory-outputs.json is not readable"),
+        "the corrupt file must refuse loudly: {error}"
+    );
+    assert_eq!(
+        std::fs::read(fixture.outputs_file()).unwrap(),
+        b"{ not json"
+    );
+}
+
+/// The bytes the committed outputs file references for `port`.
+fn committed_bytes(session_dir: &Path, port: &str) -> String {
+    let outputs: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(session_dir.join(super::FACTORY_OUTPUTS_FILE)).unwrap(),
+    )
+    .unwrap();
+    std::fs::read_to_string(outputs[port].as_str().unwrap()).unwrap()
+}
+
+/// An emit that fails after copying one file port leaves the committed
+/// outputs file and the bytes it references exactly as they were, and
+/// removes the copy it staged.
+#[test]
+fn an_emit_that_fails_after_staging_keeps_the_committed_outputs_and_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let (session_dir, cwd) = (dir.path().join("session"), dir.path().join("work"));
+    std::fs::create_dir_all(&cwd).unwrap();
+    let contract = json!({"outputs": [
+        {"name": "design", "type": "file"},
+        {"name": "notes", "type": "file"},
+    ]});
+    let emit = |outputs: serde_json::Value| {
+        super::emit_outputs(&contract, &session_dir, &cwd, &json!({"outputs": outputs}))
+    };
+    std::fs::write(cwd.join("DESIGN.md"), "first").unwrap();
+    std::fs::write(cwd.join("NOTES.md"), "notes").unwrap();
+    emit(json!({"design": "DESIGN.md"})).unwrap();
+    let before = std::fs::read(session_dir.join(super::FACTORY_OUTPUTS_FILE)).unwrap();
+    // `design` stages fine; `notes` cannot create its directory.
+    let files_dir = session_dir.join(super::FACTORY_FILES_DIR);
+    std::fs::write(files_dir.join("notes"), "in the way").unwrap();
+    std::fs::write(cwd.join("DESIGN.md"), "second").unwrap();
+    emit(json!({"design": "DESIGN.md", "notes": "NOTES.md"})).unwrap_err();
+    assert_eq!(
+        std::fs::read(session_dir.join(super::FACTORY_OUTPUTS_FILE)).unwrap(),
+        before
+    );
+    assert_eq!(committed_bytes(&session_dir, "design"), "first");
+    assert_eq!(
+        std::fs::read_dir(files_dir.join("design")).unwrap().count(),
+        1
+    );
+}
+
+/// Two emits of the same file port at the same time, from files with the
+/// same name: the committed outputs pair each call's value with that
+/// call's own bytes, and only the winner's copy is kept.
+#[test]
+fn concurrent_emits_of_one_file_port_commit_one_calls_bytes() {
+    for _ in 0..20 {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session");
+        let contract = json!({
+            "outputs": [
+                {"name": "design", "type": "file"},
+                {"name": "verdict", "type": "verdict"},
+            ],
+            "records": {"verdict": [["decision", "enum(approve, rework)"]]},
+        });
+        let emits: Vec<_> = ["approve", "rework"]
+            .into_iter()
+            .map(|decision| {
+                let cwd = dir.path().join(decision);
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::write(cwd.join("DESIGN.md"), decision).unwrap();
+                let (contract, session_dir) = (contract.clone(), session_dir.clone());
+                std::thread::spawn(move || {
+                    let outputs = json!({"design": "DESIGN.md", "verdict": {"decision": decision}});
+                    super::emit_outputs(&contract, &session_dir, &cwd, &json!({"outputs": outputs}))
+                })
+            })
+            .collect();
+        for emit in emits {
+            emit.join().unwrap().unwrap();
+        }
+        let outputs: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(session_dir.join(super::FACTORY_OUTPUTS_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            committed_bytes(&session_dir, "design"),
+            outputs["verdict"]["decision"].as_str().unwrap()
+        );
+        let copies = session_dir.join(super::FACTORY_FILES_DIR).join("design");
+        assert_eq!(std::fs::read_dir(copies).unwrap().count(), 1);
+    }
+}
+
+/// A name resolves through the one library scan: a directory compiles, a
+/// MACHINE.md answers its spec and refuses params, a broken or missing name
+/// says so.
+#[test]
+fn factory_compile_resolves_names_through_the_library_scan() {
+    let repo = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let dir = repo.path().join("hello");
+    std::fs::create_dir_all(dir.join("prompts")).unwrap();
+    std::fs::write(
+        dir.join("machine.toml"),
+        "format = 1\nname = \"hello\"\nversion = 1\ndescription = \"Say hello\"\n\n[states.greet]\nentry = true\nagent = { prompt = \"prompts/greet.md\" }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("prompts/greet.md"), "Greet.\n").unwrap();
+    std::fs::create_dir_all(user.path().join("sweep")).unwrap();
+    let md = user.path().join("sweep/MACHINE.md");
+    std::fs::write(
+        &md,
+        "---\nname: sweep\ndescription: Sweep.\n---\n```machine-spec\n{\"states\": [{\"id\": \"a\", \"entry\": true, \"subagent\": {\"prompt\": \"Go.\"}}]}\n```\n",
+    )
+    .unwrap();
+    let levels = [
+        pa_factory::Level {
+            source: "repo".to_string(),
+            dir: repo.path().to_path_buf(),
+        },
+        pa_factory::Level {
+            source: "user".to_string(),
+            dir: user.path().to_path_buf(),
+        },
+    ];
+    let compiled = super::compile_machine(&json!({"name": "hello"}), &levels).unwrap();
+    assert_eq!(compiled["path"], dir.display().to_string());
+    assert_eq!(compiled["spec"]["states"][0]["id"], "greet");
+    let file = super::compile_machine(&json!({"name": "sweep"}), &levels).unwrap();
+    assert_eq!(file["path"], md.display().to_string());
+    assert_eq!(file["spec"]["states"][0]["subagent"]["prompt"], "Go.");
+    assert!(
+        super::compile_machine(&json!({"name": "sweep", "params": {"x": 1}}), &levels)
+            .unwrap_err()
+            .to_string()
+            .starts_with("params apply to machine directories")
+    );
+    assert_eq!(
+        super::compile_machine(&json!({"name": "absent"}), &levels)
+            .unwrap_err()
+            .to_string(),
+        "no library machine named \"absent\" (machines: hello, sweep)"
+    );
+}
+
+/// `factory.limits` answers the `max_transitions` bound for a spec inside
+/// the limits, else every bound it breaks.
+#[tokio::test]
+async fn factory_limits_checks_a_stored_spec() {
+    let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
+    super::register_factory_compile_host_handler(&mut handlers, Path::new("/nonexistent"));
+    let handler = handlers
+        .get(super::FACTORY_LIMITS_REQUEST_TYPE)
+        .unwrap()
+        .clone();
+    let call =
+        |data: serde_json::Value| handler(crate::kernel::shared::HostRequestPayload { data });
+    assert_eq!(
+        call(json!({"spec": {"run": {"max_parallel": 4}, "states": []}}))
+            .await
+            .unwrap(),
+        json!({"max_transitions": 10_000})
+    );
+    assert_eq!(
+        call(json!({"spec": {"run": {"max_parallel": 65}, "states": [{"id": "a", "retries": 11}]}}))
+            .await
+            .unwrap_err()
+            .to_string(),
+        "run max_parallel must be an integer between 1 and 64; state a retries must be an integer between 0 and 10"
+    );
 }

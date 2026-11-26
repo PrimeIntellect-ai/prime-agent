@@ -86,14 +86,14 @@ impl ExportCommands {
             )
         };
         // The tools read comes first: an absent session builds here (the TS state
-        // exists from create), so the best-effort prompt read below then sees it too.
+        // exists from create), so the prompt read below then sees it too.
         let tools = self.engine.export_tools().await;
         let rendered_tools = self.engine.export_rendered_tools(&entries).await;
         let data = pa_core::export_html::SessionExportData {
             header,
             entries,
             leaf_id,
-            system_prompt: self.engine.export_system_prompt(),
+            system_prompt: self.engine.export_system_prompt().await,
             tools,
             rendered_tools,
         };

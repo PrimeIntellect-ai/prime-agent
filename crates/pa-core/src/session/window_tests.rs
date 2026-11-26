@@ -761,8 +761,7 @@ fn detached_window_serves_lookups_but_not_its_own_context() {
     let _ = window.context();
 }
 
-/// Post-adoption live appends — including an attribution whose target is
-/// a RETAINED assistant — must match what a cold reopen serves.
+/// Post-adoption live appends must match what a cold reopen serves.
 #[tokio::test]
 async fn adopted_manager_live_appends_match_full_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -801,31 +800,6 @@ async fn adopted_manager_live_appends_match_full_reopen() {
             },
         ))
         .unwrap();
-    // A live attribution whose target sits INSIDE the retained window:
-    // the manager folds its own copy (the detached window has none).
-    manager
-        .append_child_usage_attribution(
-            "attr-1",
-            "a1",
-            pa_types::ai::Usage {
-                input: 5,
-                output: 1,
-                cache_read: 0,
-                cache_write: 0,
-                total_tokens: 6,
-                cost: pa_types::ai::UsageCost::default(),
-            },
-            pa_types::ai::Usage {
-                input: 15,
-                output: 3,
-                cache_read: 0,
-                cache_write: 0,
-                total_tokens: 18,
-                cost: pa_types::ai::UsageCost::default(),
-            },
-            None,
-        )
-        .unwrap();
     let live = manager.active_context();
     let reopened = super::super::manager::SessionManager::open(dir.path(), dir.path(), &path);
     let reopened_ctx = reopened.active_context();
@@ -846,13 +820,6 @@ async fn adopted_manager_live_appends_match_full_reopen() {
     assert_eq!(
         live_bytes, reopened_bytes,
         "post-adopt live appends diverged from the full reader's reopen"
-    );
-    // The folded aggregate is visible in both (assignment, not merge).
-    assert!(
-        live.messages.iter().any(|m| matches!(m,
-            pa_types::session::AgentMessage::Assistant(a)
-                if a.usage.input == 15 && a.usage.output == 3)),
-        "the live attribution fold did not reach the served context"
     );
 }
 

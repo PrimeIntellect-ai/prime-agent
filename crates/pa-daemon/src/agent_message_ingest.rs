@@ -96,8 +96,8 @@ impl Worker {
         )
     }
 
-    /// `agent_messages_clear`: drop queued agent-message items, answer the TS shape (removed
-    /// prompts per lane).
+    /// `agent_messages_clear`: drop queued agent-message items and every waiting inbox agent
+    /// message, answer the TS shape (removed prompts per lane).
     pub(crate) fn handle_agent_messages_clear(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("agent_messages_clear") {
             return response;
@@ -122,9 +122,9 @@ impl Worker {
     }
 
     /// Remove the queued agent-message items from both lanes (never
-    /// client-queued prompts) and, when asked, the inbox's not-yet-announced
-    /// agent messages, in the `{ steering, followUp }` shape.
-    fn clear_queued_agent_messages(&self, withdraw_unannounced_inbox: bool) -> Value {
+    /// client-queued prompts) and, when asked, the inbox's waiting agent
+    /// messages, in the `{ steering, followUp }` shape.
+    fn clear_queued_agent_messages(&self, withdraw_inbox: bool) -> Value {
         let mut core = self.core.lock().unwrap();
         let mut steering = Vec::new();
         let mut follow_up = Vec::new();
@@ -145,33 +145,32 @@ impl Worker {
         }
         core.follow_up = retained_follow_up;
         drop(core);
-        // The inbox-routed deliveries: only the not-yet-announced batch
-        // leaves the store (a clear that reports the messages gone must
-        // take them out of `rlm.inbox.read()`) — the agent messages the
-        // queued arrival row covers. A delivered notice already told the
-        // agent about the rest, so they stay readable. A pause blocks new
+        // The inbox-routed deliveries: every waiting agent message leaves
+        // the store (a clear that reports the messages gone must take them
+        // out of `rlm.inbox.read()`), announced or not, and the wake rows
+        // that referred to them refresh over what is left (an emptied
+        // inbox leaves no stale notice or reminder). The router runs the
+        // withdraw and the refresh under the same core lock as the
+        // admission, so a delivery that raced the clear either lands before
+        // it (and leaves) or waits for it (and stays). A pause blocks new
         // deliveries only: accepted inbox records keep their success
         // receipts.
         let mut withdrawn_texts = Vec::new();
         let mut wake_on_follow_up = false;
-        if let Some(router) = self
-            .inbox_router
-            .as_ref()
-            .filter(|_| withdraw_unannounced_inbox)
-        {
+        if let Some(router) = self.inbox_router.as_ref().filter(|_| withdraw_inbox) {
             router.withdraw(|core, inbox| {
                 // The batch rides ONE wake row, so the row's lane is the
-                // withdrawn prompts' lane in the reply.
+                // withdrawn prompts' lane in the reply; no row means older
+                // unread records only, and they follow the delivery default
+                // (steering).
                 wake_on_follow_up = core.follow_up.iter().any(|item| {
                     item.queue_key.as_deref() == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
                 });
-                let covers = crate::worker::queued_arrival_covers(core);
                 let ids = inbox
                     .waiting_messages()
                     .into_iter()
                     .filter(|message| {
                         message.class == pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE
-                            && covers.contains(&message.id)
                     })
                     .map(|message| message.id)
                     .collect();

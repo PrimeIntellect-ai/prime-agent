@@ -162,6 +162,23 @@ impl InboxRouter {
         })
     }
 
+    /// Store one notice in the session's inbox without announcing it: an
+    /// orphaned worker (its supervisor is lost) starts no turn, and the
+    /// session's next open announces what waits. Runs whatever
+    /// `agentInbox.enabled` says, so the notice is never dropped. Returns
+    /// whether the notice was stored.
+    pub(crate) fn store_unannounced(&self, notice: InboxNotice) -> bool {
+        let Some(engine) = self.engine.upgrade() else {
+            return false;
+        };
+        let _core = self.core.lock().unwrap();
+        let Some(inbox) = engine.inbox() else {
+            return false;
+        };
+        inbox.push(notice, pa_core::autonomous::now_millis());
+        true
+    }
+
     /// Run one inbox admission: `f` gets the locked core, the session's
     /// store, and whether the session is closing, and answers its result
     /// and whether it queued or changed a row (which checkpoints the

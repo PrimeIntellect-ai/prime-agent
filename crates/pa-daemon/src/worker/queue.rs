@@ -627,7 +627,7 @@ fn covers_of(item: &QueuedItem) -> Vec<String> {
 
 /// The ids the queued arrival row announces: the messages the agent was
 /// not told about yet. Empty when no arrival row is queued.
-pub(crate) fn queued_arrival_covers(core: &SessionCore) -> Vec<String> {
+fn queued_arrival_covers(core: &SessionCore) -> Vec<String> {
     core.steering
         .iter()
         .chain(core.follow_up.iter())
