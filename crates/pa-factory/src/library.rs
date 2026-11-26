@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::spec::check_spec;
 use crate::load::{load_machine_dir, MACHINE_FILE};
+use crate::spec::check_spec;
 
 /// The v1 machine file inside a library folder.
 pub const MACHINE_MD_FILE: &str = "MACHINE.md";

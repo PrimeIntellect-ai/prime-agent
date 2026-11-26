@@ -158,7 +158,12 @@ fn a_name_belongs_to_the_first_folder_that_claims_it() {
 #[test]
 fn a_structurally_invalid_machine_md_is_a_warning_not_a_machine() {
     let user = tempfile::tempdir().unwrap();
-    write_md_machine(user.path(), "lost", "lost", r#"{"states": [{"id": "a", "entry": true}]}"#);
+    write_md_machine(
+        user.path(),
+        "lost",
+        "lost",
+        r#"{"states": [{"id": "a", "entry": true}]}"#,
+    );
     let library = scan_library(&[Level {
         source: "user".to_string(),
         dir: user.path().to_path_buf(),

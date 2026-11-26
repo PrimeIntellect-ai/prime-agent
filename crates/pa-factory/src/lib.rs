@@ -27,12 +27,12 @@ pub use compile::{compile, compile_template};
 pub use convert::{convert_spec, DirFile, MachineMeta};
 pub use emit::Contract;
 pub use library::{
-    machine_description_errors, machine_name_errors, read_machine_md, scan_library, Level,
-    Library, LibraryMachine, MachineKind, MachineMd, MACHINE_MD_FILE,
+    machine_description_errors, machine_name_errors, read_machine_md, scan_library, Level, Library,
+    LibraryMachine, MachineKind, MachineMd, MACHINE_MD_FILE,
 };
 pub use load::{load_machine_dir, CONTEXT_FILE, MACHINE_FILE};
-pub use spec::check_spec;
 pub use machine::{
     Agent, Diagnostic, FailurePolicy, Foreach, Input, Machine, Output, Param, PythonCall, Route,
     Rubric, RubricRule, RunSettings, State, Work, FORMAT_VERSION,
 };
+pub use spec::check_spec;

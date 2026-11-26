@@ -5,6 +5,7 @@
 //! `repr`), so they read the same in every surface.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt::Write as _;
 
 use serde_json::{Map, Value};
 
@@ -77,13 +78,19 @@ pub fn py_repr(value: &Value) -> String {
 fn py_float(float: f64) -> String {
     let text = format!("{float:?}");
     match text.split_once('e') {
-        Some((mantissa, exponent)) if !exponent.starts_with('-') => format!("{mantissa}e+{exponent}"),
+        Some((mantissa, exponent)) if !exponent.starts_with('-') => {
+            format!("{mantissa}e+{exponent}")
+        }
         _ => text,
     }
 }
 
 fn py_str(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') { '"' } else { '\'' };
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
     let mut out = String::with_capacity(text.len() + 2);
     out.push(quote);
     for c in text.chars() {
@@ -97,7 +104,7 @@ fn py_str(text: &str) -> String {
                 out.push(c);
             }
             c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
+                let _ = write!(out, "\\x{:02x}", c as u32);
             }
             c => out.push(c),
         }
@@ -109,12 +116,18 @@ fn py_str(text: &str) -> String {
 fn str_list(items: &[&str]) -> String {
     format!(
         "[{}]",
-        items.iter().map(|item| py_str(item)).collect::<Vec<_>>().join(", ")
+        items
+            .iter()
+            .map(|item| py_str(item))
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
 
 fn nonempty_str(value: Option<&Value>) -> Option<&str> {
-    value.and_then(Value::as_str).filter(|text| !text.is_empty())
+    value
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
 }
 
 fn is_int(value: Option<&Value>) -> bool {
@@ -135,7 +148,7 @@ fn is_scalar(value: Option<&Value>) -> bool {
 
 fn truthy(value: Option<&Value>) -> bool {
     match value {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        None | Some(Value::Null | Value::Bool(false)) => false,
         Some(Value::Bool(true)) => true,
         Some(Value::Number(number)) => number.as_f64().is_some_and(|value| value != 0.0),
         Some(Value::String(text)) => !text.is_empty(),
@@ -167,7 +180,9 @@ fn valid_param_name(name: &str) -> bool {
 }
 
 fn port_list<'a>(node: &'a Map<String, Value>, key: &str) -> &'a [Value] {
-    node.get(key).and_then(Value::as_array).map_or(&[], Vec::as_slice)
+    node.get(key)
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
 }
 
 /// Port name to type for the well-formed entries of a port list.
@@ -233,7 +248,10 @@ fn check_run_fields(run: Option<&Map<String, Value>>, errors: &mut Vec<String>) 
 }
 
 /// Field rules shared by dag nodes (`noun` "node") and machine states.
-#[expect(clippy::too_many_lines, reason = "one block per state field, in the runtime's order")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one block per state field, in the runtime's order"
+)]
 fn check_state_fields(
     state: &Map<String, Value>,
     run_budget: Option<u64>,
@@ -294,10 +312,10 @@ fn check_state_fields(
     } else if nonempty_str(subagent).is_some() {
         // A harness subagent entry id or title, resolved at run time.
     } else if let Some(inline) = subagent.and_then(Value::as_object) {
-        if !inline
+        if inline
             .get("prompt")
             .and_then(Value::as_str)
-            .is_some_and(|prompt| !prompt.trim().is_empty())
+            .is_none_or(|prompt| prompt.trim().is_empty())
         {
             errors.push(format!(
                 "{noun} {id} inline subagent requires a non-empty prompt"
@@ -415,7 +433,10 @@ fn check_state_fields(
             ));
         }
     }
-    if state.get("inputs").is_some_and(|inputs| !inputs.is_null() && !inputs.is_array()) {
+    if state
+        .get("inputs")
+        .is_some_and(|inputs| !inputs.is_null() && !inputs.is_array())
+    {
         errors.push(format!("{noun} {id} inputs must be a list"));
     }
     let mut seen_inputs = HashSet::new();
@@ -427,7 +448,10 @@ fn check_state_fields(
         };
         let name = input.get("name");
         let name_repr = repr_opt(name);
-        if input.get("optional").is_some_and(|optional| !optional.is_null() && !optional.is_boolean()) {
+        if input
+            .get("optional")
+            .is_some_and(|optional| !optional.is_null() && !optional.is_boolean())
+        {
             errors.push(format!(
                 "{noun} {id} input {name_repr} optional must be a boolean when provided"
             ));
@@ -446,7 +470,10 @@ fn check_state_fields(
             }
             Some(_) => {}
         }
-        let port_type = input.get("type").and_then(Value::as_str).filter(|port_type| PORT_TYPES.contains(port_type));
+        let port_type = input
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|port_type| PORT_TYPES.contains(port_type));
         if port_type.is_none() {
             errors.push(format!(
                 "{noun} {id} input {name_repr} type must be 'text' or 'json'"
@@ -553,7 +580,10 @@ fn check_guard(when: &Value, index: usize, src: &Map<String, Value>, errors: &mu
             }
         },
     }
-    let op = when.get("op").and_then(Value::as_str).filter(|op| GUARD_OPS.contains(op));
+    let op = when
+        .get("op")
+        .and_then(Value::as_str)
+        .filter(|op| GUARD_OPS.contains(op));
     let Some(op) = op else {
         errors.push(format!(
             "transitions[{index}] when.op must be one of {}, got {}",
@@ -571,7 +601,7 @@ fn check_guard(when: &Value, index: usize, src: &Map<String, Value>, errors: &mu
             "transitions[{index}] when.op {} requires a numeric value",
             py_str(op)
         )),
-        "contains" if !value.and_then(Value::as_array).is_some_and(|items| !items.is_empty()) => {
+        "contains" if value.and_then(Value::as_array).is_none_or(Vec::is_empty) => {
             errors.push(format!(
                 "transitions[{index}] when.op 'contains' requires a non-empty list value"
             ));
@@ -582,7 +612,7 @@ fn check_guard(when: &Value, index: usize, src: &Map<String, Value>, errors: &mu
         )),
         _ => {}
     }
-    if !value.map_or(true, |value| value_is_finite(value, 0)) {
+    if !value.is_none_or(|value| value_is_finite(value, 0)) {
         errors.push(format!(
             "transitions[{index}] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than {MAX_GUARD_VALUE_DEPTH} levels)"
         ));
@@ -592,7 +622,10 @@ fn check_guard(when: &Value, index: usize, src: &Map<String, Value>, errors: &mu
 /// True when `candidate` is a spawn label `base` can produce: `base-i<n>`
 /// (n >= 1) and `base-a<n>` (n >= 2) parts.
 fn suffixed_spawn_form(base: &str, candidate: &str) -> bool {
-    let Some(remainder) = candidate.strip_prefix(base).and_then(|rest| rest.strip_prefix('-')) else {
+    let Some(remainder) = candidate
+        .strip_prefix(base)
+        .and_then(|rest| rest.strip_prefix('-'))
+    else {
         return false;
     };
     remainder.split('-').all(|part| {
@@ -642,7 +675,10 @@ fn states_by_id<'a>(
     states
 }
 
-#[expect(clippy::too_many_lines, reason = "the machine rules in the runtime's order")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the machine rules in the runtime's order"
+)]
 fn check_machine(machine: &Value) -> Vec<String> {
     let Some(machine) = machine.as_object() else {
         return vec!["factory machine must be a JSON object".to_string()];
@@ -661,7 +697,9 @@ fn check_machine(machine: &Value) -> Vec<String> {
         Some(Value::Object(params)) if params.keys().all(|key| valid_param_name(key)) => {
             param_names = params.keys().cloned().collect();
         }
-        Some(_) => errors.push("params must be an object keyed by lowercase identifiers".to_string()),
+        Some(_) => {
+            errors.push("params must be an object keyed by lowercase identifiers".to_string());
+        }
     }
     let Some(states) = machine.get("states").and_then(Value::as_array) else {
         errors.push("factory machine requires a states list".to_string());
@@ -676,7 +714,11 @@ fn check_machine(machine: &Value) -> Vec<String> {
     for (state_id, state) in &by_id {
         check_state_fields(state, run_budget, &by_id, "state", &mut errors);
         for input in port_list(state, "inputs") {
-            if let Some(name) = input.get("name").and_then(Value::as_str).filter(|name| param_names.contains(*name)) {
+            if let Some(name) = input
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| param_names.contains(*name))
+            {
                 errors.push(format!(
                     "state {state_id} input {} is also a param; rename the input",
                     py_str(name)
@@ -695,11 +737,15 @@ fn check_machine(machine: &Value) -> Vec<String> {
                     .find(|(seen, _)| seen == key)
                     .map(|(_, owner)| owner.clone())
             };
-            let base_seen = seen_names.iter().find(|(seen, _)| suffixed_spawn_form(seen, name));
+            let base_seen = seen_names
+                .iter()
+                .find(|(seen, _)| suffixed_spawn_form(seen, name));
             let base_current = if base_seen.is_some() {
                 None
             } else {
-                seen_names.iter().find(|(seen, _)| suffixed_spawn_form(name, seen))
+                seen_names
+                    .iter()
+                    .find(|(seen, _)| suffixed_spawn_form(name, seen))
             };
             if let Some(owner) = configured(name) {
                 errors.push(format!(
@@ -733,7 +779,9 @@ fn check_machine(machine: &Value) -> Vec<String> {
             errors.push(format!("state {state_id} entry must be a boolean"));
         }
         for input in port_list(state, "inputs") {
-            let Some(input) = input.as_object() else { continue };
+            let Some(input) = input.as_object() else {
+                continue;
+            };
             if truthy(input.get("optional")) {
                 continue;
             }
@@ -757,7 +805,11 @@ fn check_machine(machine: &Value) -> Vec<String> {
             }
         }
     }
-    if !by_id.is_empty() && !by_id.iter().any(|(_, state)| state.get("entry") == Some(&Value::Bool(true))) {
+    if !by_id.is_empty()
+        && !by_id
+            .iter()
+            .any(|(_, state)| state.get("entry") == Some(&Value::Bool(true)))
+    {
         errors.push("factory machine requires at least one entry state".to_string());
     }
     let transitions = match machine.get("transitions") {
@@ -768,7 +820,12 @@ fn check_machine(machine: &Value) -> Vec<String> {
             return errors;
         }
     };
-    let lookup = |id: &str| by_id.iter().find(|(state_id, _)| state_id == id).map(|(_, state)| *state);
+    let lookup = |id: &str| {
+        by_id
+            .iter()
+            .find(|(state_id, _)| state_id == id)
+            .map(|(_, state)| *state)
+    };
     for (index, transition) in transitions.iter().enumerate() {
         let Some(transition) = transition.as_object() else {
             errors.push(format!("transitions[{index}] must be an object"));
@@ -777,9 +834,12 @@ fn check_machine(machine: &Value) -> Vec<String> {
         let mut sources: Vec<&str> = Vec::new();
         match transition.get("from") {
             Some(Value::Array(items)) => {
-                let names: Vec<Option<&str>> = items.iter().map(|item| nonempty_str(Some(item))).collect();
+                let names: Vec<Option<&str>> =
+                    items.iter().map(|item| nonempty_str(Some(item))).collect();
                 if items.is_empty() {
-                    errors.push(format!("transitions[{index}] from must name at least one state"));
+                    errors.push(format!(
+                        "transitions[{index}] from must name at least one state"
+                    ));
                 } else if names.iter().any(Option::is_none) {
                     errors.push(format!(
                         "transitions[{index}] from entries must be non-empty state id strings"
@@ -796,7 +856,10 @@ fn check_machine(machine: &Value) -> Vec<String> {
                         ));
                     }
                 }
-                sources = items.iter().filter_map(|item| nonempty_str(Some(item))).collect();
+                sources = items
+                    .iter()
+                    .filter_map(|item| nonempty_str(Some(item)))
+                    .collect();
                 if transition.get("when").is_some_and(|when| !when.is_null()) {
                     errors.push(format!(
                         "transitions[{index}] with multiple from-states cannot carry a when guard; use single-state transitions for guards"
@@ -825,7 +888,10 @@ fn check_machine(machine: &Value) -> Vec<String> {
             Some(_) => {}
         }
         if let Some(on) = transition.get("on") {
-            if !on.as_str().is_some_and(|on| TRANSITION_ON_KINDS.contains(&on)) {
+            if !on
+                .as_str()
+                .is_some_and(|on| TRANSITION_ON_KINDS.contains(&on))
+            {
                 errors.push(format!(
                     "transitions[{index}] on must be one of {}, got {}",
                     str_list(&TRANSITION_ON_KINDS),
@@ -939,7 +1005,15 @@ fn compile_dag(dag: &Map<String, Value>) -> Result<Value, Vec<String>> {
         state.insert("entry".to_string(), Value::Bool(edges.is_empty()));
         state.insert("max_entries".to_string(), Value::from(1));
         for key in [
-            "subagent", "python", "lifecycle", "budget_ms", "retries", "failure_policy", "inputs", "outputs", "foreach",
+            "subagent",
+            "python",
+            "lifecycle",
+            "budget_ms",
+            "retries",
+            "failure_policy",
+            "inputs",
+            "outputs",
+            "foreach",
         ] {
             if let Some(value) = node.get(key) {
                 state.insert(key.to_string(), value.clone());
