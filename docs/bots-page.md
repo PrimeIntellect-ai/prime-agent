@@ -19,7 +19,7 @@ The setting only gates new `rlm.spawn(target="sandbox")` calls. While it is off,
 
 ## How a bot is made
 
-Agents make bots. An agent calls `rlm.spawn(prompt, name=..., target="sandbox")`, and messages the bot with `agent_message.send(..., receiver_role="child", receiver_name=...)`. The final answer of each settled bot turn comes back once, as an agent message from the bot (`[agent-message from <bot name>]`). Delivery is at most once: if the link drops before the bot confirms, the send is reported as uncertain and is never resent. A bot can also message its owner with `receiver_role="parent"`. Bots cannot message each other.
+Agents make bots. An agent calls `rlm.spawn(prompt, name=..., target="sandbox")`, and messages the bot with `agent_message.send(..., receiver_role="child", receiver_name=...)`. The final answer of each settled bot turn comes back once, as an agent message from the bot (`[agent-message from <bot name>]`). An answer longer than one agent message (16,384 characters) comes back whole, as numbered parts (`[bot answer part 1/3]`). Delivery is at most once: if the link drops before the bot confirms, the send is reported as uncertain and is never resent. A bot can also message its owner with `receiver_role="parent"`. Bots cannot message each other.
 
 The `prime sandbox` CLI is the human and admin path only. A bot sandbox has the bot's name. It carries the labels `prime-agent-bot`, `prime-agent-bot:<id>`, and `prime-agent-bot-owner:<owner id>`, so an admin can find it with the CLI. Delete a bot through its owning agent (`rlm.delete_subagent`), so the daemon also removes its checkpoints.
 
