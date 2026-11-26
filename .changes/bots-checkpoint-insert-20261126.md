@@ -1,0 +1,1 @@
+- Hardened the checkpoint promotion twice more: a malformed platform timestamp no longer panics the wake (the cron parser rejects an empty time-of-day), and a winner recorded behind a pending head is inserted at its chronological position, so a time-newer pending snapshot in the older list is never mistaken for a stale one and deleted by the prune that follows the restore.

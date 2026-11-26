@@ -802,6 +802,9 @@ pub fn parse_iso_millis(text: &str) -> Option<u64> {
 
 /// Time-of-day parse: HH:MM[:SS[.fff]][Z|(+/-HH:MM)] -> millis + offset.
 fn parse_time_with_offset(time: &str) -> Option<(i64, i64)> {
+    if time.is_empty() {
+        return None;
+    }
     let (time, offset) = if let Some(stripped) = time.strip_suffix('Z') {
         (stripped, 0i64)
     } else if let Some(index) = time

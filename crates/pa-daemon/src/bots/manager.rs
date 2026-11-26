@@ -1397,7 +1397,24 @@ impl BotManager {
             });
         if head_pending_newer {
             if !record.older_checkpoint_ids.contains(&newest.id) {
-                record.older_checkpoint_ids.push(newest.id.clone());
+                // Insert at the chronological position: a pending snapshot
+                // already in the list may be newer in time, and the list
+                // must stay oldest-first or a later prune mistakes that
+                // newer pending one for an older stale one.
+                let millis = checkpoint_millis(newest);
+                let position = record
+                    .older_checkpoint_ids
+                    .iter()
+                    .position(|id| {
+                        listed
+                            .iter()
+                            .find(|checkpoint| checkpoint.id == *id)
+                            .is_some_and(|checkpoint| checkpoint_millis(checkpoint) > millis)
+                    })
+                    .unwrap_or(record.older_checkpoint_ids.len());
+                record
+                    .older_checkpoint_ids
+                    .insert(position, newest.id.clone());
                 if let Err(error) = self.save(record.clone()) {
                     eprintln!(
                         "pa-daemon: bot {}: could not record the newest platform checkpoint: {error:#}",

@@ -1569,7 +1569,7 @@ async fn a_pending_head_still_records_an_unrecorded_durable_checkpoint() {
 async fn a_pending_snapshot_keeps_its_place_when_a_winner_is_recorded() {
     let (_dir, platform, manager) = setup();
     manager.spawn(&spec("bot-a")).await.unwrap();
-    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.pause("bot-a").await.unwrap();
     manager.ensure_running("bot-a").await.unwrap();
     let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
     // An outside pause freezes a durable checkpoint, then two local
@@ -1579,7 +1579,7 @@ async fn a_pending_snapshot_keeps_its_place_when_a_winner_is_recorded() {
     platform.state().pause_checkpoints_pending = true;
     let pending = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
     manager.ensure_running("bot-a").await.unwrap();
-    let newest = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.pause("bot-a").await.unwrap();
     platform
         .state()
         .sandboxes
