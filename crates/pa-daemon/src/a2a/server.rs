@@ -1,14 +1,21 @@
 //! The A2A server over daemon sessions. Each `contextId` owns one daemon
-//! session; its tasks run one at a time, each as one `PromptAndWait` turn
-//! followed by the idle wait with RLM quiescence, so the follow-up turns of
-//! the task's child agents and background cells belong to the task. While a task runs, the session's assistant
-//! text is the task's reply: that is the only attribution rule.
+//! session, and its tasks run one at a time. A task is one `PromptAndWait`
+//! turn, then the idle wait with RLM quiescence, so the follow-up turns of
+//! the task's child agents and background cells belong to the task.
 //!
-//! Between tasks the server detaches from the session, so the daemon's
-//! idle passivation can reclaim the worker; the next task re-opens the
-//! session file (a live worker is reused) and attaches again.
+//! The worker tags each run's `agent_start` with its anchor: the client's
+//! own admission id for a prompt, or `continuation` for a row that continues
+//! the session's own work (goal and autonomous continuations, notices about
+//! the session's own children and jobs). A run counts toward the running
+//! task when it carries the task's admission id or is a continuation; other
+//! runs (another client's prompt, an agent message, a scheduled fire) never
+//! reach the task's reply.
+//!
+//! Between tasks the server detaches from the session, so the daemon's idle
+//! passivation can reclaim the worker; the next task re-opens the session
+//! file (a live worker is reused) and attaches again.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -19,12 +26,12 @@ use tokio::sync::broadcast;
 use super::jsonrpc::{self, A2aError};
 use super::tasks::{SubscribeError, Tasks};
 use super::types::{
-    prompt_text, ListTasksParams, PartsError, SendMessageRequest, StreamResponse, Task, TaskQuery,
-    TaskState,
+    prompt_text, ListTasksParams, PartsError, Role, SendMessageRequest, StreamResponse, Task,
+    TaskQuery, TaskState,
 };
 use crate::acp::daemon::{
-    attach_daemon_session, create_daemon_session, stop_session_work, summary_str, DaemonLink,
-    LinkFrame,
+    acquire_session_input_pause, attach_daemon_session, create_daemon_session,
+    release_session_input_pause, stop_session_work, summary_str, DaemonLink, LinkFrame,
 };
 
 /// The launch options of `--mode a2a`.
@@ -37,6 +44,12 @@ pub struct A2aOptions {
     /// Set when the token was minted for this run: the agent dir its
     /// owner-only token file is written to once the listener binds.
     pub minted_token_dir: Option<PathBuf>,
+    /// The most contexts with a live worker or task; a new context beyond
+    /// it is refused.
+    pub max_contexts: usize,
+    /// The public URL of a TLS front: the card advertises it and a
+    /// loopback bind accepts its `Host`.
+    pub public_url: Option<String>,
     pub product_version: String,
     /// The session create for new contexts, built from the CLI flags.
     pub create: DaemonCommand,
@@ -56,6 +69,9 @@ struct Running {
     admission_id: String,
     /// `CancelTask` owns the verdict: the flow leaves the settle to it.
     cancel_requested: bool,
+    /// The failure of the task's latest run (a failed goal or autonomous
+    /// continuation fails the task).
+    run_error: Option<String>,
 }
 
 struct Context {
@@ -66,6 +82,8 @@ struct Context {
     /// whose client-owned worker never passivates).
     session_file: Option<String>,
     running: Option<Running>,
+    /// Whether the session's current run counts toward the running task.
+    crediting: bool,
     /// Held by the context's task flow for its whole turn.
     turn: Arc<tokio::sync::Mutex<()>>,
 }
@@ -76,31 +94,28 @@ struct State {
     contexts: HashMap<String, Context>,
     /// Daemon active session id -> context id (the event routing).
     sessions: HashMap<String, String>,
-}
-
-impl State {
-    /// The running task the session's events belong to.
-    fn running_task(&self, active_session_id: &str) -> Option<&str> {
-        let context = self.contexts.get(self.sessions.get(active_session_id)?)?;
-        context
-            .running
-            .as_ref()
-            .map(|running| running.task_id.as_str())
-    }
+    /// The server is exiting: no new task is admitted.
+    shutting_down: bool,
 }
 
 pub(crate) struct Server {
     link: Arc<DaemonLink>,
     state: Mutex<State>,
     create: DaemonCommand,
+    max_contexts: usize,
 }
 
 impl Server {
-    pub(crate) fn new(link: Arc<DaemonLink>, create: DaemonCommand) -> Arc<Self> {
+    pub(crate) fn new(
+        link: Arc<DaemonLink>,
+        create: DaemonCommand,
+        max_contexts: usize,
+    ) -> Arc<Self> {
         Arc::new(Self {
             link,
             state: Mutex::new(State::default()),
             create,
+            max_contexts,
         })
     }
 
@@ -110,19 +125,45 @@ impl Server {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Route the link's session events until the daemon connection closes.
+    /// Route the link's frames until the daemon connection closes.
     pub(crate) async fn pump_events(&self) {
         while let Some(frame) = self.link.next_frame().await {
-            if let LinkFrame::Event(frame) = frame {
-                self.on_session_event(&frame);
+            match frame {
+                LinkFrame::Event(frame) => self.on_session_event(&frame),
+                LinkFrame::SessionBinding(binding) => self.on_session_binding(&binding),
+                LinkFrame::HeartbeatsChanged => {}
             }
         }
     }
 
-    /// Map one session event onto the session's running task: assistant
+    /// A worker re-host moved a context's session to a new active id: route
+    /// its events under the new id and attach to it.
+    fn on_session_binding(&self, binding: &Value) {
+        let field = |key: &str| binding.get(key).and_then(Value::as_str).unwrap_or_default();
+        let (previous, current) = (field("previousActiveSessionId"), field("activeSessionId"));
+        let mut state = self.state();
+        let Some(context_id) = state.sessions.remove(previous) else {
+            return;
+        };
+        state
+            .sessions
+            .insert(current.to_string(), context_id.clone());
+        if let Some(context) = state.contexts.get_mut(&context_id) {
+            context.active_session_id = current.to_string();
+        }
+        let link = Arc::clone(&self.link);
+        let current = current.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = attach_daemon_session(&link, &current).await {
+                eprintln!("a2a: re-attaching session {current}: {error:#}");
+            }
+        });
+    }
+
+    /// Map one session event onto the running task of its context: assistant
     /// text deltas stream as artifact chunks, finished assistant messages
-    /// build the reply. Everything else (tools, thinking) has no A2A
-    /// surface.
+    /// build the reply, and a failed run is recorded. Only runs that count
+    /// toward the task (see the module docs) reach it.
     fn on_session_event(&self, frame: &Value) {
         let session = frame
             .get("activeSessionId")
@@ -135,11 +176,52 @@ impl Server {
             .and_then(Value::as_str)
             == Some("assistant");
         let mut state = self.state();
-        let Some(task_id) = state.running_task(session).map(str::to_string) else {
+        let state = &mut *state;
+        let Some(context) = state
+            .sessions
+            .get(session)
+            .and_then(|context_id| state.contexts.get_mut(context_id))
+        else {
+            return;
+        };
+        let Some(running) = context.running.as_mut() else {
             return;
         };
         match event.get("type").and_then(Value::as_str) {
-            Some("message_start") if assistant => state.tasks.assistant_message_start(&task_id),
+            Some("agent_start") => {
+                context.crediting = event.get("clientAdmissionId").and_then(Value::as_str)
+                    == Some(running.admission_id.as_str())
+                    || event.get("continuation").and_then(Value::as_bool) == Some(true);
+                if context.crediting {
+                    running.run_error = None;
+                }
+                return;
+            }
+            Some("agent_end") => {
+                context.crediting = false;
+                return;
+            }
+            _ if !context.crediting => return,
+            _ => {}
+        }
+        let task_id = running.task_id.as_str();
+        match event.get("type").and_then(Value::as_str) {
+            Some("turn_end") => {
+                let failed = message
+                    .filter(|message| {
+                        message.get("stopReason").and_then(Value::as_str) == Some("error")
+                    })
+                    .map(|message| {
+                        message
+                            .get("errorMessage")
+                            .and_then(Value::as_str)
+                            .unwrap_or("the turn failed")
+                    });
+                if let Some(error) = event.get("error").and_then(Value::as_str).or(failed) {
+                    running.run_error = Some(error.to_string());
+                }
+            }
+            Some("message_start") if assistant => state.tasks.assistant_message_start(task_id),
             Some("message_update") => {
                 let stream = event.get("assistantMessageEvent");
                 if stream
@@ -152,7 +234,7 @@ impl Server {
                         .and_then(Value::as_str)
                         .filter(|delta| !delta.is_empty())
                     {
-                        state.tasks.text_delta(&task_id, delta);
+                        state.tasks.text_delta(task_id, delta);
                     }
                 }
             }
@@ -165,7 +247,7 @@ impl Server {
                     .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
                     .filter_map(|block| block.get("text").and_then(Value::as_str))
                     .collect();
-                state.tasks.assistant_message_end(&task_id, &text);
+                state.tasks.assistant_message_end(task_id, &text);
             }
             _ => {}
         }
@@ -248,6 +330,13 @@ impl Server {
         };
         let mut message = request.message;
         let config = request.configuration.unwrap_or_default();
+        if message.role != Role::User {
+            return Reply::Json(jsonrpc::invalid_params(
+                &id,
+                "message.role",
+                "a client message has the user role",
+            ));
+        }
         let text = match prompt_text(&message.parts) {
             Ok(text) => text,
             Err(PartsError::Invalid(reason)) => {
@@ -268,28 +357,38 @@ impl Server {
                 None,
             ));
         }
-        let task_id = uuid::Uuid::new_v4().to_string();
+        message.context_id = message.context_id.filter(|context| !context.is_empty());
+        if let Some(referenced) = message.task_id.as_deref().filter(|task| !task.is_empty()) {
+            return Reply::Json(self.refuse_task_message(
+                &id,
+                referenced,
+                message.context_id.as_deref(),
+            ));
+        }
         let context_id = message
             .context_id
             .clone()
-            .filter(|context| !context.is_empty())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let new_context = !self.state().contexts.contains_key(&context_id);
+        if new_context && self.live_contexts().await >= self.max_contexts {
+            return Reply::Json(server_error(
+                &id,
+                "CONTEXT_LIMIT_REACHED",
+                &format!(
+                    "The server already serves its limit of {} live contexts; retry later or send on an existing contextId",
+                    self.max_contexts
+                ),
+            ));
+        }
+        let task_id = uuid::Uuid::new_v4().to_string();
         let (first, frames, mut terminal) = {
             let mut state = self.state();
-            // A task is one turn: a finished task takes no more messages,
-            // and a running one has no mid-turn input surface.
-            if let Some(referenced) = message.task_id.as_deref().filter(|task| !task.is_empty()) {
-                return Reply::Json(if state.tasks.state(referenced).is_some() {
-                    jsonrpc::a2a_error(
-                        &id,
-                        A2aError::UnsupportedOperation,
-                        Some(
-                            json!({ "reason": "a task takes one message; send a new message on its context" }),
-                        ),
-                    )
-                } else {
-                    task_not_found(&id, referenced)
-                });
+            if state.shutting_down {
+                return Reply::Json(server_error(
+                    &id,
+                    "SHUTTING_DOWN",
+                    "The server is shutting down",
+                ));
             }
             message.task_id = Some(task_id.clone());
             message.context_id = Some(context_id.clone());
@@ -300,6 +399,7 @@ impl Server {
                     active_session_id: String::new(),
                     session_file: None,
                     running: None,
+                    crediting: false,
                     turn: Arc::default(),
                 });
             state.tasks.admit(&task_id, message);
@@ -324,6 +424,76 @@ impl Server {
         })
     }
 
+    /// A message naming a `taskId` (spec 3.4.3). Its context is the task's;
+    /// a different `contextId` is rejected. A task is one turn here, so
+    /// continuing one is refused: a terminal task takes no more messages,
+    /// and a running one has no mid-turn input surface.
+    fn refuse_task_message(&self, id: &Value, task_id: &str, context_id: Option<&str>) -> Value {
+        let state = self.state();
+        let (Some(task_state), Some(task_context)) =
+            (state.tasks.state(task_id), state.tasks.context_id(task_id))
+        else {
+            return task_not_found(id, task_id);
+        };
+        if context_id.is_some_and(|context_id| context_id != task_context) {
+            return jsonrpc::invalid_params(
+                id,
+                "message.contextId",
+                "the contextId does not match the task's context",
+            );
+        }
+        let reason = if task_state.is_terminal() {
+            "the task is terminal; send a new message on its context"
+        } else {
+            "the task is running and takes no more input; send a new message on its context"
+        };
+        jsonrpc::a2a_error(
+            id,
+            A2aError::UnsupportedOperation,
+            Some(json!({ "taskId": task_id, "contextId": task_context, "reason": reason })),
+        )
+    }
+
+    /// The contexts that hold a worker or a live task.
+    async fn live_contexts(&self) -> usize {
+        let resident: HashSet<String> = self
+            .link
+            .request(DaemonCommand::List {
+                id: None,
+                all: Some(true),
+                cwd: None,
+                session_dir: None,
+                include_client_owned: Some(true),
+                rest: Map::default(),
+            })
+            .await
+            .ok()
+            .and_then(|response| response.data)
+            .and_then(|data| data.get("sessions").and_then(Value::as_array).cloned())
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                row.get("activeSessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        let state = self.state();
+        let busy: HashSet<&str> = state
+            .tasks
+            .live_ids()
+            .iter()
+            .filter_map(|task_id| state.tasks.context_id(task_id))
+            .collect();
+        state
+            .contexts
+            .iter()
+            .filter(|(context_id, context)| {
+                busy.contains(context_id.as_str()) || resident.contains(&context.active_session_id)
+            })
+            .count()
+    }
+
     /// One task's flow: wait for the context's turn, run the prompt, and
     /// settle, unless `CancelTask` took the verdict.
     async fn run_task(self: Arc<Self>, task_id: String, context_id: String, text: String) {
@@ -345,25 +515,25 @@ impl Server {
         let outcome = self
             .run_turn(&task_id, &context_id, text, &mut terminal)
             .await;
-        let session = {
+        {
             let mut state = self.state();
-            let context = &state.contexts[&context_id];
-            let session = context.active_session_id.clone();
-            if !context
-                .running
-                .as_ref()
-                .is_some_and(|running| running.cancel_requested)
-            {
-                match outcome {
+            let state = &mut *state;
+            let running = state.contexts[&context_id].running.as_ref();
+            if !running.is_some_and(|running| running.cancel_requested) {
+                match outcome.and_then(|()| {
+                    running
+                        .and_then(|running| running.run_error.clone())
+                        .map_or(Ok(()), Err)
+                }) {
                     Ok(()) => state.tasks.settle(&task_id, TaskState::Completed, None),
                     Err(error) => state.tasks.settle(&task_id, TaskState::Failed, Some(error)),
                 };
             }
-            session
-        };
+        }
         // A cancel that took the verdict settles once its stop finished;
         // the detach and the next task wait for that.
         let _ = terminal.wait_for(|terminal| *terminal).await;
+        let session = self.current_session(&context_id);
         if !session.is_empty() {
             let _ = self
                 .link
@@ -376,7 +546,17 @@ impl Server {
         }
         if let Some(context) = self.state().contexts.get_mut(&context_id) {
             context.running = None;
+            context.crediting = false;
         }
+    }
+
+    /// The context's current daemon session id (a worker re-host moves it).
+    fn current_session(&self, context_id: &str) -> String {
+        self.state()
+            .contexts
+            .get(context_id)
+            .map(|context| context.active_session_id.clone())
+            .unwrap_or_default()
     }
 
     /// Host the session, send the prompt, and wait for the run to settle.
@@ -401,6 +581,7 @@ impl Server {
                 task_id: task_id.to_string(),
                 admission_id: admission_id.clone(),
                 cancel_requested: false,
+                run_error: None,
             });
             // Queued under the lock: a cancel that sees the task running
             // sends its stop after this prompt.
@@ -420,7 +601,7 @@ impl Server {
             .link
             .dispatch(DaemonCommand::WaitForIdle {
                 id: None,
-                active_session_id: session,
+                active_session_id: self.current_session(context_id),
                 wait_for_rlm_quiescence: Some(true),
                 timeout_ms: None,
                 rest: Map::default(),
@@ -471,14 +652,14 @@ impl Server {
         Ok(active)
     }
 
-    /// `CancelTask`: a queued task settles CANCELED at once; a running one
-    /// gets the ACP mode's stop on its session (abort and clear the queue,
-    /// cancel the owned admission, wait for idle, cancel the child agents)
-    /// and then settles CANCELED, or FAILED when the stop failed.
+    /// `CancelTask`: a queued task settles CANCELED at once. A running one
+    /// gets its session stopped (see [`stop_task_work`]) and settles
+    /// CANCELED, or FAILED when the stop failed. A repeated cancel while the
+    /// stop runs waits for it and answers the same task (spec 3.3.1).
     async fn cancel_task(self: &Arc<Self>, task_id: &str) -> Result<Task, A2aError> {
-        let (session, admission_id) = {
-            let mut state = self.state();
-            let state = &mut *state;
+        let stop = {
+            let mut guard = self.state();
+            let state = &mut *guard;
             match state.tasks.state(task_id) {
                 None => return Err(A2aError::TaskNotFound),
                 Some(task_state) if task_state.is_terminal() => {
@@ -493,15 +674,13 @@ impl Server {
                 .as_mut()
                 .filter(|running| running.task_id == task_id)
             {
-                Some(running) if running.cancel_requested => {
-                    return Err(A2aError::TaskNotCancelable)
-                }
+                Some(running) if running.cancel_requested => None,
                 Some(running) => {
                     running.cancel_requested = true;
-                    (
+                    Some((
                         context.active_session_id.clone(),
                         running.admission_id.clone(),
-                    )
+                    ))
                 }
                 None => {
                     return state
@@ -511,37 +690,87 @@ impl Server {
                 }
             }
         };
+        let Some((session, admission_id)) = stop else {
+            // A stop is already running: answer the task it settles.
+            let mut terminal = self
+                .state()
+                .tasks
+                .terminal_watch(task_id)
+                .ok_or(A2aError::TaskNotFound)?;
+            let _ = terminal.wait_for(|terminal| *terminal).await;
+            return self
+                .state()
+                .tasks
+                .snapshot(task_id, None)
+                .ok_or(A2aError::TaskNotFound);
+        };
         // Detached, so a client that drops the request cannot drop the verdict
         // the task flow is waiting for.
         let server = Arc::clone(self);
         let task = task_id.to_string();
         let stop = tokio::spawn(async move {
-            let (state, error) =
-                match stop_session_work(&server.link, &session, Some(&admission_id)).await {
-                    Ok(()) => (TaskState::Canceled, None),
-                    Err(error) => (
-                        TaskState::Failed,
-                        Some(format!("the cancel did not complete: {error:#}")),
-                    ),
-                };
+            let (state, error) = match stop_task_work(&server.link, &session, &admission_id).await {
+                Ok(()) => (TaskState::Canceled, None),
+                Err(error) => (
+                    TaskState::Failed,
+                    Some(format!("the cancel did not complete: {error:#}")),
+                ),
+            };
             server.state().tasks.settle(&task, state, error)
         });
         stop.await.ok().flatten().ok_or(A2aError::TaskNotCancelable)
     }
 
-    /// Stop every live task and wait until each settled (the server is
-    /// exiting); a cancel already in flight finishes its own stop.
+    /// Refuse new tasks, then stop every live task and wait until each
+    /// settled (the server is exiting).
     pub(crate) async fn cancel_all(self: &Arc<Self>) {
-        let live = self.state().tasks.live_ids();
-        futures::future::join_all(live.iter().map(|task_id| async move {
-            let terminal = self.state().tasks.terminal_watch(task_id);
-            let _ = self.cancel_task(task_id).await;
-            if let Some(mut terminal) = terminal {
-                let _ = terminal.wait_for(|terminal| *terminal).await;
-            }
-        }))
-        .await;
+        let live = {
+            let mut state = self.state();
+            state.shutting_down = true;
+            state.tasks.live_ids()
+        };
+        futures::future::join_all(live.iter().map(|task_id| self.cancel_task(task_id))).await;
     }
+}
+
+/// Stop a canceled task's work on its session: retire the goal and
+/// autonomous loops, then, under an input pause (so notices that arrive
+/// meanwhile cannot hold the idle wait or start a turn), the ACP mode's stop
+/// (abort and clear the queue, cancel the owned admission, wait for idle,
+/// cancel the child agents); then wait for the children to settle and drop
+/// the notices they queued.
+async fn stop_task_work(
+    link: &Arc<DaemonLink>,
+    session: &str,
+    admission_id: &str,
+) -> anyhow::Result<()> {
+    link.request_ok(DaemonCommand::RetireContinuations {
+        id: None,
+        active_session_id: session.to_string(),
+        rest: Map::default(),
+    })
+    .await?;
+    let lease_key = uuid::Uuid::new_v4().to_string();
+    let pause_id = acquire_session_input_pause(link, session, &lease_key).await?;
+    let stopped = async {
+        stop_session_work(link, session, Some(admission_id)).await?;
+        link.request_ok(DaemonCommand::WaitForHeadlessCompletion {
+            id: None,
+            active_session_id: session.to_string(),
+            wait_for_rlm_quiescence: Some(true),
+            rest: Map::default(),
+        })
+        .await?;
+        link.request_ok(DaemonCommand::ClearQueue {
+            id: None,
+            active_session_id: session.to_string(),
+            rest: Map::default(),
+        })
+        .await
+    }
+    .await;
+    let released = release_session_input_pause(link, session, &pause_id).await;
+    stopped.and(released)
 }
 
 fn prompt_command(session: &str, text: String, admission_id: String) -> DaemonCommand {
@@ -552,10 +781,10 @@ fn prompt_command(session: &str, text: String, admission_id: String) -> DaemonCo
         input: PromptInput {
             content: None,
             images: None,
-            // The ACP mode's lane choice: a user prompt steers, so it also
-            // wakes a cell that is waiting, and it resumes a post-abort
-            // queue suspension.
-            streaming_behavior: Some(pa_types::daemon::StreamingBehavior::Steer),
+            // A follow-up never joins a run already going (another client's
+            // turn, a scheduled fire); it runs as its own delivery and still
+            // resumes a post-abort queue suspension.
+            streaming_behavior: Some(pa_types::daemon::StreamingBehavior::FollowUp),
             queue_if_busy: Some(true),
             expand_prompt_templates: None,
             source: None,
@@ -597,6 +826,21 @@ fn task_reply(id: &Value, task: &Task) -> Value {
     jsonrpc::response(id, &to_json(task))
 }
 
+/// A server-side refusal (JSON-RPC internal error) with an `ErrorInfo`
+/// detail naming the reason.
+fn server_error(id: &Value, reason: &str, message: &str) -> Value {
+    jsonrpc::error_response(
+        id,
+        jsonrpc::INTERNAL_ERROR,
+        message,
+        Some(json!([{
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "reason": reason,
+            "domain": "prime-agent",
+        }])),
+    )
+}
+
 fn task_not_found(id: &Value, task_id: &str) -> Value {
     jsonrpc::a2a_error(
         id,
@@ -613,7 +857,7 @@ fn task_not_found(id: &Value, task_id: &str) -> Value {
 /// token file write fails, and when the daemon connection closes.
 pub async fn run_daemon_attached_a2a_mode(options: A2aOptions) -> anyhow::Result<i32> {
     let link = Arc::new(DaemonLink::connect(&options.socket_path, "a2a").await?);
-    let server = Server::new(link, options.create);
+    let server = Server::new(link, options.create, options.max_contexts);
     let listener =
         tokio::net::TcpListener::bind((options.bind_host.as_str(), options.bind_port)).await?;
     let bound = listener.local_addr()?;
@@ -636,6 +880,7 @@ pub async fn run_daemon_attached_a2a_mode(options: A2aOptions) -> anyhow::Result
         Arc::clone(&server),
         options.bearer_token,
         options.product_version,
+        options.public_url,
     );
     // The pump outlives the select: the exit's cancels need its responses.
     let mut pump = tokio::spawn({

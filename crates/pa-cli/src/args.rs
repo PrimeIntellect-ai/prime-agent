@@ -72,6 +72,8 @@ impl Mode {
 pub struct A2aBind {
     pub host: Option<String>,
     pub port: Option<u16>,
+    pub max_contexts: Option<usize>,
+    pub public_url: Option<String>,
 }
 
 /// A parse-time diagnostic: warnings are printed, errors also exit 1.
@@ -289,6 +291,13 @@ pub fn parse_args(args: &[String]) -> Args {
                     .diagnostics
                     .push(Diagnostic::error("--a2a-port must be a port number")),
             },
+            "--a2a-max-contexts" => match require_value!(arg).parse::<usize>() {
+                Ok(max) if max > 0 => result.a2a_bind.max_contexts = Some(max),
+                _ => result.diagnostics.push(Diagnostic::error(
+                    "--a2a-max-contexts must be a positive number",
+                )),
+            },
+            "--a2a-public-url" => result.a2a_bind.public_url = Some(require_value!(arg)),
             "--continue" | "-c" => result.continue_ = true,
             "--resume" | "-r" => match args.get(i + 1) {
                 Some(next)

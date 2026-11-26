@@ -164,8 +164,9 @@ pub struct Task {
     pub id: String,
     pub context_id: String,
     pub status: TaskStatus,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<Artifact>,
+    /// `None` omits the field (a `ListTasks` row without `includeArtifacts`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<Vec<Artifact>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<Message>,
 }

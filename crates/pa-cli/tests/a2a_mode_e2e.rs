@@ -21,6 +21,19 @@ impl A2a {
     /// Start the mode on port 0 with a scripted worker (and scripted RLM
     /// children); readiness is the listening line.
     fn start(script: &Value, child_script: Option<&Value>, env: &[(&str, &str)]) -> Self {
+        Self::start_full(script, child_script, env, &[])
+    }
+
+    fn start_with_args(script: &Value, args: &[&str]) -> Self {
+        Self::start_full(script, None, &[], args)
+    }
+
+    fn start_full(
+        script: &Value,
+        child_script: Option<&Value>,
+        env: &[(&str, &str)],
+        args: &[&str],
+    ) -> Self {
         let home = tempfile::TempDir::new().unwrap();
         let agent_dir = home.path().join(".prime/agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -30,6 +43,7 @@ impl A2a {
         command
             .args(["--mode", "a2a", "--a2a-port", "0", "--daemon-socket"])
             .arg(&socket)
+            .args(args)
             .env("HOME", home.path())
             .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
             .env_remove("PRIME_AGENT_SESSION_DIR")
@@ -353,14 +367,38 @@ fn send_stream_get_and_list() {
         server.rpc("GetTask", &json!({ "id": "nope" }))["error"]["code"],
         -32001
     );
-    let continued = server.rpc(
-        "SendMessage",
-        &json!({ "message": { "messageId": "m", "role": "ROLE_USER", "taskId": streamed_id, "parts": [{ "text": "x" }] } }),
+    assert_message_rules(&server, context, streamed_id);
+}
+
+/// `includeArtifacts`, the spec 3.4.3 `taskId` rules, and the client role.
+fn assert_message_rules(server: &A2a, context: &str, streamed_id: &str) {
+    let with_artifacts = server.rpc(
+        "ListTasks",
+        &json!({ "contextId": context, "includeArtifacts": true }),
     );
+    assert!(with_artifacts["result"]["tasks"][0]["artifacts"].is_array());
+    let on_task = |task_context: Option<&str>| {
+        let mut message = json!({ "messageId": "m", "role": "ROLE_USER", "taskId": streamed_id, "parts": [{ "text": "x" }] });
+        if let Some(task_context) = task_context {
+            message["contextId"] = json!(task_context);
+        }
+        server.rpc("SendMessage", &json!({ "message": message }))
+    };
+    let continued = on_task(None);
     assert_eq!(
         continued["error"]["code"], -32004,
         "a finished task takes no messages"
     );
+    assert_eq!(
+        continued["error"]["data"][0]["metadata"]["contextId"], context,
+        "the context is the task's"
+    );
+    assert_eq!(on_task(Some("another-context"))["error"]["code"], -32602);
+    let as_agent = server.rpc(
+        "SendMessage",
+        &json!({ "message": { "messageId": "m", "role": "ROLE_AGENT", "parts": [{ "text": "x" }] } }),
+    );
+    assert_eq!(as_agent["error"]["code"], -32602);
 }
 
 #[test]
@@ -612,7 +650,14 @@ fn cancel_stops_the_turn_and_the_child_agents() {
     let held_id = held["id"].as_str().unwrap();
     server.wait_task(held_id, |frame| frame_state(frame) == "TASK_STATE_WORKING");
     let started = Instant::now();
-    let canceled = server.rpc("CancelTask", &json!({ "id": held_id }))["result"].clone();
+    // Two cancels at once (spec 3.3.1): both answer the canceled task.
+    let canceled = std::thread::scope(|scope| {
+        let other = scope.spawn(|| server.rpc("CancelTask", &json!({ "id": held_id })));
+        let canceled = server.rpc("CancelTask", &json!({ "id": held_id }));
+        let other = other.join().unwrap();
+        assert_eq!(state(&other["result"]), "TASK_STATE_CANCELED", "{other}");
+        canceled["result"].clone()
+    });
     assert_eq!(state(&canceled), "TASK_STATE_CANCELED", "{canceled}");
     assert!(
         started.elapsed() < Duration::from_secs(30),
@@ -626,5 +671,110 @@ fn cancel_stops_the_turn_and_the_child_agents() {
         row.map(|row| row["isStreaming"].clone()),
         Some(json!(true)),
         "the turn stopped"
+    );
+}
+
+#[test]
+fn another_clients_turn_stays_out_of_the_reply() {
+    let server = A2a::start(
+        &json!({ "engine": "faux", "responses": [
+            "ready",
+            { "text": "FOREIGN reply", "delayMs": 2000 },
+            "the task's own reply",
+        ] }),
+        None,
+        &[],
+    );
+    let warm = server.send("warm up", None, &json!({}))["result"]["task"].clone();
+    let context = warm["contextId"].as_str().unwrap();
+    let session = server.sessions()[0]["activeSessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Another daemon client's turn is running when the task arrives: the
+    // task's prompt waits behind it instead of joining it.
+    let queued = server
+        .daemon(&json!({ "type": "prompt", "activeSessionId": session, "message": "foreign" }));
+    assert_eq!(queued["success"], true, "{queued}");
+    let task = server.send("go", Some(context), &json!({}))["result"]["task"].clone();
+    assert_eq!(state(&task), "TASK_STATE_COMPLETED", "{task}");
+    assert_eq!(artifact_text(&task), "the task's own reply", "{task}");
+}
+
+#[test]
+fn a_failed_goal_continuation_fails_the_task() {
+    let server = A2a::start(
+        &json!({ "engine": "faux", "responses": [
+            "working on it",
+            { "text": "", "stopReason": "error", "errorMessage": "the provider failed" },
+        ] }),
+        None,
+        &[],
+    );
+    let task = server.send("/goal finish the work", None, &json!({}))["result"]["task"].clone();
+    assert_eq!(state(&task), "TASK_STATE_FAILED", "{task}");
+}
+
+#[test]
+fn cancel_retires_the_goal_loop() {
+    let server = A2a::start(
+        &json!({ "engine": "faux", "tokensPerSecond": 20, "responses": [
+            "the goal's first step streams slowly enough to cancel it in the middle of the run",
+            "a plain answer",
+        ] }),
+        None,
+        &[],
+    );
+    let task = server.send(
+        "/goal do many steps",
+        None,
+        &json!({ "returnImmediately": true }),
+    )["result"]["task"]
+        .clone();
+    let id = task["id"].as_str().unwrap();
+    server.wait_task(id, |frame| frame.get("artifactUpdate").is_some());
+    let canceled = server.rpc("CancelTask", &json!({ "id": id }))["result"].clone();
+    assert_eq!(state(&canceled), "TASK_STATE_CANCELED", "{canceled}");
+    // A goal that resumed would mint another turn after this one and fail it
+    // (the script has no answer left).
+    let next =
+        server.send("hello", canceled["contextId"].as_str(), &json!({}))["result"]["task"].clone();
+    assert_eq!(state(&next), "TASK_STATE_COMPLETED", "{next}");
+    assert_eq!(artifact_text(&next), "a plain answer");
+}
+
+#[test]
+fn the_context_cap_refuses_new_conversations_and_the_public_url_serves() {
+    let server = A2a::start_with_args(
+        &json!({ "engine": "faux", "responses": ["one", "two"] }),
+        &[
+            "--a2a-max-contexts",
+            "1",
+            "--a2a-public-url",
+            "https://agent.example.com/a2a",
+        ],
+    );
+    let first = server.send("hi", Some("ctx-1"), &json!({}))["result"]["task"].clone();
+    assert_eq!(state(&first), "TASK_STATE_COMPLETED", "{first}");
+    let refused = server.send("hi", Some("ctx-2"), &json!({}));
+    assert_eq!(
+        refused["error"]["data"][0]["reason"], "CONTEXT_LIMIT_REACHED",
+        "{refused}"
+    );
+    let again = server.send("again", Some("ctx-1"), &json!({}))["result"]["task"].clone();
+    assert_eq!(state(&again), "TASK_STATE_COMPLETED", "{again}");
+    // Behind the TLS front: its Host passes the loopback gate and the card
+    // advertises its URL.
+    let (status, _, card) = server.http(
+        "GET",
+        "/.well-known/agent-card.json",
+        &[("Host", "agent.example.com")],
+        "",
+    );
+    assert_eq!(status, 200);
+    let card: Value = serde_json::from_str(&card).unwrap();
+    assert_eq!(
+        card["supportedInterfaces"][0]["url"],
+        "https://agent.example.com/a2a"
     );
 }

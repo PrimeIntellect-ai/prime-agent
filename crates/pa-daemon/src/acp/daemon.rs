@@ -57,6 +57,9 @@ pub(crate) enum LinkFrame {
     /// The daemon-global heartbeat-catalog broadcast the supervisor
     /// re-broadcasts to every client (`heartbeats_changed`).
     HeartbeatsChanged,
+    /// A worker re-host moved an attached session to a new active id
+    /// (`session_binding`); the client re-attaches under the new id.
+    SessionBinding(Value),
 }
 
 /// A client connection to the supervisor socket: JSONL command envelopes
@@ -144,6 +147,9 @@ impl DaemonLink {
                     }
                     "heartbeats_changed" => {
                         let _ = frame_tx.send(ReadFrame::Frame(LinkFrame::HeartbeatsChanged));
+                    }
+                    "session_binding" => {
+                        let _ = frame_tx.send(ReadFrame::Frame(LinkFrame::SessionBinding(value)));
                     }
                     _ => {}
                 }
@@ -486,6 +492,8 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                             });
                         }
                     }
+                    // The ACP mode keeps its startup binding.
+                    LinkFrame::SessionBinding(_) => {}
                     // Heartbeats are connection-scoped, not session events,
                     // so the consumer maps the broadcast directly instead of
                     // `wire_updates`: TS publishes the change at origin turn 0
@@ -1095,26 +1103,7 @@ async fn acquire_stop_input_pause(
         hosted.input_pause_key = Some(lease_key.clone());
         (hosted.daemon_active_session_id.clone(), lease_key)
     };
-    let response = link
-        .request(DaemonCommand::AcquireSessionInputPause {
-            id: None,
-            active_session_id: daemon_session_id.clone(),
-            lease_key: lease_key.clone(),
-            rest: Map::default(),
-        })
-        .await?;
-    if !response.success {
-        anyhow::bail!(response
-            .error
-            .unwrap_or_else(|| "unknown error".to_string()));
-    }
-    let pause_id = response
-        .data
-        .unwrap_or(Value::Null)
-        .get("pauseId")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("the daemon returned no session input pause id"))?;
+    let pause_id = acquire_session_input_pause(link, &daemon_session_id, &lease_key).await?;
     {
         let mut guard = state.lock().await;
         if let Some(hosted) = guard
@@ -1131,7 +1120,36 @@ async fn acquire_stop_input_pause(
     })
 }
 
-async fn release_session_input_pause(
+/// Take a session input pause (queued input does not start turns while it
+/// is held) and answer its pause id.
+pub(crate) async fn acquire_session_input_pause(
+    link: &Arc<DaemonLink>,
+    daemon_session_id: &str,
+    lease_key: &str,
+) -> anyhow::Result<String> {
+    let response = link
+        .request(DaemonCommand::AcquireSessionInputPause {
+            id: None,
+            active_session_id: daemon_session_id.to_string(),
+            lease_key: lease_key.to_string(),
+            rest: Map::default(),
+        })
+        .await?;
+    if !response.success {
+        anyhow::bail!(response
+            .error
+            .unwrap_or_else(|| "unknown error".to_string()));
+    }
+    response
+        .data
+        .unwrap_or(Value::Null)
+        .get("pauseId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("the daemon returned no session input pause id"))
+}
+
+pub(crate) async fn release_session_input_pause(
     link: &Arc<DaemonLink>,
     daemon_session_id: &str,
     pause_id: &str,

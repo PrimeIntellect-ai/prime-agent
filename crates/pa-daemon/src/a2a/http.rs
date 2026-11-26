@@ -35,12 +35,19 @@ pub(crate) async fn serve(
     server: Arc<Server>,
     bearer_token: String,
     product_version: String,
+    public_url: Option<String>,
 ) -> anyhow::Result<()> {
     let loopback = listener.local_addr()?.ip().is_loopback();
+    let public_authority = public_url.as_deref().map(|url| {
+        let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+        rest.split('/').next().unwrap_or_default().to_string()
+    });
     let gate = Arc::new(Gate {
         bearer_digest: digest(&bearer_token),
         loopback,
         product_version,
+        public_url,
+        public_authority,
     });
     loop {
         let tcp = match listener.accept().await {
@@ -59,7 +66,10 @@ pub(crate) async fn serve(
             let service = hyper::service::service_fn(move |request| {
                 handle(request, Arc::clone(&server), Arc::clone(&gate))
             });
+            // The timer enables hyper's header-read timeout, so a peer that
+            // never finishes its request head cannot hold the connection.
             if let Err(error) = hyper::server::conn::http1::Builder::new()
+                .timer(hyper_util::rt::TokioTimer::new())
                 .serve_connection(hyper_util::rt::TokioIo::new(tcp), service)
                 .await
             {
@@ -73,6 +83,10 @@ struct Gate {
     bearer_digest: [u8; 32],
     loopback: bool,
     product_version: String,
+    /// The public URL of a TLS front (`--a2a-public-url`), and its
+    /// authority: the one non-loopback `Host` a loopback bind accepts.
+    public_url: Option<String>,
+    public_authority: Option<String>,
 }
 
 async fn handle(
@@ -89,12 +103,22 @@ async fn handle(
             .to_string()
     };
     let host = header(hyper::header::HOST);
-    if headers.contains_key(hyper::header::ORIGIN) || (gate.loopback && !is_loopback_host(&host)) {
+    let public_host = gate
+        .public_authority
+        .as_deref()
+        .is_some_and(|authority| authority.eq_ignore_ascii_case(&host));
+    if headers.contains_key(hyper::header::ORIGIN)
+        || (gate.loopback && !public_host && !is_loopback_host(&host))
+    {
         return Ok(plain(StatusCode::FORBIDDEN, "forbidden"));
     }
     if request.method() == Method::GET && request.uri().path() == CARD_PATH {
+        let url = gate
+            .public_url
+            .clone()
+            .unwrap_or_else(|| format!("http://{host}/"));
         return Ok(card_response(
-            &host,
+            &url,
             &gate.product_version,
             &header(hyper::header::IF_NONE_MATCH),
         ));
@@ -248,13 +272,13 @@ fn digest(value: &str) -> [u8; 32] {
 }
 
 /// The agent card (spec 8): what this server implements and nothing more.
-/// Its interface URL follows the `Host` the client used.
-fn agent_card(host: &str, product_version: &str) -> Value {
+/// Its interface URL is the public URL, or else follows the client's `Host`.
+fn agent_card(url: &str, product_version: &str) -> Value {
     json!({
         "name": "Prime Agent",
         "description": "A general-purpose coding and research agent driven over A2A.",
         "supportedInterfaces": [{
-            "url": format!("http://{host}/"),
+            "url": url,
             "protocolBinding": "JSONRPC",
             "protocolVersion": "1.0",
         }],
@@ -280,8 +304,8 @@ fn agent_card(host: &str, product_version: &str) -> Value {
 }
 
 /// The card with an `ETag`, answering a matching `If-None-Match` with 304.
-fn card_response(host: &str, product_version: &str, if_none_match: &str) -> Response<Body> {
-    let body = agent_card(host, product_version).to_string();
+fn card_response(url: &str, product_version: &str, if_none_match: &str) -> Response<Body> {
+    let body = agent_card(url, product_version).to_string();
     let hash = u64::from_be_bytes(digest(&body)[..8].try_into().expect("eight bytes"));
     let etag = format!("\"{hash:016x}\"");
     let response = Response::builder()

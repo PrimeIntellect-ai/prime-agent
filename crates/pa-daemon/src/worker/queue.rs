@@ -593,6 +593,22 @@ pub(crate) const INBOX_ARRIVAL_QUEUE_KEY: &str = "inbox:arrival";
 /// The coalescing key of the periodic unread reminder.
 pub(crate) const INBOX_REMINDER_QUEUE_KEY: &str = "inbox:reminder";
 
+/// Whether a run's anchor row continues the session's own work (a goal or
+/// autonomous continuation, or a notice about the session's own children,
+/// cells, and jobs) rather than bringing a new delivery (a prompt, an agent
+/// message, a scheduled fire).
+pub(crate) fn continues_session_work(item: &QueuedItem) -> bool {
+    item.admission_id.is_none()
+        && item.agent_message.is_none()
+        && match item.queue_key.as_deref() {
+            Some(key) => matches!(
+                key,
+                AUTONOMOUS_QUEUE_KEY | INBOX_ARRIVAL_QUEUE_KEY | INBOX_REMINDER_QUEUE_KEY
+            ),
+            None => item.custom_message.is_some(),
+        }
+}
+
 /// Admit one inbox arrival (the daemon's inbox routing of a
 /// `bash.completed`, `factory.progress`, or agent-message notice): the
 /// message lands in the session's durable inbox and ONE short steering

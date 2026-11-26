@@ -362,6 +362,14 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
                 "Bind address for --mode a2a (default: 127.0.0.1)",
             ),
             ("--a2a-port <port>", "Port for --mode a2a (default: 7800)"),
+            (
+                "--a2a-max-contexts <n>",
+                "Most live --mode a2a conversations (default: 64)",
+            ),
+            (
+                "--a2a-public-url <url>",
+                "Public URL of a TLS front for --mode a2a",
+            ),
         ],
     },
     OptionGroup {

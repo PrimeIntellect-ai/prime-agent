@@ -388,6 +388,24 @@ impl TurnRunner {
         self.roster_pushes.push();
     }
 
+    /// The run's `agent_start`, tagged with its anchor row: the client's
+    /// own admission id for an admitted prompt, or `continuation` for a row
+    /// that continues the session's own work. Clients that attribute runs
+    /// to their requests (the A2A mode) read the tags.
+    fn agent_start_frame(&self, first: &QueuedItem) -> Value {
+        let mut frame = json!({ "type": "agent_start" });
+        if let Some(client_id) = first
+            .admission_id
+            .as_deref()
+            .and_then(|id| self.prompt_admissions.client_id(id))
+        {
+            frame["clientAdmissionId"] = json!(client_id);
+        } else if super::continues_session_work(first) {
+            frame["continuation"] = json!(true);
+        }
+        frame
+    }
+
     /// One delivery: the first item anchors the turn and the rest ride
     /// as co-delivered user rows of the same run.
     pub(super) async fn run_turn(
@@ -399,7 +417,8 @@ impl TurnRunner {
         let Some((first, batched)) = items.split_first() else {
             return;
         };
-        self.emit_turn_event(json!({ "type": "agent_start" }));
+        let agent_start = self.agent_start_frame(first);
+        self.emit_turn_event(agent_start.clone());
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The pane reporter's run boundary (TS `agent_start`): working.
         self.herdr.lock().unwrap().run_started();
@@ -983,7 +1002,9 @@ impl TurnRunner {
                     // original `toolUse` turn_end, so the marker is the one
                     // wire fact that separates the aborted settle from a
                     // normal one.
-                    EngineEvent::AgentStart => vec![json!({ "type": "agent_start" })],
+                    // A retried or continued run of the same delivery
+                    // carries the delivery's tags too.
+                    EngineEvent::AgentStart => vec![agent_start.clone()],
                     EngineEvent::AgentEnd { messages, aborted } => {
                         let mut frame = json!({
                             "type": "agent_end",

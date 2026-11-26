@@ -27,6 +27,9 @@ struct TaskEntry {
     reply_message_id: String,
     /// The final reply: the turn's assistant messages, blank-line joined.
     reply: String,
+    /// The text of the assistant message that is streaming now; it joins
+    /// the reply even when the message never finishes (a failure, a cancel).
+    open: Option<String>,
     /// The artifact text the streams received so far (the live chunks);
     /// a live task's snapshot carries it, so later chunks append to it.
     streamed: String,
@@ -82,20 +85,30 @@ impl TaskEntry {
             id: id.to_string(),
             context_id: self.context_id.clone(),
             status: self.status(),
-            artifacts: {
+            artifacts: artifacts.then(|| {
                 let text = if self.state.is_terminal() {
                     &self.reply
                 } else {
                     &self.streamed
                 };
-                if artifacts && !text.is_empty() {
-                    vec![Self::artifact(id, text.clone())]
-                } else {
+                if text.is_empty() {
                     Vec::new()
+                } else {
+                    vec![Self::artifact(id, text.clone())]
                 }
-            },
+            }),
             history,
         }
+    }
+
+    fn push_reply(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.reply.is_empty() {
+            self.reply.push_str("\n\n");
+        }
+        self.reply.push_str(text);
     }
 
     fn publish_status(&mut self, id: &str, state: TaskState) {
@@ -116,10 +129,22 @@ pub enum SubscribeError {
     Terminal,
 }
 
-#[derive(Default)]
 pub struct Tasks {
     entries: HashMap<String, TaskEntry>,
     terminal_order: VecDeque<String>,
+    /// This server run's id: page tokens carry it, so a token from an
+    /// earlier run is refused instead of paging a different table.
+    run: String,
+}
+
+impl Default for Tasks {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            terminal_order: VecDeque::new(),
+            run: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
+        }
+    }
 }
 
 impl Tasks {
@@ -134,6 +159,7 @@ impl Tasks {
                 user_message: message,
                 reply_message_id: uuid::Uuid::new_v4().to_string(),
                 reply: String::new(),
+                open: None,
                 streamed: String::new(),
                 separator: false,
                 status_message: None,
@@ -173,6 +199,9 @@ impl Tasks {
     pub fn assistant_message_start(&mut self, id: &str) {
         if let Some(entry) = self.live(id) {
             entry.separator = !entry.streamed.is_empty();
+            if let Some(unfinished) = entry.open.replace(String::new()) {
+                entry.push_reply(&unfinished);
+            }
         }
     }
 
@@ -188,6 +217,9 @@ impl Tasks {
         };
         let append = !entry.streamed.is_empty();
         entry.streamed.push_str(&text);
+        if let Some(open) = &mut entry.open {
+            open.push_str(delta);
+        }
         entry.publish(StreamResponse::ArtifactUpdate(TaskArtifactUpdateEvent {
             task_id: id.to_string(),
             context_id: entry.context_id.clone(),
@@ -199,16 +231,10 @@ impl Tasks {
 
     /// A finished assistant message: its text joins the final reply.
     pub fn assistant_message_end(&mut self, id: &str, text: &str) {
-        let Some(entry) = self.live(id) else {
-            return;
-        };
-        if text.is_empty() {
-            return;
+        if let Some(entry) = self.live(id) {
+            entry.open = None;
+            entry.push_reply(text);
         }
-        if !entry.reply.is_empty() {
-            entry.reply.push_str("\n\n");
-        }
-        entry.reply.push_str(text);
     }
 
     /// Settle a live task: the complete artifact (replacing the live
@@ -217,6 +243,9 @@ impl Tasks {
     /// settled snapshot, or `None` when the task already settled.
     pub fn settle(&mut self, id: &str, state: TaskState, error: Option<String>) -> Option<Task> {
         let entry = self.live(id)?;
+        if let Some(unfinished) = entry.open.take() {
+            entry.push_reply(&unfinished);
+        }
         if !entry.reply.is_empty() {
             entry.publish(StreamResponse::ArtifactUpdate(TaskArtifactUpdateEvent {
                 task_id: id.to_string(),
@@ -311,7 +340,10 @@ impl Tasks {
         {
             None => None,
             Some(token) => {
-                let (at, id) = token.split_once(':').ok_or("pageToken")?;
+                let (at, id) = token
+                    .strip_prefix(self.run.as_str())
+                    .and_then(|rest| rest.strip_prefix(':')?.split_once(':'))
+                    .ok_or("pageToken")?;
                 Some((at.parse::<u64>().map_err(|_| "pageToken")?, id))
             }
         };
@@ -333,7 +365,7 @@ impl Tasks {
         let page: Vec<_> = rows.iter().skip(start).take(page_size as usize).collect();
         let next_page_token = match page.last() {
             Some((id, entry)) if start + page.len() < rows.len() => {
-                format!("{}:{id}", entry.updated_at)
+                format!("{}:{}:{id}", self.run, entry.updated_at)
             }
             _ => String::new(),
         };
@@ -384,7 +416,10 @@ mod tests {
         tasks.text_delta("t", "lo");
         // A mid-stream subscriber's snapshot holds what the chunks built.
         let (mid, _) = tasks.subscribe("t", None).unwrap();
-        assert_eq!(mid.artifacts[0].parts[0].text.as_deref(), Some("Hello"));
+        assert_eq!(
+            mid.artifacts.unwrap()[0].parts[0].text.as_deref(),
+            Some("Hello")
+        );
         tasks.assistant_message_end("t", "Hello");
         tasks.assistant_message_start("t");
         tasks.text_delta("t", "Done");
@@ -424,7 +459,7 @@ mod tests {
         );
         assert_eq!(settled.history.len(), 2);
         assert_eq!(
-            settled.artifacts[0].parts[0].text.as_deref(),
+            settled.artifacts.unwrap()[0].parts[0].text.as_deref(),
             Some("Hello\n\nDone")
         );
         // The first verdict stands; late frames change nothing.
@@ -451,6 +486,29 @@ mod tests {
         assert_ne!(status.message_id, failed.history[1].message_id);
         assert_eq!(tasks.snapshot("t", Some(1)).unwrap().history.len(), 1);
         assert!(tasks.snapshot("t", Some(0)).unwrap().history.is_empty());
+    }
+
+    #[test]
+    fn an_unfinished_message_stays_in_the_reply() {
+        let mut tasks = Tasks::default();
+        tasks.admit("t", message("c"));
+        tasks.start("t");
+        assert_eq!(
+            tasks.snapshot("t", None).unwrap().artifacts,
+            Some(Vec::new())
+        );
+        tasks.assistant_message_start("t");
+        tasks.text_delta("t", "half an ans");
+        // A failure emits its own (empty) message instead of finishing it.
+        tasks.assistant_message_start("t");
+        tasks.assistant_message_end("t", "");
+        let failed = tasks
+            .settle("t", TaskState::Failed, Some("boom".into()))
+            .unwrap();
+        assert_eq!(
+            failed.artifacts.unwrap()[0].parts[0].text.as_deref(),
+            Some("half an ans")
+        );
     }
 
     #[test]
@@ -493,7 +551,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(filtered.total_size, 2);
-        assert!(filtered.tasks.iter().all(|task| task.artifacts.is_empty()));
+        assert!(filtered.tasks.iter().all(|task| task.artifacts.is_none()));
         for bad in [
             ListTasksParams {
                 page_size: Some(0),
@@ -501,6 +559,11 @@ mod tests {
             },
             ListTasksParams {
                 page_token: Some("x".into()),
+                ..Default::default()
+            },
+            // A token minted by an earlier server run.
+            ListTasksParams {
+                page_token: Some("0badc0de:1:t1".into()),
                 ..Default::default()
             },
             ListTasksParams {

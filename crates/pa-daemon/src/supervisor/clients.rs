@@ -1035,6 +1035,29 @@ impl Supervisor {
                 }
                 outcome
             }
+            DaemonCommand::Attach {
+                active_session_id, ..
+            } => {
+                // An attach after a finished detach ends that detach like a
+                // reattach does: the session may acquire pauses again.
+                let client_id = effective_client_id.lock().unwrap().clone();
+                let outcome = self
+                    .route_client_command(
+                        command,
+                        &client_id,
+                        attached,
+                        command_id,
+                        type_name,
+                        Some(stream),
+                    )
+                    .await;
+                let mut cleared = vec![active_session_id.clone()];
+                if let Ok(resident) = self.registry.resolve(active_session_id).await {
+                    cleared.push(resident.worker_id.clone());
+                }
+                Self::clear_detaching_after_reattach(connection, &cleared);
+                outcome
+            }
             DaemonCommand::Reattach {
                 active_session_id,
                 target_active_session_id,

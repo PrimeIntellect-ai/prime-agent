@@ -187,6 +187,8 @@ fn run_a2a_mode(options: &RunOptions) -> Result<i32, String> {
             bind_port: options.a2a_bind.port.unwrap_or(7800),
             bearer_token,
             minted_token_dir,
+            max_contexts: options.a2a_bind.max_contexts.unwrap_or(64),
+            public_url: options.a2a_bind.public_url.clone(),
             product_version: crate::config::version().to_string(),
             create,
         })

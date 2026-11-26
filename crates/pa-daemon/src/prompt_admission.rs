@@ -288,6 +288,8 @@ impl Supervisor {
                 return Self::admission_failure(&command_id, &type_name, &error.to_string())
             }
         };
+        // The worker echoes the client's own id on the run's `agent_start`.
+        payload["clientAdmissionId"] = payload["admissionId"].clone();
         payload["admissionId"] = json!(worker_admission_id);
         if let Some(current) = &rebound_to {
             payload["activeSessionId"] = json!(current);
@@ -485,6 +487,9 @@ impl Supervisor {
 #[derive(Default, Clone)]
 pub(crate) struct WorkerAdmissions {
     admissions: Arc<Mutex<HashMap<String, AdmissionStatus>>>,
+    /// The client's own admission id behind each supervisor-assigned one:
+    /// the run's `agent_start` echoes it to the client that sent the prompt.
+    client_ids: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl WorkerAdmissions {
@@ -492,11 +497,26 @@ impl WorkerAdmissions {
         Self::default()
     }
 
-    fn register(&self, admission_id: &str) {
+    fn register(&self, admission_id: &str, client_id: Option<&str>) {
         self.admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(admission_id.to_string(), AdmissionStatus::Waiting);
+        if let Some(client_id) = client_id {
+            self.client_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(admission_id.to_string(), client_id.to_string());
+        }
+    }
+
+    /// The client's own id for one admission, when its prompt named one.
+    pub(crate) fn client_id(&self, admission_id: &str) -> Option<String> {
+        self.client_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(admission_id)
+            .cloned()
     }
 
     /// Admission at prompt enqueue: a waiting id becomes owned. A cancelled
@@ -519,6 +539,10 @@ impl WorkerAdmissions {
     /// The prompt settled: its admission clears (TS `clearAdmission`).
     pub(crate) fn clear(&self, admission_id: &str) {
         self.admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(admission_id);
+        self.client_ids
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(admission_id);
@@ -547,8 +571,8 @@ impl WorkerAdmissions {
 impl Worker {
     /// Register a prompt's admission; the queued item carries the id so
     /// the turn runner can commit it.
-    pub(crate) fn register_prompt_admission(&self, admission_id: &str) {
-        self.prompt_admissions.register(admission_id);
+    pub(crate) fn register_prompt_admission(&self, admission_id: &str, client_id: Option<&str>) {
+        self.prompt_admissions.register(admission_id, client_id);
     }
 
     /// `cancel_prompt_admission` (the worker arm the supervisor forwards
