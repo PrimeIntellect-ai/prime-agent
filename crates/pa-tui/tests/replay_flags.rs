@@ -40,6 +40,11 @@ fn the_step_flags_open_the_thought_in_the_dumped_frame() {
         "the thought and the cell dump as their summary lines: {compact}"
     );
     assert!(
+        compact.contains(&format!("prime agent v{}", env!("CARGO_PKG_VERSION")))
+            && compact.contains("cwd ~/work/sample-project"),
+        "the splash names the version and the session header's cwd: {compact}"
+    );
+    assert!(
         !compact.contains(REASONING),
         "the reasoning stays folded: {compact}"
     );

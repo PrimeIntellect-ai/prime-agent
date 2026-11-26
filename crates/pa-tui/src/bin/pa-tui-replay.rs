@@ -99,7 +99,18 @@ fn replay() -> Result<()> {
         Some(p) => std::path::PathBuf::from(p),
         None => newest_session()?,
     };
-    let stream = JsonlSessionStream::from_path(&path)?;
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading session {}", path.display()))?;
+    let entries = pa_tui::session::parse_jsonl(&raw)?;
+    // The session header names the working directory the splash shows.
+    let cwd = entries.iter().find_map(|entry| {
+        if let pa_types::session::FileEntry::Header { header } = entry {
+            Some(header.cwd.clone())
+        } else {
+            None
+        }
+    });
+    let stream = JsonlSessionStream::from_entries(entries);
 
     if let Some(size) = &args.frame {
         let (w, h) = size
@@ -108,6 +119,10 @@ fn replay() -> Result<()> {
             .context("--frame expects WxH, e.g. 80x24")?;
         let theme = Theme::builtin(&args.theme, ColorMode::TrueColor);
         let mut view = AgentView::new(theme);
+        view.chrome.version = env!("CARGO_PKG_VERSION").to_string();
+        if let Some(cwd) = cwd {
+            view.chrome.cwd = cwd;
+        }
         view.compact_steps = args.compact_steps;
         if args.show_thinking {
             view.detail = pa_tui::chat::Detail::Details;
