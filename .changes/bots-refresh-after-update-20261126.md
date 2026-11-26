@@ -1,0 +1,1 @@
+- `prime-agent bots refresh` upgrades every running bot in place to the daemon's own prime-agent version through the new `refresh_bots` daemon command; bots that do not run are skipped, never woken, and install the version on their next wake. The command boots the daemon when none is listening and refuses one that runs another version, so a refresh never installs the wrong build.

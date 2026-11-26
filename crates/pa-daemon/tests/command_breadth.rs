@@ -449,6 +449,7 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
     ("pause_bot", r#"{"type": "pause_bot", "botId": "b"}"#),
     ("resume_bot", r#"{"type": "resume_bot", "botId": "b"}"#),
     ("list_bots", r#"{"type": "list_bots"}"#),
+    ("refresh_bots", r#"{"type": "refresh_bots"}"#),
     ("list_bot_secrets", r#"{"type": "list_bot_secrets"}"#),
     (
         "set_bot_secret_inject",

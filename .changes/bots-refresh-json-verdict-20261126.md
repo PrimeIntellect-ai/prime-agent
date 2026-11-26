@@ -1,0 +1,1 @@
+- `prime-agent bots refresh --json` now fails when any bot failed to refresh: both output modes share one verdict from the failed-row count, so automation cannot read a failed refresh as a success.

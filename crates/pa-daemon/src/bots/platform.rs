@@ -212,6 +212,12 @@ const STREAM_START_WAIT: Duration = Duration::from_secs(60);
 const EXEC_DEADLINE_MS: u64 = 10 * 60 * 1000;
 /// The daemon stops waiting on a silent gateway this long after sandboxd's kill.
 const EXEC_WAIT: Duration = Duration::from_millis(EXEC_DEADLINE_MS + 60_000);
+/// The multipart tarball upload's request deadline. The client's default
+/// is sized for JSON calls, but one request carries a release tarball up
+/// to the gateway's transfer limit, so the upload needs the exec budget's
+/// order of magnitude or it times out and the install falls back to the
+/// slow exec stream.
+const UPLOAD_TIMEOUT: Duration = Duration::from_mins(10);
 /// The daemon keeps this much of each guest output channel; the rest is dropped.
 const MAX_EXEC_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -606,7 +612,13 @@ impl BotPlatform for PrimePlatform {
                 content: bytes.to_vec(),
             };
             self.client
-                .upload_file(sandbox_id, request, &GatewayOptions::default())
+                .upload_file(
+                    sandbox_id,
+                    request,
+                    &GatewayOptions {
+                        request_timeout: Some(UPLOAD_TIMEOUT),
+                    },
+                )
                 .await
                 .map(|_upload| ())
                 .map_err(|error| map_error(&error))
