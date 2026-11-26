@@ -85,7 +85,9 @@ async fn the_upload_deadline_override_wins_the_race() {
     // The bot install rides one multipart upload whose deadline comes from
     // `GatewayOptions`, not the client default. The platform auth hands
     // out loopback gateway credentials, the upload's reply stalls, and the
-    // per-request override must abort the call.
+    // per-request override must abort the call. The client default here is
+    // two seconds, so the one-second bound fails if the override is ever
+    // ignored: the regression cannot pass as this test's green.
     let server = MockServer::start(Vec::new()).await;
     let credentials = serde_json::json!({
         "gateway_url": server.url(""),
@@ -119,7 +121,11 @@ async fn the_upload_deadline_override_wins_the_race() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), SandboxErrorCode::Timeout);
-    assert!(started.elapsed() < Duration::from_secs(5), "hard abort");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the override fired, not the client default: {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]

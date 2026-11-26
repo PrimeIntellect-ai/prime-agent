@@ -1056,4 +1056,37 @@ mod tests {
             "{refused:#}"
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_bots_skips_stale_running_rows() {
+        let (_dir, platform, manager) = setup();
+        manager.spawn(&spec("bot-a")).await.unwrap();
+        manager.spawn(&spec("bot-b")).await.unwrap();
+        let a = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+        let b = manager.get("bot-b").unwrap().sandbox_id.unwrap();
+        // The guests self-paused and one sandbox ended, while the registry
+        // rows still say Running.
+        platform.state().sandboxes.get_mut(&a).unwrap().status = BotStatus::Paused;
+        platform.state().sandboxes.remove(&b);
+        let installs = platform.state().installs;
+        let creates = platform.state().creates.len();
+
+        let rows = refresh_bots(&manager).await;
+        assert_eq!(rows.len(), 2, "both stale rows are reported: {rows:?}");
+        assert_eq!(rows[0]["botId"], "bot-a");
+        assert_eq!(rows[0]["outcome"], "skipped");
+        assert_eq!(rows[0]["status"], "paused");
+        assert_eq!(rows[1]["botId"], "bot-b");
+        assert_eq!(rows[1]["outcome"], "skipped");
+        assert_eq!(rows[1]["status"], "stopped");
+        // Nothing was woken, recreated, or installed: the platform keeps
+        // the paused sandbox and no new sandbox was created.
+        assert_eq!(platform.state().installs, installs);
+        assert_eq!(platform.state().creates.len(), creates);
+        assert_eq!(
+            platform.state().sandboxes.get(&a).unwrap().status,
+            BotStatus::Paused
+        );
+        assert!(!platform.state().sandboxes.contains_key(&b));
+    }
 }

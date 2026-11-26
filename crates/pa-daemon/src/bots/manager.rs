@@ -752,8 +752,12 @@ impl BotManager {
     /// place: [`BotRefresh::Refreshed`] holds the upgraded record. A bot
     /// whose record no longer says Running — it paused while this refresh
     /// waited for its lock — is [`BotRefresh::Skipped`]: it stays as it is
-    /// and installs the version on its next wake. The record is read under
-    /// the bot's lock, so a pause that completes first is never undone.
+    /// and installs the version on its next wake. The platform is the
+    /// source of truth for what runs now: a guest that self-paused or a
+    /// sandbox that ended leaves a stale Running row, and refreshing only
+    /// what runs means never waking or recreating it. The record is read
+    /// under the bot's lock, so a pause that completes first is never
+    /// undone.
     ///
     /// # Errors
     /// Returns an error for an unknown bot, a bot another bot's daemon
@@ -770,6 +774,15 @@ impl BotManager {
         }
         if record.status != BotStatus::Running {
             return Ok(BotRefresh::Skipped(record));
+        }
+        // The probe never touches the registry: its mutations land on the
+        // clone, and the refresh only reads what the platform says runs.
+        let mut probe = record.clone();
+        let live = self.resolve_existing(&mut probe).await?;
+        if live.as_ref().map(|sandbox| sandbox.status) != Some(BotStatus::Running) {
+            let mut skipped = record;
+            skipped.status = live.map_or(BotStatus::Stopped, |sandbox| sandbox.status);
+            return Ok(BotRefresh::Skipped(skipped));
         }
         let record = self.ensure_running_locked(bot_id).await?;
         Ok(BotRefresh::Refreshed(record))
