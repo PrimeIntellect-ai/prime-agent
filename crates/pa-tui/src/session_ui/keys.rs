@@ -640,7 +640,6 @@ impl SessionUi {
             if let Some(pane) = view.side_pane.as_mut() {
                 pane.expanded = view.detail == crate::chat::Detail::All;
             }
-            self.track_feature_outcome("steps", "completed", None);
             self.dirty = true;
             return Ok(());
         }

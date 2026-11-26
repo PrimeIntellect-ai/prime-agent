@@ -261,7 +261,7 @@ pub const AUTH_CATEGORIES: &[&str] = &[
 
 pub const FEATURE_NAMES: &[&str] = &[
     "model", "login", "logout", "effort", "goal", "new", "resume", "fork", "clone", "tree",
-    "feedback", "factory", "steps",
+    "feedback", "factory",
 ];
 
 pub const FEATURE_OUTCOMES: &[&str] = &[
@@ -750,11 +750,6 @@ const AGENT_SESSION_ENDED: EventRule = EventRule {
         ("feature_factory_failed_count", optional(count())),
         ("feature_factory_canceled_count", optional(count())),
         ("feature_factory_unavailable_count", optional(count())),
-        ("feature_steps_initiated_count", optional(count())),
-        ("feature_steps_completed_count", optional(count())),
-        ("feature_steps_failed_count", optional(count())),
-        ("feature_steps_canceled_count", optional(count())),
-        ("feature_steps_unavailable_count", optional(count())),
     ],
 };
 
@@ -1098,11 +1093,6 @@ const TUI_EXIT: EventRule = EventRule {
         ("feature_factory_failed_count", optional(count())),
         ("feature_factory_canceled_count", optional(count())),
         ("feature_factory_unavailable_count", optional(count())),
-        ("feature_steps_initiated_count", optional(count())),
-        ("feature_steps_completed_count", optional(count())),
-        ("feature_steps_failed_count", optional(count())),
-        ("feature_steps_canceled_count", optional(count())),
-        ("feature_steps_unavailable_count", optional(count())),
         ("input_received_count", optional(count())),
         ("input_queued_count", optional(count())),
         ("input_preparation_count", optional(count())),
