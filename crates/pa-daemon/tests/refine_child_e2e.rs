@@ -1705,24 +1705,25 @@ fn a_refine_child_that_ends_mid_plan_fails_the_refinement() {
         "the failure names the child's end: {error}"
     );
     // The planning call may finish and the child may still send its
-    // reply; the one-shot record retires either way.
+    // reply; the one-shot record retires either way, which its delete
+    // row announces.
     mock.release_plans();
     let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let rows = rlm_children_rows(&mut client, "g1", &session_id);
-        if rows.is_empty() {
-            break;
-        }
+    while !client.events.iter().any(|(event, _)| {
+        event["type"] == "rlm_child_update"
+            && event["child"]["id"] == json!(child_id)
+            && event["child"]["error"] == "Deleted by parent orchestrator"
+    }) {
         assert!(
             Instant::now() < deadline,
-            "the ended refinement child never retired; rows: {rows:?}"
+            "the ended refinement child never retired; stderr: {}",
+            daemon_stderr(&stderr_path)
         );
-        std::thread::sleep(Duration::from_millis(200));
+        client.drain_events(100);
     }
 
     // The flight is released: the next refinement spawns, plans and
     // commits.
-    mock.release_plans();
     let response = refine(&mut client, "r2", &session_id);
     assert_eq!(response["success"], true, "refine failed: {response}");
     let complete = wait_for_event(
