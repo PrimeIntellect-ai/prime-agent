@@ -6,7 +6,7 @@
       "tool": "ipython",
       "name": "python_repl",
       "label": "python_repl",
-      "description": "Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
+      "description": "Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). `cancel_background: true` stops a backgrounded cell that holds the kernel in synchronous code before this cell runs; a cell that ignores the cancel's interrupt has its kernel retired. Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
       "promptSnippet": "python_repl - persistent Python REPL for code, state, and bash() orchestration",
       "executionMode": "sequential",
       "parameters": {
@@ -22,6 +22,10 @@
           "timeout": {
             "type": "integer",
             "description": "Seconds this call waits before auto-backgrounding a still-running cell (default 60 unless the user configured otherwise, max 180). The cell keeps running and its completion notice arrives in the inbox, or as a full session row when it carries rich output."
+          },
+          "cancel_background": {
+            "type": "boolean",
+            "description": "Stop the session's backgrounded Python cell before running this cell. Use it when an earlier cell auto-backgrounded and now holds the kernel in synchronous code (the KernelBusy refusal names that cell): the cell is interrupted, and a cell that ignores the interrupt has its kernel retired, losing unsnapshotted state. The result says whether a cell was stopped."
           }
         }
       }

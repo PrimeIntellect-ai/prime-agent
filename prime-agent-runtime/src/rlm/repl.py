@@ -117,13 +117,19 @@ _handoff_interrupted: set[str] = set()
 # Execute handlers run as tasks so a new cell can start while a backgrounded
 # one waits at an await point; shutdown cancels the set.
 _cell_tasks: "set[asyncio.Task[None]]" = set()
+# The `<cell-N>` code file each in-flight request compiled. The loop thread's
+# stack names the request whose synchronous code holds the kernel, even after
+# the host stopped waiting for it.
+_cell_files: dict[str, str] = {}
 # How long a new cell waits for a running cell's synchronous code to reach
 # an await point before the kernel refuses it.
 _SYNC_CELL_ADMISSION_WAIT_S = 5.0
 _KERNEL_BUSY_SYNC_CELL = (
-    "A backgrounded cell is running synchronous code, so this cell did not run. "
-    "A new cell can start while the backgrounded cell waits at an await point. "
-    "Try again later, or end the turn and read the cell's completion notice when it arrives."
+    "KernelBusy: {holder} is running synchronous code and holds the kernel, so this cell did not run. "
+    "Retry with `cancel_background: true` to stop that cell and run this cell; the user can also "
+    "press the stop key in the TUI. A new cell also starts once the backgrounded cell reaches an "
+    "await point. "
+    "Otherwise end the turn and read the cell's completion notice when it arrives."
 )
 
 
@@ -230,6 +236,30 @@ def _beside_sync_cell() -> bool:
     return False
 
 
+def _kernel_holder() -> str | None:
+    """The request id whose cell code is on the loop thread's stack, or None.
+
+    Read from the reader thread (a snapshot). The frame's `<cell-N>` file names
+    the request running synchronous code — attached, or backgrounded with the
+    host no longer waiting for it.
+    """
+    frame = sys._current_frames().get(threading.main_thread().ident)  # noqa: SLF001
+    while frame is not None:
+        name = frame.f_code.co_filename
+        if name.startswith("<cell-"):
+            with _interrupt_lock:
+                return _cell_files.get(name)
+        frame = frame.f_back
+    return None
+
+
+def _kernel_busy_message(holder: str | None) -> str:
+    """Name the cell that holds the kernel and say how to stop it."""
+    return _KERNEL_BUSY_SYNC_CELL.format(
+        holder=f"cell {holder!r}" if holder else "another cell"
+    )
+
+
 def _admit_beside_sync_cell(req: dict[str, Any], queue: asyncio.Queue[dict[str, Any]]) -> None:
     """The one guard on concurrent cells, on its own thread.
 
@@ -249,7 +279,8 @@ def _admit_beside_sync_cell(req: dict[str, Any], queue: asyncio.Queue[dict[str, 
             if interrupted:
                 _send({"event": "error", "id": rid, "ename": "KeyboardInterrupt", "evalue": "", "traceback": ["KeyboardInterrupt\n"]})
             else:
-                _send({"event": "error", "id": rid, "ename": "KernelBusy", "evalue": _KERNEL_BUSY_SYNC_CELL, "traceback": []})
+                holder = _kernel_holder()
+                _send({"event": "error", "id": rid, "ename": "KernelBusy", "evalue": _kernel_busy_message(holder), "traceback": []})
             _send({"event": "done", "id": rid, "status": "error"})
             return
         time.sleep(0.02)
@@ -769,6 +800,10 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     cell_id = req["id"]
     _cell_counter += 1
     filename = f"<cell-{_cell_counter}>"
+    with _interrupt_lock:
+        # Name this request's cell frames, so an admission refusal and the
+        # protocol interrupt can identify the cell that holds the kernel.
+        _cell_files[filename] = cell_id
     execution = _CellExecution()
     cell_token = _current_cell.set(cell_id)
     execution_token = _current_cell_execution.set(execution)
@@ -805,6 +840,8 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     finally:
         execution.owner = None
         execution.finished.set()
+        with _interrupt_lock:
+            _cell_files.pop(filename, None)
         _current_cell_execution.reset(execution_token)
         _current_cell.reset(cell_token)
 

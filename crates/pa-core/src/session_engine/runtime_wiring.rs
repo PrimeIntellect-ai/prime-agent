@@ -393,6 +393,16 @@ impl IpythonKernelProvisioner for KernelProvisioner {
         Box::pin(async move { this.kill_and_wait().await })
     }
 
+    fn cancel_background_cell(&self) -> Pin<Box<dyn Future<Output = bool> + Send>> {
+        let this = self.clone();
+        Box::pin(async move {
+            match this.manager() {
+                Some(manager) => manager.abort_detached_execution(),
+                None => false,
+            }
+        })
+    }
+
     fn take_kernel_restart_note(&self) -> bool {
         self.take_kernel_restart_note()
     }

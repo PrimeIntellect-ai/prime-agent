@@ -168,6 +168,12 @@ pub trait IpythonKernelProvisioner: Send + Sync {
 
     /// Kill the kernel immediately, losing all in-memory state.
     fn kill(&self) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    /// Stop the session's backgrounded kernel cell — the same scoped cancel
+    /// the UI's idle stop key sends. `false` when no backgrounded cell is
+    /// running (or no kernel exists yet).
+    fn cancel_background_cell(&self) -> Pin<Box<dyn Future<Output = bool> + Send>> {
+        Box::pin(async { false })
+    }
     /// Whether the kernel this provisioner serves restarted because a
     /// forced stop retired its predecessor (a cell that ignored its stop
     /// interrupt); reading takes the note, so exactly one foreground
@@ -338,9 +344,9 @@ fn background_cell_message(detached: &crate::kernel::shared::DetachedCell) -> St
         "{cause}; the cell was auto-backgrounded (cell {}) and keeps running — nothing was killed. \
 Answer the incoming message or continue the turn: a new cell can run while it waits at an await \
 point, but not while it runs synchronous code. Read the cell's results only after its completion notice arrives (the inbox carries it, or a full \
-session row when it carries rich output). The user can cancel \
-backgrounded work; a cell that ignores the cancel's interrupt has its kernel retired, which may \
-lose unsnapshotted state.",
+session row when it carries rich output). Stop it with `cancel_background: true`, or the user can \
+press the stop key in the TUI; a cell that ignores the cancel's interrupt has its kernel retired, \
+which may lose unsnapshotted state.",
         detached.cell_id
     )
 }
@@ -393,6 +399,10 @@ pub fn ipython_tool_schema() -> serde_json::Value {
                     "Seconds this call waits before auto-backgrounding a still-running cell (default {} unless the user configured otherwise, max {PYTHON_REPL_TIMEOUT_MAX_S}). The cell keeps running and its completion notice arrives in the inbox, or as a full session row when it carries rich output.",
                     DEFAULT_PYTHON_CELL_TIMEOUT_MS / 1000
                 )
+            },
+            "cancel_background": {
+                "type": "boolean",
+                "description": "Stop the session's backgrounded Python cell before running this cell. Use it when an earlier cell auto-backgrounded and now holds the kernel in synchronous code (the KernelBusy refusal names that cell): the cell is interrupted, and a cell that ignores the interrupt has its kernel retired, losing unsnapshotted state. The result says whether a cell was stopped."
             }
         }
     })
@@ -409,7 +419,7 @@ fn timeout_arg_ms(params: &serde_json::Value) -> Option<u64> {
 }
 
 pub fn ipython_tool_description() -> &'static str {
-    "Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment."
+    "Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). `cancel_background: true` stops a backgrounded cell that holds the kernel in synchronous code before this cell runs; a cell that ignores the cancel's interrupt has its kernel retired. Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment."
 }
 
 #[tracing::instrument(
@@ -546,7 +556,20 @@ pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("python_repl tool requires a code string"))?
                     .to_string();
-                execute_ipython(
+                // `cancel_background`: the scoped cell stop the UI's idle
+                // stop key sends, run before the cell. A cell that ignores
+                // the stop has its kernel retired at the manager's grace, so
+                // this cell never queues behind wedged code.
+                let cancel_background = params
+                    .get("cancel_background")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true);
+                let stopped_background = if cancel_background {
+                    options.provisioner.cancel_background_cell().await
+                } else {
+                    false
+                };
+                let mut result = execute_ipython(
                     &options,
                     &code,
                     timeout_arg_ms(&params),
@@ -554,7 +577,24 @@ pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -
                     on_update,
                     on_late_sent_agent_message,
                 )
-                .await
+                .await?;
+                if cancel_background {
+                    let note = if stopped_background {
+                        "Stopped the backgrounded cell that held the kernel.\n\n"
+                    } else {
+                        "No backgrounded cell was running.\n\n"
+                    };
+                    result
+                        .content
+                        .insert(0, ToolContentBlock::text(note.to_string()));
+                    if let Some(details) = result.details.as_mut().and_then(|d| d.as_object_mut()) {
+                        details.insert(
+                            "stoppedBackgroundCell".to_string(),
+                            json!(stopped_background),
+                        );
+                    }
+                }
+                Ok(result)
             })
         })
     };
@@ -622,6 +662,154 @@ mod tests {
         assert_eq!(humanize_ms(1500), "1.500s");
         // A sub-100ms remainder must not read as tenths: 60.005s, not 60.5s.
         assert_eq!(humanize_ms(60_005), "60.005s");
+    }
+
+    /// The tool's `cancel_background` opt-in: the scoped cell stop runs
+    /// BEFORE the cell, and the result says whether a cell was stopped.
+    #[tokio::test]
+    async fn cancel_background_stops_the_backgrounded_cell_before_running_the_code() {
+        use std::sync::Mutex;
+
+        struct FakeKernel {
+            events: Arc<Mutex<Vec<String>>>,
+        }
+        impl KernelExecutor for FakeKernel {
+            fn execute(&self, code: &str, _options: KernelExecuteOptions<'_>) -> ExecuteCellFuture {
+                self.events.lock().unwrap().push(format!("execute:{code}"));
+                Box::pin(async {
+                    Ok(ExecuteResult {
+                        stdout: "ran".to_string(),
+                        ..Default::default()
+                    })
+                })
+            }
+        }
+        struct FakeProvisioner {
+            events: Arc<Mutex<Vec<String>>>,
+            stopped: bool,
+        }
+        impl IpythonKernelProvisioner for FakeProvisioner {
+            fn ensure(
+                &self,
+                _on_progress: Option<BootstrapProgressHandler>,
+                _signal: Option<AbortSignal>,
+            ) -> Pin<Box<dyn Future<Output = anyhow::Result<Box<dyn KernelExecutor>>> + Send>>
+            {
+                let kernel: Box<dyn KernelExecutor> = Box::new(FakeKernel {
+                    events: Arc::clone(&self.events),
+                });
+                Box::pin(async move { Ok(kernel) })
+            }
+            fn kill(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+                Box::pin(async {})
+            }
+            fn cancel_background_cell(&self) -> Pin<Box<dyn Future<Output = bool> + Send>> {
+                self.events.lock().unwrap().push("cancel".to_string());
+                let stopped = self.stopped;
+                Box::pin(async move { stopped })
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let options = IpythonToolOptions {
+            provisioner: Arc::new(FakeProvisioner {
+                events: Arc::clone(&events),
+                stopped: true,
+            }),
+            on_late_sent_agent_message: None,
+        };
+        let definition = create_ipython_tool_definition("", options);
+        let result = (definition.execute)(
+            "call-1",
+            json!({ "code": "print('fresh')", "cancel_background": true }),
+            None,
+            None,
+        )
+        .await
+        .expect("the tool call settles");
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["cancel".to_string(), "execute:print('fresh')".to_string()],
+            "the scoped stop must precede the cell it unblocks"
+        );
+        assert_eq!(
+            result.content.first().and_then(ToolContentBlock::as_text),
+            Some("Stopped the backgrounded cell that held the kernel.\n\n")
+        );
+        assert_eq!(
+            result
+                .details
+                .as_ref()
+                .and_then(|d| d.get("stoppedBackgroundCell")),
+            Some(&json!(true))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancel_with_no_backgrounded_cell_says_so() {
+        struct SilentKernel;
+        impl KernelExecutor for SilentKernel {
+            fn execute(
+                &self,
+                _code: &str,
+                _options: KernelExecuteOptions<'_>,
+            ) -> ExecuteCellFuture {
+                Box::pin(async {
+                    Ok(ExecuteResult {
+                        result: Some("2".to_string()),
+                        ..Default::default()
+                    })
+                })
+            }
+        }
+        struct IdleProvisioner;
+        impl IpythonKernelProvisioner for IdleProvisioner {
+            fn ensure(
+                &self,
+                _on_progress: Option<BootstrapProgressHandler>,
+                _signal: Option<AbortSignal>,
+            ) -> Pin<Box<dyn Future<Output = anyhow::Result<Box<dyn KernelExecutor>>> + Send>>
+            {
+                let kernel: Box<dyn KernelExecutor> = Box::new(SilentKernel);
+                Box::pin(async move { Ok(kernel) })
+            }
+            fn kill(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+                Box::pin(async {})
+            }
+            fn cancel_background_cell(&self) -> Pin<Box<dyn Future<Output = bool> + Send>> {
+                Box::pin(async { false })
+            }
+        }
+
+        let options = IpythonToolOptions {
+            provisioner: Arc::new(IdleProvisioner),
+            on_late_sent_agent_message: None,
+        };
+        let definition = create_ipython_tool_definition("", options);
+        let result = (definition.execute)(
+            "call-2",
+            json!({ "code": "1 + 1", "cancel_background": true }),
+            None,
+            None,
+        )
+        .await
+        .expect("the tool call settles");
+        assert_eq!(
+            result.content.first().and_then(ToolContentBlock::as_text),
+            Some("No backgrounded cell was running.\n\n")
+        );
+        assert_eq!(
+            result
+                .details
+                .as_ref()
+                .and_then(|d| d.get("stoppedBackgroundCell")),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            result.content.get(1).and_then(ToolContentBlock::as_text),
+            Some("2")
+        );
     }
 
     #[test]

@@ -2191,6 +2191,26 @@ class ConcurrentCellTest(unittest.TestCase):
         self.assertEqual(refusal["ename"], "KernelBusy")
         self.assertNotIn("next ran", stream_text(events, "stdout"))
 
+    def test_the_refusal_names_the_sync_cell_and_its_interrupt_frees_the_kernel(self):
+        # The reported wedge: a cell holds the kernel in synchronous code (the
+        # host already auto-backgrounded it), so a new cell is refused. The
+        # refusal names the holding cell and how to stop it; interrupting that
+        # cell ends it and the next cell runs on the same kernel.
+        self.repl.send({"type": "execute", "id": "holder", "code": "import time\ntime.sleep(30)"})
+        time.sleep(0.5)
+        self.repl.send({"type": "execute", "id": "next", "code": "print('next ran')"})
+        events = self.repl.until_done("next")
+        refusal = next(e for e in events if e.get("event") == "error" and e.get("id") == "next")
+        self.assertEqual(refusal["ename"], "KernelBusy")
+        self.assertIn("cell 'holder'", refusal["evalue"], "the refusal must name the holder")
+        self.assertIn("cancel_background: true", refusal["evalue"])
+        self.repl.send({"type": "interrupt", "id": "holder"})
+        holder = self.repl.until_done("holder")
+        self.assertEqual(next(e for e in holder if e.get("event") == "error")["ename"], "KeyboardInterrupt")
+        self.assertEqual(one(holder, "done")["status"], "error")
+        follow = self.repl.execute("after-holder", "6 * 7")
+        self.assertEqual(one(follow, "result")["text"], "42")
+
     def test_interrupting_the_awaiting_cell_leaves_the_synchronous_cell_running(self):
         events: list[dict] = []
         self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nprint('started')\nawait asyncio.sleep(30)"})
