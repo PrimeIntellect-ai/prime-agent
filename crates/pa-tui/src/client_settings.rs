@@ -125,6 +125,19 @@ pub trait ClientSettings: Send + Sync {
     fn set_emoji_shortcodes(&self, _enabled: bool) -> Result<()> {
         anyhow::bail!("Emoji shortcode settings are unavailable")
     }
+    /// `compactSteps` (default false): a chat opens with each thought and tool call as one
+    /// summary line.
+    fn compact_steps(&self) -> bool {
+        false
+    }
+    /// Persists `compactSteps` to the global scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the settings store fails or is unavailable.
+    fn set_compact_steps(&self, _enabled: bool) -> Result<()> {
+        anyhow::bail!("Compact step settings are unavailable")
+    }
     /// `editorPaddingX` (TS default 0).
     fn editor_padding_x(&self) -> u64;
     /// Persists `editorPaddingX` to the global scope.

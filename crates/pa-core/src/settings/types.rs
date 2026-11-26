@@ -401,6 +401,8 @@ pub struct Settings {
     pub show_hardware_cursor: Option<bool>,
     /// Typing `:name` in the prompt editor suggests matching emoji (unset means on).
     pub emoji_shortcodes: Option<bool>,
+    /// The TUI renders each thought and tool call as one summary line (unset means off).
+    pub compact_steps: Option<bool>,
     pub markdown: Option<MarkdownSettings>,
     pub warnings: Option<WarningSettings>,
     /// Session storage can restore executable kernel state, so only global

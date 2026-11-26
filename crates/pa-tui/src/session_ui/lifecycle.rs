@@ -120,6 +120,7 @@ impl SessionUi {
             last_prompt_turn_end: 0,
             steering_mode: "all".to_string(),
             streaming_index: None,
+            thinking_started: None,
             working_tokens: LoaderTokenTracker::default(),
             turn_error_shown: false,
             pending_tools: HashSet::default(),

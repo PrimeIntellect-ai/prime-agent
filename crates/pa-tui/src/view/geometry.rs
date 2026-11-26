@@ -34,11 +34,10 @@ impl AgentView {
                 let empty = crate::markdown::MarkdownBlockCache::default();
                 crate::chat::assistant_row_count(
                     message,
-                    detail,
+                    &self.assistant_layout(index, preceded_by_tool),
                     &self.theme,
                     &self.code_block_indent,
                     width,
-                    preceded_by_tool,
                     caches.get(&index).unwrap_or(&empty),
                 )
             }
@@ -66,15 +65,19 @@ impl AgentView {
             }
             ChatEntry::Tool(card) => {
                 usize::from(spacing)
-                    + crate::tool_card::count_tool_card(
-                        card,
-                        self.pulse_frame,
-                        detail,
-                        self.detail,
-                        &self.theme,
-                        width,
-                        self.show_images,
-                    )
+                    + if self.compact_steps && !detail.tool_output_expanded() {
+                        1
+                    } else {
+                        crate::tool_card::count_tool_card(
+                            card,
+                            self.pulse_frame,
+                            detail,
+                            self.tool_card_level(detail),
+                            &self.theme,
+                            width,
+                            self.show_images,
+                        )
+                    }
             }
             ChatEntry::BashExecution(card) => {
                 // The card render is bounded (a 20-visual-line preview
@@ -405,7 +408,8 @@ mod tests {
         })]
 
         // Every transcript entry counts exactly the rows it paints, at
-        // every detail level, including narrow widths.
+        // every detail level, with and without compact steps, clicked or
+        // not, including narrow widths.
         #[test]
         fn entry_rows_count_what_paint_draws(
             entries in prop::collection::vec(entry(), 1..8),
@@ -414,13 +418,21 @@ mod tests {
             indent in prop::sample::select(vec!["", "  "]),
             color in prop::sample::select(vec![ColorMode::TrueColor, ColorMode::Color256]),
             show_images in any::<bool>(),
+            compact_steps in any::<bool>(),
+            clicked in prop::collection::vec(any::<bool>(), 8),
         ) {
             let mut view = AgentView::new(Theme::builtin("prime", color));
             view.detail = detail;
             view.show_images = show_images;
+            view.compact_steps = compact_steps;
             indent.clone_into(&mut view.code_block_indent);
-            for entry in entries {
+            for (index, entry) in entries.into_iter().enumerate() {
+                let notice = matches!(entry, ChatEntry::InboxNotice(_));
                 view.push_entry(entry);
+                // A click toggles a notice run through its head; the other rows flip themselves.
+                if clicked[index] && !notice {
+                    view.toggle_card_expansion(index);
+                }
             }
             for (index, entry) in view.chat.iter().enumerate() {
                 let preceded = index > 0 && AgentView::is_compact_neighbor(&view.chat[index - 1]);

@@ -261,6 +261,7 @@ async fn run_interactive_surface(
         // A chat opens at the persisted `chatDetail` level; an unset store reads as the collapsed
         // `overview` startup level (operator directive 2026-09-28).
         view.detail = crate::chat::Detail::from_wire_name(&settings.chat_detail());
+        view.compact_steps = settings.compact_steps();
     }
     apply_startup_chrome(&mut view, &options);
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiInput>();

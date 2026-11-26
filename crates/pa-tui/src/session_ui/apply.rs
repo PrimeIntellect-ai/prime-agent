@@ -942,6 +942,22 @@ impl SessionUi {
                 }
             }
         }
+        // The compact-steps thought line's time: from the open message's `thinking_start` to its
+        // `thinking_end`.
+        match stream_event
+            .and_then(|event| event.get("type"))
+            .and_then(Value::as_str)
+        {
+            Some("thinking_start") => self.thinking_started = Some(std::time::Instant::now()),
+            Some("thinking_end") => {
+                if let (Some(started), Some(index)) =
+                    (self.thinking_started.take(), self.streaming_index)
+                {
+                    view.add_thinking_time(index, started.elapsed());
+                }
+            }
+            _ => {}
+        }
         for (id, name, args) in &tool_calls {
             // A streamed tool call first appears queued; the execution start flips it to running,
             // later frames refresh its name and args. The failed run's late frames touch no card.

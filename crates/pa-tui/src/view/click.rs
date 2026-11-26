@@ -38,6 +38,8 @@ pub(super) struct WindowSection {
     pub(super) entry: usize,
     pub(super) from: usize,
     pub(super) to: usize,
+    /// The entry's own row at window row `from` (a span can open mid-entry).
+    pub(super) first_row: usize,
 }
 
 /// The editor content rows' dock geometry, recorded at compose time:
@@ -134,8 +136,19 @@ impl ClickSurface {
         }
     }
 
-    pub(super) fn record_window_section(&mut self, entry: usize, from: usize, to: usize) {
-        self.window_sections.push(WindowSection { entry, from, to });
+    pub(super) fn record_window_section(
+        &mut self,
+        entry: usize,
+        from: usize,
+        to: usize,
+        first_row: usize,
+    ) {
+        self.window_sections.push(WindowSection {
+            entry,
+            from,
+            to,
+            first_row,
+        });
     }
 
     pub(super) fn note_frame(
@@ -272,8 +285,9 @@ impl AgentView {
     /// (agent message, shell completion, compaction summary,
     /// refinement outcome, skill invocation, injected prompt) toggles
     /// that row's own expansion; an inbox-notice row toggles its whole
-    /// run's. Other rows (user, assistant, status, slash, panels) are not
-    /// clickable.
+    /// run's; with compact steps, an assistant message's thought line
+    /// toggles its thinking. Other rows (user, the rest of an assistant
+    /// message, status, slash, panels) are not clickable.
     fn transcript_click_target(&self, window_row: usize) -> Option<ClickAction> {
         let section = self
             .click
@@ -285,6 +299,13 @@ impl AgentView {
             return Some(ClickAction::ToggleCardExpansion(
                 self.inbox_run_head(section.entry),
             ));
+        }
+        if let ChatEntry::Assistant(message) = entry {
+            let row = section.first_row + (window_row - section.from);
+            return (self.compact_steps
+                && message.has_thinking()
+                && row == crate::chat::THINKING_STEP_ROW)
+                .then_some(ClickAction::ToggleCardExpansion(section.entry));
         }
         (matches!(
             entry,
@@ -428,6 +449,50 @@ mod tests {
             let expanded = transcript_text(&mut view);
             assert!(expanded.contains(body), "{body} expands on click");
         }
+    }
+
+    /// With compact steps an assistant message's one click target is its thought line: the
+    /// answer's own rows stay inert (a click there never folds the thinking).
+    #[test]
+    fn only_the_thought_line_of_an_assistant_message_is_clickable() {
+        use crate::chat::{AssistantMessage, MessageBlock};
+        let mut view = view();
+        view.compact_steps = true;
+        view.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![
+                MessageBlock::Thinking("Weighing the two loaders. The cached one wins.".into()),
+                MessageBlock::Text("Use the cached loader.".into()),
+            ],
+            has_tool_calls: false,
+            streaming: false,
+            error: None,
+            aborted: false,
+        })));
+        let frame: Vec<String> = view
+            .render_frame(60, 20)
+            .iter()
+            .map(crate::ansi::line_to_plain)
+            .collect();
+        let row_of = |needle: &str| {
+            frame
+                .iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} renders: {frame:?}"))
+        };
+        let thought = row_of("Thought - Weighing the two loaders.");
+        assert_eq!(
+            thought,
+            section_screen_row(&view, 0) + crate::chat::THINKING_STEP_ROW
+        );
+        assert_eq!(
+            view.click_target_at(thought, 2),
+            Some(ClickAction::ToggleCardExpansion(0))
+        );
+        assert_eq!(
+            view.click_target_at(row_of("Use the cached loader."), 2),
+            None
+        );
+        assert_eq!(view.click_target_at(thought - 1, 2), None);
     }
 
     #[test]

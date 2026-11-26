@@ -69,15 +69,21 @@ pub(crate) fn user_block_row_count(
 
 pub(crate) fn assistant_row_count(
     message: &AssistantMessage,
-    detail: Detail,
+    layout: &super::AssistantLayout,
     theme: &Theme,
     code_block_indent: &str,
     width: usize,
-    preceded_by_tool_activity: bool,
     cache: &MarkdownBlockCache,
 ) -> usize {
+    let detail = layout.detail;
     let blocks = visible_blocks(message, detail);
-    let mut count = usize::from(!blocks.is_empty());
+    let step = layout.thinking_step.is_some() && message.has_thinking();
+    let has_visible_content = step || !blocks.is_empty();
+    let mut count = usize::from(has_visible_content);
+    if step {
+        // The step line, then (collapsed) the spacer that sets it off from the text below.
+        count += 1 + usize::from(!detail.show_thinking() && !blocks.is_empty());
+    }
     let mut md = MarkdownStyle::from_theme(theme);
     code_block_indent.clone_into(&mut md.code_block_indent);
     let content_width = width.saturating_sub(2).max(1);
@@ -112,7 +118,7 @@ pub(crate) fn assistant_row_count(
     count
         + usize::from(trailing_space(
             message,
-            !blocks.is_empty(),
-            preceded_by_tool_activity,
+            has_visible_content,
+            layout.preceded_by_tool_activity,
         ))
 }

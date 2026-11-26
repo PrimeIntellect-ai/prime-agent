@@ -129,6 +129,9 @@ pub struct AgentView {
     /// The `terminal.showImages` setting (default true): image blocks
     /// render metadata rows when set, `[Image: ...]` placeholders otherwise.
     pub show_images: bool,
+    /// The `compactSteps` setting (default false): collapsed thoughts and tool steps render one
+    /// summary line each, and a click on the line expands that step in place.
+    pub compact_steps: bool,
     /// The `showHardwareCursor` setting (TS default false): frame paints
     /// never drag a visible cursor across the pane.
     pub show_hardware_cursor: bool,
@@ -175,6 +178,10 @@ pub struct AgentView {
     /// Entries whose card a click flipped away from the level's
     /// tool-output expansion (see `view/expansion.rs`).
     toggled_cards: std::collections::BTreeSet<usize>,
+    /// Assistant entries' live-measured thinking time, the compact-steps
+    /// thought line's `Thought for 3.2s`; keyed by chat index like
+    /// `toggled_cards`.
+    thinking_times: std::collections::BTreeMap<usize, std::time::Duration>,
     /// The inbox-notice run head of each chat entry, filled lazily from the
     /// front (see `view/inbox_run.rs`); a mutation at an index truncates it there.
     inbox_run_heads: std::cell::RefCell<Vec<usize>>,
@@ -363,6 +370,7 @@ impl AgentView {
             overlay: None,
             side_pane: None,
             show_images: true,
+            compact_steps: false,
             show_hardware_cursor: false,
             splash_suppressed: false,
             older_history_loading: false,
@@ -382,6 +390,7 @@ impl AgentView {
             sparse_enabled: true,
             sparse_entries: std::collections::BTreeSet::new(),
             toggled_cards: std::collections::BTreeSet::new(),
+            thinking_times: std::collections::BTreeMap::new(),
             inbox_run_heads: std::cell::RefCell::new(Vec::new()),
             md_caches: std::cell::RefCell::new(std::collections::HashMap::new()),
             layout_width: 0,
@@ -432,6 +441,7 @@ impl AgentView {
         self.md_caches.borrow_mut().remove(&index);
         self.sparse_entries.remove(&index);
         self.toggled_cards.remove(&index);
+        self.thinking_times.remove(&index);
         self.inbox_run_heads.get_mut().truncate(index);
         self.entry_heights.pop();
         self.entry_layout.pop();
@@ -458,6 +468,14 @@ impl AgentView {
         *kind_slot = kind;
         self.mark_entry_stale(index);
         true
+    }
+
+    /// Add live-measured thinking time to assistant entry `index` (its compact-steps thought line
+    /// reads `Thought for <total>`).
+    pub(crate) fn add_thinking_time(&mut self, index: usize, time: std::time::Duration) {
+        self.prepare_entry_mutation(index);
+        *self.thinking_times.entry(index).or_default() += time;
+        self.mark_entry_stale(index);
     }
 
     /// Append a replay transcript item (mapped onto chat components). A
@@ -628,6 +646,10 @@ impl AgentView {
         if orphaned_runs {
             self.toggled_cards.insert(range.start + inserted);
         }
+        self.thinking_times = std::mem::take(&mut self.thinking_times)
+            .into_iter()
+            .filter_map(|(index, time)| Some((shift(index)?, time)))
+            .collect();
         self.entry_layout.splice(
             range.clone(),
             std::iter::repeat_n([None, None, None], inserted),
@@ -658,6 +680,7 @@ impl AgentView {
         self.sparse_enabled = true;
         self.sparse_entries.clear();
         self.toggled_cards.clear();
+        self.thinking_times.clear();
         self.inbox_run_heads.get_mut().clear();
         self.sparse_window = None;
         self.chat.clear();

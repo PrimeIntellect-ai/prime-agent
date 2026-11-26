@@ -213,6 +213,13 @@ impl ClientSettings for CliClientSettings {
         bool
     );
     setting!(
+        compact_steps,
+        set_compact_steps,
+        get_compact_steps,
+        set_compact_steps,
+        bool
+    );
+    setting!(
         editor_padding_x,
         set_editor_padding_x,
         get_editor_padding_x,

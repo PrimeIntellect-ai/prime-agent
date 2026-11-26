@@ -5,7 +5,8 @@
 
 use super::AgentView;
 use crate::chat::{
-    render_assistant_with_style, render_text_rows, render_user_block_with_style, ChatEntry,
+    render_assistant_with_style, render_text_rows, render_user_block_with_style, AssistantLayout,
+    ChatEntry, Detail, ThinkingStep,
 };
 use crate::theme::ThemeColor;
 use crate::Line;
@@ -31,7 +32,7 @@ impl AgentView {
             idx -= 1;
             match &self.chat[idx] {
                 ChatEntry::Assistant(message) => {
-                    match self.assistant_spacing_content(message) {
+                    match self.assistant_spacing_content(idx, message) {
                         SpacingContent::Hidden => {}
                         SpacingContent::ToolOnly => {
                             tool_separator = true;
@@ -42,7 +43,8 @@ impl AgentView {
                             let preceded_by_tool =
                                 idx > 0 && Self::is_compact_neighbor(&self.chat[idx - 1]);
                             if tool_separator
-                                || message.has_trailing_space(self.detail, preceded_by_tool)
+                                || message
+                                    .has_trailing_space(self.thinking_shown(idx), preceded_by_tool)
                             {
                                 return false;
                             }
@@ -71,11 +73,14 @@ impl AgentView {
         !expanded
     }
 
-    fn assistant_spacing_content(&self, message: &crate::chat::AssistantMessage) -> SpacingContent {
+    fn assistant_spacing_content(
+        &self,
+        index: usize,
+        message: &crate::chat::AssistantMessage,
+    ) -> SpacingContent {
+        let thinking_shown = self.thinking_shown(index);
         let visible_body = message.blocks.iter().any(|block| match block {
-            crate::chat::MessageBlock::Thinking(text) => {
-                self.detail.show_thinking() && !text.trim().is_empty()
-            }
+            crate::chat::MessageBlock::Thinking(text) => thinking_shown && !text.trim().is_empty(),
             crate::chat::MessageBlock::Text(text) => !text.trim().is_empty(),
         });
         if visible_body || message.aborted || (message.error.is_some() && !message.has_tool_calls) {
@@ -85,6 +90,37 @@ impl AgentView {
             SpacingContent::ToolOnly
         } else {
             SpacingContent::Hidden
+        }
+    }
+
+    /// Whether an assistant entry's thinking renders rows: the compact-steps line, or the full
+    /// reasoning at the entry's own level.
+    fn thinking_shown(&self, index: usize) -> bool {
+        self.compact_steps || self.entry_detail(index).show_thinking()
+    }
+
+    /// The inputs assistant entry `index` lays out under (its paint and its count).
+    pub(super) fn assistant_layout(
+        &self,
+        index: usize,
+        preceded_by_tool_activity: bool,
+    ) -> AssistantLayout {
+        AssistantLayout {
+            detail: self.entry_detail(index),
+            preceded_by_tool_activity,
+            thinking_step: self.compact_steps.then(|| ThinkingStep {
+                duration: self.thinking_times.get(&index).copied(),
+            }),
+        }
+    }
+
+    /// The level a tool card renders its body at. Compact steps open a clicked card whole: its
+    /// diffs and sent-message bodies follow the row's own level, not the conversation's.
+    pub(super) fn tool_card_level(&self, detail: Detail) -> Detail {
+        if self.compact_steps {
+            detail
+        } else {
+            self.detail
         }
     }
 
@@ -170,30 +206,22 @@ impl AgentView {
                 let mut md = crate::markdown::MarkdownStyle::from_theme(&self.theme);
                 md.code_block_indent.clone_from(&self.code_block_indent);
                 md.link_base_url = url::Url::from_directory_path(&self.chrome.cwd).ok();
+                let layout = self.assistant_layout(index, preceded_by_tool_activity);
                 // The per-entry block cache (TS's per-component `blockCache`): a streaming
                 // message's settled blocks replay per frame; a settled message drops the copy.
                 if message.streaming {
                     let mut caches = self.md_caches.borrow_mut();
                     let cache = caches.entry(index).or_default();
-                    render_assistant_with_style(
-                        message,
-                        detail,
-                        &self.theme,
-                        &md,
-                        width,
-                        preceded_by_tool_activity,
-                        cache,
-                    )
+                    render_assistant_with_style(message, &layout, &self.theme, &md, width, cache)
                 } else {
                     self.md_caches.borrow_mut().remove(&index);
                     let mut settled = crate::markdown::MarkdownBlockCache::default();
                     render_assistant_with_style(
                         message,
-                        detail,
+                        &layout,
                         &self.theme,
                         &md,
                         width,
-                        preceded_by_tool_activity,
                         &mut settled,
                     )
                 }
@@ -205,15 +233,24 @@ impl AgentView {
                 if self.conversation_leading(index, detail.tool_output_expanded()) {
                     rows.push(Vec::new());
                 }
-                rows.extend(crate::tool_card::render_tool_card(
-                    card,
-                    self.pulse_frame,
-                    detail,
-                    self.detail,
-                    &self.theme,
-                    width,
-                    self.show_images,
-                ));
+                if self.compact_steps && !detail.tool_output_expanded() {
+                    rows.push(crate::tool_card::step_line(
+                        card,
+                        self.pulse_frame,
+                        &self.theme,
+                        width,
+                    ));
+                } else {
+                    rows.extend(crate::tool_card::render_tool_card(
+                        card,
+                        self.pulse_frame,
+                        detail,
+                        self.tool_card_level(detail),
+                        &self.theme,
+                        width,
+                        self.show_images,
+                    ));
+                }
                 rows
             }
             ChatEntry::BashExecution(card) => {

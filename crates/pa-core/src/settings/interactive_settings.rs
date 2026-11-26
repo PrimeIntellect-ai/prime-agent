@@ -229,6 +229,20 @@ impl SettingsManager {
         self.save_global_scope(&["emojiShortcodes"])
     }
 
+    /// `compactSteps` (default false).
+    #[must_use]
+    pub fn get_compact_steps(&self) -> bool {
+        self.settings().compact_steps.unwrap_or(false)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
+    pub fn set_compact_steps(&mut self, enabled: bool) -> Result<()> {
+        self.global_mut().compact_steps = Some(enabled);
+        self.save_global_scope(&["compactSteps"])
+    }
+
     #[must_use]
     pub fn get_editor_padding_x(&self) -> u64 {
         self.settings().editor_padding_x.unwrap_or(0)

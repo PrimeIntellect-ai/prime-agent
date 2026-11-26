@@ -7,25 +7,33 @@ use super::AgentView;
 use crate::chat::{ChatEntry, Detail};
 
 impl AgentView {
-    /// The detail one entry's card renders at: the conversation level,
-    /// flipped for the entries a click toggled away from it. Exact for
-    /// both sides: the never-toggled entries get `self.detail` (a click
-    /// can only toggle the kinds `transcript_click_target` matches),
-    /// and the card renderers read this `Detail` only through
-    /// `tool_output_expanded()`. The level's other readers never see the
-    /// flip: thinking blocks belong to rows no click can toggle, and the
-    /// ipython card's edit diffs read the conversation level (`self.detail`)
-    /// passed beside this one.
+    /// The detail one entry renders at: the conversation level, flipped
+    /// for the entries a click toggled away from it. An assistant entry's
+    /// flip is its thinking's visibility (`show_thinking()`, the compact
+    /// steps' thought line); every other kind flips its output expansion
+    /// (`tool_output_expanded()`). Without compact steps the ipython
+    /// card's edit diffs read the conversation level passed beside this
+    /// one; with them a clicked card opens whole at its own level.
     #[must_use]
     pub(super) fn entry_detail(&self, index: usize) -> Detail {
-        if self.toggled_cards.contains(&index) {
-            if self.detail.tool_output_expanded() {
-                Detail::Overview
-            } else {
-                Detail::All
+        if !self.toggled_cards.contains(&index) {
+            return self.detail;
+        }
+        match self.chat.get(index) {
+            Some(ChatEntry::Assistant(_)) => {
+                if self.detail.show_thinking() {
+                    Detail::Overview
+                } else {
+                    Detail::Details
+                }
             }
-        } else {
-            self.detail
+            _ => {
+                if self.detail.tool_output_expanded() {
+                    Detail::Overview
+                } else {
+                    Detail::All
+                }
+            }
         }
     }
 
@@ -33,7 +41,7 @@ impl AgentView {
     /// toggles the whole run). The row change of every entry it resizes
     /// folds into the tail bookkeeping, so a paused window keeps its
     /// absolute row while the card grows or shrinks.
-    pub(crate) fn toggle_card_expansion(&mut self, index: usize) {
+    pub fn toggle_card_expansion(&mut self, index: usize) {
         let entries = match self.chat.get(index) {
             Some(ChatEntry::InboxNotice(_)) => self.inbox_run(index),
             _ => index..index + 1,
@@ -60,14 +68,28 @@ impl AgentView {
     }
 
     /// The Ctrl+O cycle (`app.tools.expand`, TS `toggleToolOutputExpansion` +
-    /// `applyChatExpansion`): step the conversation level and reset every card to it — the
-    /// flips are XOR-ed against the level. The stale-mark is required: a toggled entry's cache
-    /// slot holds its flipped rows.
+    /// `applyChatExpansion`): step the conversation level and reset every card to it.
     pub(crate) fn cycle_detail(&mut self) {
+        self.set_detail(self.detail.next());
+    }
+
+    /// The expand/collapse-all shortcut (`app.steps.toggleAll`): every thought and tool step
+    /// opens at the `all` level, or folds back to `overview` from it.
+    pub fn toggle_all_steps(&mut self) {
+        self.set_detail(if self.detail == Detail::All {
+            Detail::Overview
+        } else {
+            Detail::All
+        });
+    }
+
+    /// Move the conversation level and reset every card to it — the flips are XOR-ed against
+    /// the level. The stale-mark is required: a toggled entry's cache slot holds its flipped rows.
+    fn set_detail(&mut self, detail: Detail) {
         for index in std::mem::take(&mut self.toggled_cards) {
             self.mark_entry_stale(index);
         }
-        self.detail = self.detail.next();
+        self.detail = detail;
     }
 }
 

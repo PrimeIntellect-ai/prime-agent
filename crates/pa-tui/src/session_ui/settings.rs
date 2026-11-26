@@ -260,6 +260,8 @@ impl SessionUi {
             // No settings seam: the tier row reads "default", never a blank value.
             values.default_service_tier = "default".to_string();
         }
+        // The live view holds the effective value: the setting at chat open, then the row's edits.
+        values.compact_steps = view.compact_steps;
         // This surface ships the builtin themes.
         values.available_themes = pa_types::themes::BUILTIN_THEME_NAMES
             .iter()
@@ -426,6 +428,15 @@ impl SessionUi {
                     }
                 }
                 view.editor.set_emoji_shortcodes(value == "true");
+            }
+            "compact-steps" => {
+                if let Some(settings) = &self.client_settings {
+                    if let Err(error) = settings.set_compact_steps(value == "true") {
+                        self.error_row(&format!("{error:#}"), view);
+                        return;
+                    }
+                }
+                view.compact_steps = value == "true";
             }
             "editor-padding" => {
                 if let Some(settings) = &self.client_settings {

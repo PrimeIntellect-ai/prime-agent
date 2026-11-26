@@ -69,7 +69,8 @@ fn tabs_partition_the_settings_rows() {
                     "show-images",
                     "auto-resize-images",
                     "block-images",
-                    "mermaid-rendering"
+                    "mermaid-rendering",
+                    "compact-steps"
                 ]
             ),
             (
