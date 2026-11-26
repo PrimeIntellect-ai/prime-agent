@@ -162,6 +162,7 @@ pub fn bot_row(
     login_stale: &[String],
     spawns_bots: bool,
 ) -> Value {
+    let running_ms = record.running_ms_at(super::manager::now_ms());
     json!({
         "botId": record.bot_id,
         "name": record.name,
@@ -183,6 +184,11 @@ pub fn bot_row(
         "statusSince": record.status_since,
         // A merged child row carries its own daemon's pause time.
         "pauseAt": super::replies::pause_at(&record.bot_id).or(record.pause_at),
+        "runningMs": running_ms,
+        // The closed running intervals: a parent daemon adds the open one itself.
+        "closedRunningMs": record.running_ms,
+        // An estimate from the bot's size and Prime's published rates.
+        "costUsd": running_ms as f64 / 3_600_000.0 * super::platform::BOT_HOURLY_USD_ESTIMATE,
     })
 }
 
@@ -813,5 +819,60 @@ mod tests {
 
         let resumed = resume_bot(&manager, "bot-a").await.unwrap();
         assert_eq!(resumed.status, BotStatus::Running);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_row_prices_only_the_running_time() {
+        let (_dir, _platform, manager) = setup();
+        manager.spawn(&spec("bot-a")).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let ran = pause_bot(&manager, "bot-a").await.unwrap().running_ms;
+        assert_eq!(
+            ran,
+            manager.get("bot-a").unwrap().running_ms,
+            "the reply matches the registry"
+        );
+        assert!(ran >= 50, "{ran}");
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let row = bot_row(&manager.get("bot-a").unwrap(), false, &[], false);
+        assert_eq!(row["runningMs"], ran, "a paused bot adds no time");
+        let cost = row["costUsd"].as_f64().unwrap();
+        let expected = ran as f64 / 3_600_000.0 * super::super::platform::BOT_HOURLY_USD_ESTIMATE;
+        assert!(cost > 0.0 && (cost - expected).abs() < 1e-12, "{cost}");
+
+        resume_bot(&manager, "bot-a").await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let row = bot_row(&manager.get("bot-a").unwrap(), false, &[], false);
+        assert!(row["runningMs"].as_i64().unwrap() >= ran + 50, "{row}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_record_without_a_status_stamp_counts_from_the_next_load() {
+        let (dir, _platform, manager) = setup();
+        let mut record = manager.spawn(&spec("bot-a")).await.unwrap();
+        record.status_since = None;
+        let mut registry = super::super::registry::BotRegistry::load(dir.path()).unwrap();
+        registry.put(record).unwrap();
+        let loaded = super::super::registry::BotRegistry::load(dir.path()).unwrap();
+        assert!(loaded.get("bot-a").unwrap().status_since.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pause_off_process_ends_the_running_time_at_the_idle_grace() {
+        let (dir, platform, manager) = setup();
+        let mut bot = manager.spawn(&spec("bot-a")).await.unwrap();
+        // The bot paused itself an hour ago, while this daemon was down.
+        let sandbox = bot.sandbox_id.clone().unwrap();
+        platform.state().sandboxes.get_mut(&sandbox).unwrap().status = BotStatus::Paused;
+        bot.status_since = bot.status_since.map(|since| since - 3_600_000);
+        let mut registry = super::super::registry::BotRegistry::load(dir.path()).unwrap();
+        registry.put(bot).unwrap();
+        let platform: std::sync::Arc<dyn super::super::platform::BotPlatform> = platform;
+        let manager = BotManager::new(dir.path(), platform).unwrap();
+
+        let resumed = manager.ensure_running("bot-a").await.unwrap();
+        let grace = i64::try_from(super::super::replies::PAUSE_GRACE.as_millis()).unwrap();
+        assert_eq!(resumed.running_ms, grace, "only the idle grace counts");
     }
 }

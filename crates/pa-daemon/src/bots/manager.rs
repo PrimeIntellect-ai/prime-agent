@@ -670,6 +670,7 @@ impl BotManager {
                 .map(|context| context.bot_id),
             pause_at: None,
             status_since: None,
+            running_ms: 0,
         })?;
         if spec.bots {
             let mut spawns = read_spawns_marker(&self.agent_dir);
@@ -1111,7 +1112,7 @@ impl BotManager {
             }
             record.sandbox_id = Some(chosen.id.clone());
             record.status = chosen.status;
-            self.save(record)?;
+            self.save_observed(record)?;
             settled.insert(bot_id);
         }
         for listed in self.list() {
@@ -1131,7 +1132,7 @@ impl BotManager {
                 Ok(_) | Err(PlatformError::NotFound(_)) => lose_sandbox(&mut record),
                 Err(error) => return Err(error.into()),
             }
-            self.save(record)?;
+            self.save_observed(record)?;
         }
         let orphans = lock(&self.registry).orphans();
         self.delete_orphans(orphans).await
@@ -1148,16 +1149,46 @@ impl BotManager {
 
     /// Persist `record`. A lifecycle operation saves a snapshot taken before
     /// its awaits, so a newer settled-turn time from [`Self::record_turn`] wins.
-    /// A status change stamps `status_since`.
-    fn save(&self, mut record: BotRecord) -> Result<()> {
+    /// A status change stamps `status_since`, and a running interval that ends
+    /// adds to `running_ms`.
+    fn save(&self, record: BotRecord) -> Result<()> {
+        self.save_closing(record, false)
+    }
+
+    /// Persist a status this daemon observed on the platform, not one it
+    /// set. A running interval that ended off-process (a self-pause while
+    /// this daemon was down, a lost sandbox) ends at the idle grace after
+    /// the bot's last known activity, not now.
+    fn save_observed(&self, record: BotRecord) -> Result<()> {
+        self.save_closing(record, true)
+    }
+
+    fn save_closing(&self, mut record: BotRecord, observed: bool) -> Result<()> {
         let mut registry = lock(&self.registry);
+        let now = now_ms();
         let current = registry.get(&record.bot_id);
         if let Some(current) = current {
             record.last_turn_at = record.last_turn_at.max(current.last_turn_at);
         }
-        record.status_since = match current {
-            Some(current) if current.status == record.status => current.status_since,
-            _ => Some(now_ms()),
+        (record.status_since, record.running_ms) = match current {
+            // A record from before the stamp counts from its first save.
+            Some(current) if current.status == record.status => {
+                (current.status_since.or(Some(now)), current.running_ms)
+            }
+            Some(current) => {
+                let end = if observed && current.status == BotStatus::Running {
+                    let grace =
+                        i64::try_from(super::replies::PAUSE_GRACE.as_millis()).unwrap_or(i64::MAX);
+                    current
+                        .status_since
+                        .max(current.last_turn_at)
+                        .map_or(now, |active| active.saturating_add(grace).min(now))
+                } else {
+                    now
+                };
+                (Some(end), current.running_ms_at(end))
+            }
+            None => (Some(now), 0),
         };
         registry.put(record)
     }
@@ -1237,14 +1268,25 @@ impl BotManager {
     /// The bot's live sandbox: the cached id when it is live, else the
     /// newest live labeled sandbox (deleting the others).
     async fn resolve_existing(&self, record: &mut BotRecord) -> Result<Option<BotSandbox>> {
+        let mut lost = false;
         if let Some(sandbox_id) = record.sandbox_id.clone() {
             match self.platform.get(&sandbox_id).await {
-                Ok(sandbox) if !sandbox.status.is_terminal() => return Ok(Some(sandbox)),
+                Ok(sandbox) if !sandbox.status.is_terminal() => {
+                    if record.status == BotStatus::Running && sandbox.status != BotStatus::Running {
+                        record.status = sandbox.status;
+                        self.save_observed(record.clone())?;
+                    }
+                    return Ok(Some(sandbox));
+                }
                 Ok(sandbox) if sandbox.status == BotStatus::Error => {
                     retry(|| self.platform.delete(&sandbox_id)).await?;
                     lose_sandbox(record);
+                    lost = true;
                 }
-                Ok(_) | Err(PlatformError::NotFound(_)) => lose_sandbox(record),
+                Ok(_) | Err(PlatformError::NotFound(_)) => {
+                    lose_sandbox(record);
+                    lost = true;
+                }
                 Err(error) => return Err(error.into()),
             }
         }
@@ -1263,8 +1305,20 @@ impl BotManager {
             retry(|| self.platform.delete(&extra.id)).await?;
         }
         let found = live.into_iter().next();
-        if let Some(sandbox) = &found {
-            record.sandbox_id = Some(sandbox.id.clone());
+        match &found {
+            Some(sandbox) => {
+                record.sandbox_id = Some(sandbox.id.clone());
+                let was_running = self
+                    .get(&record.bot_id)
+                    .is_some_and(|current| current.status == BotStatus::Running);
+                if was_running && sandbox.status != BotStatus::Running {
+                    record.status = sandbox.status;
+                    self.save_observed(record.clone())?;
+                }
+            }
+            // No sandbox runs the bot: a running interval ended off-process.
+            None if lost => self.save_observed(record.clone())?,
+            None => {}
         }
         Ok(found)
     }
@@ -2467,13 +2521,23 @@ fn child_record(
     }
     let existing = existing.unwrap_or_default();
     let field = |key: &str| row.get(key).cloned().unwrap_or(Value::Null);
+    let status = serde_json::from_value(field("status")).unwrap_or(BotStatus::Stopped);
+    // An older guest's row has no closed time: keep the registry's, and close
+    // a running interval the row ends.
+    let running_ms = field("closedRunningMs").as_i64().unwrap_or_else(|| {
+        if existing.status == BotStatus::Running && status != BotStatus::Running {
+            existing.running_ms_at(field("statusSince").as_i64().unwrap_or_else(now_ms))
+        } else {
+            existing.running_ms
+        }
+    });
     Some(BotRecord {
         bot_id: bot_id.to_string(),
         name: text("name").unwrap_or_default().to_string(),
         owner_session_id: text("ownerSessionId").unwrap_or_default().to_string(),
         owner_active_session_id: None,
         sandbox_id: text("sandboxId").map(str::to_string),
-        status: serde_json::from_value(field("status")).unwrap_or(BotStatus::Stopped),
+        status,
         checkpoint_id: text("checkpointId").map(str::to_string),
         older_checkpoint_ids: existing.older_checkpoint_ids,
         version: text("version").unwrap_or_default().to_string(),
@@ -2494,7 +2558,13 @@ fn child_record(
         bots: false,
         parent_bot_id: Some(parent_bot_id.to_string()),
         pause_at: field("pauseAt").as_i64(),
-        status_since: field("statusSince").as_i64(),
+        // A guest row without the stamp counts from the first merge.
+        status_since: field("statusSince")
+            .as_i64()
+            .or(existing.status_since.filter(|_| existing.status == status))
+            .or_else(|| Some(now_ms())),
+        // The record adds the open interval from `status_since` itself.
+        running_ms,
         pause_token: existing.pause_token,
     })
 }
@@ -2540,6 +2610,7 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         parent_bot_id: label_value(&sandbox.labels, &format!("{BOT_LABEL}-parent:")),
         pause_at: None,
         status_since: None,
+        running_ms: 0,
     }
 }
 

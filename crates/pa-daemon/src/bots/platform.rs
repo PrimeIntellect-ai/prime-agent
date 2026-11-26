@@ -187,6 +187,14 @@ pub fn bot_status(status: SandboxStatus) -> BotStatus {
 const BOT_CPU_CORES: f64 = 2.0;
 const BOT_MEMORY_GB: f64 = 4.0;
 const BOT_DISK_GB: f64 = 20.0;
+/// Prime's published sandbox rates in USD per hour: the sandbox API carries no price.
+const USD_PER_CPU_HOUR: f64 = 0.02;
+const USD_PER_MEMORY_GIB_HOUR: f64 = 0.0125;
+const USD_PER_DISK_GIB_HOUR: f64 = 0.0002;
+/// The estimated price of one running bot sandbox, in USD per hour.
+pub const BOT_HOURLY_USD_ESTIMATE: f64 = BOT_CPU_CORES * USD_PER_CPU_HOUR
+    + BOT_MEMORY_GB * USD_PER_MEMORY_GIB_HOUR
+    + BOT_DISK_GB * USD_PER_DISK_GIB_HOUR;
 const CHECKPOINT_WAIT: Duration = Duration::from_mins(10);
 const CHECKPOINT_POLL: Duration = Duration::from_secs(2);
 /// How long a streamed guest process may take to start.

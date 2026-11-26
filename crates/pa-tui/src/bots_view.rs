@@ -2,7 +2,7 @@
 //! — a status dot, the name and model, the version and last turn — grouped
 //! into the agents page's `Running`/`Idle`/`Inactive` sections, most recent
 //! activity first within a section, with the raw facts (bot id, sandbox id,
-//! checkpoint id, the pause timer) on a detail pane. Enter attaches to the selected bot; `p`
+//! checkpoint id, the pause timer, the estimated cost) on a detail pane. Enter attaches to the selected bot; `p`
 //! pauses or resumes it.
 
 use std::fmt::Write as _;
@@ -47,6 +47,10 @@ pub struct BotRow {
     pub status_since: Option<i64>,
     /// Unix milliseconds when the daemon pauses the idle bot.
     pub pause_at: Option<i64>,
+    /// Milliseconds the bot's sandbox ran.
+    pub running_ms: i64,
+    /// The estimated price of that running time, in USD.
+    pub cost_usd: f64,
 }
 
 impl BotRow {
@@ -115,10 +119,22 @@ impl BotRow {
         }
     }
 
+    /// The cost line: the estimated price and the running time it covers.
+    fn cost_note(&self) -> String {
+        let minutes = self.running_ms / 60_000;
+        let running = if minutes == 0 {
+            format!("{}s", self.running_ms / 1000)
+        } else {
+            format!("{}h {:02}m", minutes / 60, minutes % 60)
+        };
+        format!("${:.4} est. \u{b7} {running} running", self.cost_usd)
+    }
+
     /// The detail pane's raw facts.
     fn detail_pairs(&self, now_ms: i64) -> Vec<(String, String)> {
         vec![
             ("pause".into(), self.pause_note(now_ms)),
+            ("cost".into(), self.cost_note()),
             ("bot".into(), self.bot_id.clone()),
             ("sandbox".into(), self.sandbox_id.clone()),
             (
@@ -239,6 +255,8 @@ pub fn parse_bots(value: &Value) -> Result<BotsCatalog, String> {
                 parent_bot_id: text(row, "parentBotId"),
                 status_since: row.get("statusSince").and_then(Value::as_i64),
                 pause_at: row.get("pauseAt").and_then(Value::as_i64),
+                running_ms: row.get("runningMs").and_then(Value::as_i64).unwrap_or(0),
+                cost_usd: row.get("costUsd").and_then(Value::as_f64).unwrap_or(0.0),
             })
         })
         .collect();
@@ -345,7 +363,7 @@ const LIST_FRAME_ROWS: usize = 5;
 /// Rows per bot (the row + its note) plus the detail pane's height.
 const ROW_HEIGHT: usize = 2;
 /// The detail pane: a blank row, its heading, and one row per fact.
-const DETAIL_ROWS: usize = 12;
+const DETAIL_ROWS: usize = 13;
 
 /// One display entry in the sectioned list: the spacer between section
 /// blocks, a section heading with its row count, or one bot's row pair
