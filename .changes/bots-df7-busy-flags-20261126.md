@@ -1,2 +1,3 @@
-- Fixed an always-on bot pausing mid-job: both idle-pause paths (the Mac follower and the guest self-pause) now count live background kernel work (a background `bash()` shell) and active factory runs as busy.
-- The session summary carries the two new flags (`hasBackgroundKernelWork`, `hasActiveFactoryRuns`); a passivated worker's row strips them like the other live-runtime fields.
+- Fixed an always-on bot pausing mid-job: both idle-pause paths (the Mac follower and the guest self-pause) now count live background kernel work (a background `bash()` shell) as busy.
+- A settled turn's reply now delivers while that background work runs: the delivery lane reads turn work only, and only the idle-pause verdict holds on it.
+- The session summary carries the new `hasBackgroundKernelWork` flag; a passivated worker's row strips it like the other live-runtime fields.

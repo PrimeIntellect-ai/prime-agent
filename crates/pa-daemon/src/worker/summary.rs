@@ -572,16 +572,6 @@ pub(crate) fn session_summary(core: &SessionCore, inputs: SummaryInputs) -> Sess
         is_running_tools: streaming && !core.running_tool_calls.is_empty(),
         has_running_subagents: inputs.subagents_running,
         has_background_kernel_work: inputs.background_kernel_work,
-        // The executor retires a durable record when its run goes
-        // terminal, so the archive holds only runs that are not
-        // finished; the retention window drops a record no live kernel
-        // has written (the overview's saved-row rule), so an abandoned
-        // record cannot hold an idle session busy forever.
-        has_active_factory_runs: store
-            .and_then(|store| {
-                crate::scheduled_jobs::session_artifact_dir(&store.path, store.session_id())
-            })
-            .is_some_and(|dir| crate::factory_activity::live_factory_run_count(&dir) > 0),
         attached_clients: core.attached_client_ids.len() as u32,
         message_count: store.map_or(0, crate::session_store::SessionFile::message_count) as u32,
         session_actions: session_snapshot(core),

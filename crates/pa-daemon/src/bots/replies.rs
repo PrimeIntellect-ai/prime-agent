@@ -135,10 +135,7 @@ fn guest_turn_busy_flags(state: &Value) -> bool {
 /// with.
 fn guest_pause_busy_flags(state: &Value) -> bool {
     let flag = |name: &str| state[name].as_bool().unwrap_or(false);
-    guest_turn_busy_flags(state)
-        || ["hasBackgroundKernelWork", "hasActiveFactoryRuns"]
-            .into_iter()
-            .any(flag)
+    guest_turn_busy_flags(state) || ["hasBackgroundKernelWork"].into_iter().any(flag)
 }
 
 /// The guest session's live state over the link.

@@ -249,7 +249,6 @@ fn summary_busy(summary: &Value) -> bool {
         "hasRunningSubagents",
         "hasRunningRlmChildren",
         "hasBackgroundKernelWork",
-        "hasActiveFactoryRuns",
     ]
     .into_iter()
     .any(flag)

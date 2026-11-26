@@ -260,7 +260,6 @@ fn a_running_session_summary_is_busy() {
         "hasRunningSubagents",
         "hasRunningRlmChildren",
         "hasBackgroundKernelWork",
-        "hasActiveFactoryRuns",
     ] {
         assert!(super::summary_busy(&json!({ flag: true })), "{flag}");
     }
@@ -290,23 +289,21 @@ fn background_kernel_work_and_factory_runs_hold_off_the_self_pause() {
         .unwrap()
         .write_seeded(summary.clone(), false);
     assert!(!supervisor.self_pause_active());
-    for flag in ["hasBackgroundKernelWork", "hasActiveFactoryRuns"] {
-        summary[flag] = json!(true);
-        supervisor
-            .roster
-            .lock()
-            .unwrap()
-            .write_seeded(summary.clone(), false);
-        assert!(supervisor.self_pause_active(), "{flag}");
-        // Once the background work and the run finish, the pause may proceed.
-        summary[flag] = json!(false);
-        supervisor
-            .roster
-            .lock()
-            .unwrap()
-            .write_seeded(summary.clone(), false);
-        assert!(!supervisor.self_pause_active(), "{flag}");
-    }
+    summary["hasBackgroundKernelWork"] = json!(true);
+    supervisor
+        .roster
+        .lock()
+        .unwrap()
+        .write_seeded(summary.clone(), false);
+    assert!(supervisor.self_pause_active());
+    // Once the background work and the run finish, the pause may proceed.
+    summary["hasBackgroundKernelWork"] = json!(false);
+    supervisor
+        .roster
+        .lock()
+        .unwrap()
+        .write_seeded(summary.clone(), false);
+    assert!(!supervisor.self_pause_active());
 }
 
 /// Spawn the loop with a wall clock that advances one tick per call, a

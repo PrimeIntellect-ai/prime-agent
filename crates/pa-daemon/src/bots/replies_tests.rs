@@ -229,13 +229,11 @@ async fn background_kernel_work_and_factory_runs_hold_off_the_pause() {
     assert_eq!(sync(dir.path(), &mut guest).await, ["done"]);
     // A background shell, a backgrounded cell, or an active factory run
     // outlives the settled turn: the bot must not pause mid-job.
-    for flag in ["hasBackgroundKernelWork", "hasActiveFactoryRuns"] {
-        guest.state[flag] = json!(true);
-        let verdict = pause_verdict(&mut guest, "guest-session", || true)
-            .await
-            .unwrap();
-        assert_eq!(verdict, PauseVerdict::FollowAgain, "{flag}");
-    }
+    guest.state["hasBackgroundKernelWork"] = json!(true);
+    let verdict = pause_verdict(&mut guest, "guest-session", || true)
+        .await
+        .unwrap();
+    assert_eq!(verdict, PauseVerdict::FollowAgain);
     // Once the background work and the run finish, the pause proceeds.
     guest.state = json!({ "isStreaming": false, "sessionActions": { "queuedCount": 0 } });
     let pause = pause_verdict(&mut guest, "guest-session", || true)
