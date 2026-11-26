@@ -198,6 +198,19 @@ fn daemon_version_mismatch(hello: &serde_json::Value, local: &str) -> Option<Str
     })
 }
 
+/// The rows whose bot was neither refreshed nor skipped: their count is
+/// the command's failure verdict in both output modes.
+fn failed_rows(rows: &[serde_json::Value]) -> usize {
+    rows.iter()
+        .filter(|row| {
+            !matches!(
+                row.get("outcome").and_then(serde_json::Value::as_str),
+                Some("refreshed" | "skipped")
+            )
+        })
+        .count()
+}
+
 /// `prime-agent bots refresh`: bring every running bot to this binary's
 /// prime-agent version, in place, through the daemon. Boots the daemon
 /// when none is listening (an update stops it) and refuses one that runs
@@ -232,50 +245,49 @@ fn refresh(json: bool) -> Result<(), String> {
         return Err(format!("the daemon refused the refresh: {error}"));
     }
     let data = response.data.unwrap_or(serde_json::Value::Null);
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&data).map_err(|error| error.to_string())?
-        );
-        return Ok(());
-    }
     let rows = data
         .get("bots")
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if rows.is_empty() {
+    // Both output modes share one verdict: a failed row fails the command
+    // with `--json` too, so automation cannot read a failure as success.
+    let failed = failed_rows(&rows);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&data).map_err(|error| error.to_string())?
+        );
+    } else if rows.is_empty() {
         println!("No running bots.");
-        return Ok(());
-    }
-    let mut failed = 0_usize;
-    for row in &rows {
-        let name = row
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("an unnamed bot");
-        match row.get("outcome").and_then(serde_json::Value::as_str) {
-            Some("refreshed") => {
-                let version = row
-                    .get("version")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("an unknown version");
-                println!("Refreshed {name} to {version}.");
-            }
-            Some("skipped") => {
-                let status = row
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("no longer running");
-                println!("Skipped {name} ({status}).");
-            }
-            _ => {
-                failed += 1;
-                let reason = row
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("no reason reported");
-                eprintln!("Warning: {name} was not refreshed: {reason}.");
+    } else {
+        for row in &rows {
+            let name = row
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("an unnamed bot");
+            match row.get("outcome").and_then(serde_json::Value::as_str) {
+                Some("refreshed") => {
+                    let version = row
+                        .get("version")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("an unknown version");
+                    println!("Refreshed {name} to {version}.");
+                }
+                Some("skipped") => {
+                    let status = row
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("no longer running");
+                    println!("Skipped {name} ({status}).");
+                }
+                _ => {
+                    let reason = row
+                        .get("error")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("no reason reported");
+                    eprintln!("Warning: {name} was not refreshed: {reason}.");
+                }
             }
         }
     }
@@ -333,6 +345,20 @@ mod tests {
                 None => std::env::remove_var("PRIME_API_KEY"),
             }
         }
+    }
+
+    /// The JSON and human outputs share one verdict: a failed row fails
+    /// the command with `--json` too, so automation cannot read a
+    /// failure as success.
+    #[test]
+    fn failed_rows_counts_every_non_refreshed_row() {
+        let rows = serde_json::json!([
+            { "outcome": "refreshed" },
+            { "outcome": "skipped" },
+            { "outcome": "failed", "error": "no published release" },
+            {},
+        ]);
+        assert_eq!(failed_rows(rows.as_array().unwrap()), 2);
     }
 
     /// A daemon that runs another version must not drive the refresh: it
