@@ -1,0 +1,1 @@
+- The `/bots` page pauses a running bot or resumes a paused bot with `p`, and its detail pane shows when an idle bot pauses or since when it is paused.

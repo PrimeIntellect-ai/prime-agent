@@ -2,7 +2,8 @@
 //! — a status dot, the name and model, the version and last turn — grouped
 //! into the agents page's `Running`/`Idle`/`Inactive` sections, most recent
 //! activity first within a section, with the raw facts (bot id, sandbox id,
-//! checkpoint id) on a detail pane. Enter attaches to the selected bot.
+//! checkpoint id, the pause timer) on a detail pane. Enter attaches to the selected bot; `p`
+//! pauses or resumes it.
 
 use std::fmt::Write as _;
 
@@ -42,6 +43,10 @@ pub struct BotRow {
     pub spawns_bots: bool,
     /// The bot that spawned this one, when a bot did.
     pub parent_bot_id: Option<String>,
+    /// Unix milliseconds of the last status change.
+    pub status_since: Option<i64>,
+    /// Unix milliseconds when the daemon pauses the idle bot.
+    pub pause_at: Option<i64>,
 }
 
 impl BotRow {
@@ -96,9 +101,24 @@ impl BotRow {
         note
     }
 
+    /// The pause line: when the idle bot pauses, or since when it is paused.
+    fn pause_note(&self, now_ms: i64) -> String {
+        match (self.status.as_str(), self.pause_at, self.status_since) {
+            ("running", _, _) if self.attached => "stays running while attached".into(),
+            ("running", Some(at), _) => {
+                let minutes = ((at - now_ms).max(0) + 59_999) / 60_000;
+                let minutes = minutes.max(1);
+                format!("pauses in {minutes} min")
+            }
+            ("paused", _, Some(since)) => format!("paused since {}", iso_from_unix_ms(since)),
+            _ => "\u{2014}".into(),
+        }
+    }
+
     /// The detail pane's raw facts.
-    fn detail_pairs(&self) -> Vec<(String, String)> {
+    fn detail_pairs(&self, now_ms: i64) -> Vec<(String, String)> {
         vec![
+            ("pause".into(), self.pause_note(now_ms)),
             ("bot".into(), self.bot_id.clone()),
             ("sandbox".into(), self.sandbox_id.clone()),
             (
@@ -217,6 +237,8 @@ pub fn parse_bots(value: &Value) -> Result<BotsCatalog, String> {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 parent_bot_id: text(row, "parentBotId"),
+                status_since: row.get("statusSince").and_then(Value::as_i64),
+                pause_at: row.get("pauseAt").and_then(Value::as_i64),
             })
         })
         .collect();
@@ -284,6 +306,12 @@ pub enum BotsAction {
         bot_id: String,
         name: String,
     },
+    /// `p`: pause the selected running bot, or resume the selected paused bot.
+    TogglePause {
+        bot_id: String,
+        name: String,
+        pause: bool,
+    },
     /// `r`: fetch the rows again.
     Refresh,
     None,
@@ -297,12 +325,15 @@ pub struct BotsView {
     selected: usize,
     detail_open: bool,
     fetch_error: Option<String>,
-    /// The last failed attach (a version mismatch shows here); a fetch never clears it.
+    /// The last failed attach, pause, or resume (a version mismatch shows here); a fetch never
+    /// clears it.
     attach_error: Option<String>,
     /// The latest `list_bots` request; only its answer applies.
     catalog_request: u64,
     /// The attach request in flight: `(request number, bot name)`.
     attaching: Option<(u64, String)>,
+    /// The pause or resume in flight: `(request number, progress note)`.
+    toggling: Option<(u64, String)>,
 }
 
 /// The name column's fixed width.
@@ -313,7 +344,8 @@ const MODEL_COLUMN_W: usize = 24;
 const LIST_FRAME_ROWS: usize = 5;
 /// Rows per bot (the row + its note) plus the detail pane's height.
 const ROW_HEIGHT: usize = 2;
-const DETAIL_ROWS: usize = 9;
+/// The detail pane: a blank row, its heading, and one row per fact.
+const DETAIL_ROWS: usize = 12;
 
 /// One display entry in the sectioned list: the spacer between section
 /// blocks, a section heading with its row count, or one bot's row pair
@@ -362,6 +394,13 @@ impl BotsView {
         self.catalog_request = request;
     }
 
+    /// Whether rows from `list_bots` request `request` apply: the page's own request or a
+    /// newer one.
+    #[must_use]
+    pub fn takes_catalog(&self, request: u64) -> bool {
+        request >= self.catalog_request
+    }
+
     /// Whether `request` is the latest `list_bots` request of this page.
     #[must_use]
     pub fn awaits_catalog(&self, request: u64) -> bool {
@@ -381,6 +420,17 @@ impl BotsView {
             .is_some_and(|(id, _)| *id == request)
     }
 
+    /// The pause or resume in flight (`Some((request, note))`), or none.
+    pub fn set_toggling(&mut self, toggle: Option<(u64, String)>) {
+        self.toggling = toggle;
+    }
+
+    /// Whether this page is waiting for pause or resume request `request`.
+    #[must_use]
+    pub fn is_toggling(&self, request: u64) -> bool {
+        self.toggling.as_ref().is_some_and(|(id, _)| *id == request)
+    }
+
     /// One key press.
     pub fn handle_key(&mut self, key_id: &str, kb: &KeybindingsManager) -> BotsAction {
         if key_id == "ctrl+c" {
@@ -391,10 +441,12 @@ impl BotsView {
         }
         if kb.matches(key_id, "tui.select.confirm") {
             return match self.rows.get(self.selected) {
-                Some(row) if self.attaching.is_none() => BotsAction::Attach {
-                    bot_id: row.bot_id.clone(),
-                    name: row.name.clone(),
-                },
+                Some(row) if self.attaching.is_none() && self.toggling.is_none() => {
+                    BotsAction::Attach {
+                        bot_id: row.bot_id.clone(),
+                        name: row.name.clone(),
+                    }
+                }
                 _ => BotsAction::None,
             };
         }
@@ -404,6 +456,21 @@ impl BotsView {
         }
         if key_id == "r" {
             return BotsAction::Refresh;
+        }
+        if key_id == "p" {
+            return match self.rows.get(self.selected) {
+                Some(row) if self.toggling.is_none() && self.attaching.is_none() => {
+                    match row.status.as_str() {
+                        "running" | "paused" => BotsAction::TogglePause {
+                            bot_id: row.bot_id.clone(),
+                            name: row.name.clone(),
+                            pause: row.status == "running",
+                        },
+                        _ => BotsAction::None,
+                    }
+                }
+                _ => BotsAction::None,
+            };
         }
         if kb.matches(key_id, "tui.select.up") {
             self.selected = self.selected.saturating_sub(1);
@@ -473,13 +540,15 @@ impl BotsView {
             ];
             lines.push(truncate_line(&line, width, ""));
         }
-        if let Some((_, name)) = &self.attaching {
+        let progress = self
+            .attaching
+            .as_ref()
+            .map(|(_, name)| format!("Attaching to {name}. A paused bot takes a moment to resume."))
+            .or_else(|| self.toggling.as_ref().map(|(_, note)| note.clone()));
+        if let Some(progress) = &progress {
             let line = vec![
                 Span::raw("  "),
-                theme.fg_span(
-                    ThemeColor::Muted,
-                    format!("Attaching to {name}. A paused bot takes a moment to resume."),
-                ),
+                theme.fg_span(ThemeColor::Muted, progress.clone()),
             ];
             lines.push(truncate_line(&line, width, ""));
         }
@@ -534,7 +603,7 @@ impl BotsView {
             LIST_FRAME_ROWS
                 + error_rows
                 + usize::from(self.skipped > 0)
-                + usize::from(self.attaching.is_some())
+                + usize::from(progress.is_some())
                 + if self.detail_open { DETAIL_ROWS } else { 0 },
             1,
         );
@@ -631,7 +700,12 @@ impl BotsView {
                 lines.push(vec![
                     theme.fg_span(ThemeColor::Muted, "  Details".to_string())
                 ]);
-                for (key, value) in row.detail_pairs() {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| {
+                        i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+                    });
+                for (key, value) in row.detail_pairs(now_ms) {
                     let line = vec![
                         Span::raw("  "),
                         theme.fg(ThemeColor::Muted, format!("{key:<12}")),
@@ -655,7 +729,7 @@ impl BotsView {
             theme,
             width,
             &format!(
-                "{up}/{down} select \u{b7} {enter} attach \u{b7} d details \u{b7} r refresh \u{b7} {close} close"
+                "{up}/{down} select \u{b7} {enter} attach \u{b7} p pause/resume \u{b7} d details \u{b7} r refresh \u{b7} {close} close"
             ),
         ));
         lines

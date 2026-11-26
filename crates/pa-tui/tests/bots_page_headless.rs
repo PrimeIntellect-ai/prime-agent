@@ -40,6 +40,8 @@ fn serve(listener: &UnixListener, mock: &Mock) {
             "serverCapabilities": ["kernel_bash_activity"],
         }),
     );
+    // `pause_bot`/`resume_bot` flip the named row, like the daemon's registry.
+    let mut list_bots = mock.list_bots.clone();
     let mut line = String::new();
     loop {
         line.clear();
@@ -79,7 +81,22 @@ fn serve(listener: &UnixListener, mock: &Mock) {
                 },
             })),
             "get_commands" => Ok(json!({ "commands": [] })),
-            "list_bots" => Ok(mock.list_bots.clone()),
+            "list_bots" => Ok(list_bots.clone()),
+            "pause_bot" | "resume_bot" => {
+                let bot_id = envelope.pointer("/command/botId").cloned();
+                let rows = list_bots["bots"].as_array_mut().into_iter().flatten();
+                for row in rows.filter(|row| row.get("botId") == bot_id.as_ref()) {
+                    if command == "pause_bot" {
+                        row["status"] = json!("paused");
+                        row["statusSince"] = json!(1_795_410_642_000_i64);
+                        row["pauseAt"] = Value::Null;
+                    } else {
+                        row["status"] = json!("running");
+                        row["pauseAt"] = json!(unix_ms() + 110_000);
+                    }
+                }
+                Ok(json!({}))
+            }
             "attach_bot" => mock.attach_bot.clone(),
             _ => Ok(json!({})),
         };
@@ -96,6 +113,13 @@ fn serve(listener: &UnixListener, mock: &Mock) {
             break;
         }
     }
+}
+
+fn unix_ms() -> i64 {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    i64::try_from(elapsed.as_millis()).unwrap()
 }
 
 fn write_json(writer: &mut UnixStream, value: &Value) {
@@ -267,6 +291,35 @@ fn the_page_nests_a_bots_children_under_it() {
         rows[at("chief-of-staff") + 1].contains("spawns bots"),
         "{frame}"
     );
+}
+
+#[test]
+fn p_pauses_the_running_bot_and_resumes_the_paused_bot() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = |code| HeadlessStep::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    let mut triage = bot("b1", "triage", "running", None);
+    triage["pauseAt"] = json!(unix_ms() + 110_000);
+    let outcome = run(
+        &dir.path().join("d.sock"),
+        SessionSelection::New,
+        local_mock(json!({"bots": [triage]}), Err("unused")),
+        vec![
+            HeadlessStep::Submit("/bots".into()),
+            wait("triage"),
+            key(KeyCode::Char('d')),
+            wait("pauses in 2 min"),
+            key(KeyCode::Char('p')),
+            wait("paused since 2026-11-23T05:10:42Z"),
+            key(KeyCode::Char('p')),
+            wait("pauses in 2 min"),
+        ],
+    );
+    let paused = last_frame_with(&outcome, "paused since");
+    assert!(paused.contains("Idle (1)"), "{paused}");
+    assert!(outcome
+        .frames
+        .last()
+        .is_some_and(|frame| frame.contains("Running (1)")));
 }
 
 #[test]

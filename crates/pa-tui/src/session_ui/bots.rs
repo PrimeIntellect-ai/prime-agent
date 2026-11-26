@@ -29,6 +29,11 @@ pub(crate) enum BotsUpdate {
         request: u64,
         result: Result<BotAttach, String>,
     },
+    /// One `pause_bot`/`resume_bot` outcome, tagged with the request number it answers.
+    Toggled {
+        request: u64,
+        result: Result<(), String>,
+    },
 }
 
 /// The page's error line: a daemon refusal shows its own message (a version mismatch's
@@ -177,6 +182,33 @@ impl SessionUi {
         });
     }
 
+    /// The pause or resume runs in the background: a pause checkpoints the sandbox first.
+    fn spawn_bot_toggle(&self, request: u64, bot_id: String, pause: bool) {
+        let client = self.client.clone();
+        let tx = self.bots_updates.clone();
+        tokio::spawn(async move {
+            let command = if pause {
+                DaemonCommand::PauseBot {
+                    id: None,
+                    bot_id,
+                    rest: Map::default(),
+                }
+            } else {
+                DaemonCommand::ResumeBot {
+                    id: None,
+                    bot_id,
+                    rest: Map::default(),
+                }
+            };
+            let result = client
+                .request_ok_with_timeout(command, ATTACH_TIMEOUT_MS)
+                .await
+                .map(|_| ())
+                .map_err(|error| page_error(&error));
+            let _ = tx.send(BotsUpdate::Toggled { request, result });
+        });
+    }
+
     /// Fold one background delivery. A newer `list_bots` answer feeds the dock; the open page
     /// applies only the answer it waits for. An attach result for a closed page drops (an
     /// unused attach endpoint expires in the daemon).
@@ -198,13 +230,17 @@ impl SessionUi {
                 let Some(Overlay::Bots(page)) = view.overlay.as_mut() else {
                     return;
                 };
-                // An answer to an older fetch (a refresh, or the dock's poll) does not apply.
-                if !page.awaits_catalog(request) {
-                    return;
-                }
+                // The page's own fetch applies, and so does a newer dock poll's rows (the pause
+                // timer and the status stay live); an older answer does not.
                 match result {
-                    Ok(catalog) => page.apply_catalog(catalog),
-                    Err(error) => page.set_fetch_error(Some(error)),
+                    Ok(catalog) if page.takes_catalog(request) => {
+                        page.set_catalog_request(request);
+                        page.apply_catalog(catalog);
+                    }
+                    Err(error) if page.awaits_catalog(request) => {
+                        page.set_fetch_error(Some(error));
+                    }
+                    _ => {}
                 }
             }
             BotsUpdate::Attached { request, result } => {
@@ -231,6 +267,19 @@ impl SessionUi {
                     }
                 }
             }
+            BotsUpdate::Toggled { request, result } => {
+                let Some(Overlay::Bots(page)) = view.overlay.as_mut() else {
+                    return;
+                };
+                if !page.is_toggling(request) {
+                    return;
+                }
+                page.set_toggling(None);
+                if let Err(error) = result {
+                    page.set_attach_error(Some(error));
+                }
+                self.spawn_bots_refresh(page);
+            }
         }
         self.dirty = true;
     }
@@ -250,6 +299,21 @@ impl SessionUi {
         match page.handle_key(&id, view.editor.keybindings()) {
             BotsAction::None | BotsAction::ToggleDetail => {}
             BotsAction::Refresh => self.spawn_bots_refresh(page),
+            BotsAction::TogglePause {
+                bot_id,
+                name,
+                pause,
+            } => {
+                page.set_attach_error(None);
+                self.bots_requests += 1;
+                let note = if pause {
+                    format!("Pausing {name}. The sandbox saves a checkpoint first.")
+                } else {
+                    format!("Resuming {name}. This takes a moment.")
+                };
+                page.set_toggling(Some((self.bots_requests, note)));
+                self.spawn_bot_toggle(self.bots_requests, bot_id, pause);
+            }
             BotsAction::Attach { bot_id, name } => {
                 page.set_attach_error(None);
                 self.bots_requests += 1;

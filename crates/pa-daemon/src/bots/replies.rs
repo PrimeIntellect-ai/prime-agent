@@ -293,6 +293,8 @@ struct Follow {
     again: bool,
     /// The idle time before the pause step; the longest a caller asked for.
     grace: Duration,
+    /// Unix milliseconds when the running grace wait ends.
+    pause_at: Option<i64>,
 }
 
 fn follows() -> &'static Mutex<HashMap<String, Follow>> {
@@ -309,19 +311,42 @@ fn take_again(bot_id: &str) -> bool {
         .is_some_and(|follow| std::mem::take(&mut follow.again))
 }
 
+/// When the bot's running grace wait ends (Unix ms); `None` outside the wait.
+#[must_use]
+pub(crate) fn pause_at(bot_id: &str) -> Option<i64> {
+    follows()
+        .lock()
+        .unwrap()
+        .get(bot_id)
+        .and_then(|follow| follow.pause_at)
+}
+
+fn set_pause_at(bot_id: &str, pause_at: Option<i64>) {
+    if let Some(follow) = follows().lock().unwrap().get_mut(bot_id) {
+        follow.pause_at = pause_at;
+    }
+}
+
 /// Wait out the grace; returns early with `true` when a send arrives.
 async fn wait_grace(bot_id: &str, grace: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + grace;
-    loop {
+    let grace_ms = i64::try_from(grace.as_millis()).unwrap_or(i64::MAX);
+    set_pause_at(
+        bot_id,
+        Some(super::manager::now_ms().saturating_add(grace_ms)),
+    );
+    let sent = loop {
         if take_again(bot_id) {
-            return true;
+            break true;
         }
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            return false;
+            break false;
         }
         tokio::time::sleep(GRACE_CHECK.min(deadline - now)).await;
-    }
+    };
+    set_pause_at(bot_id, None);
+    sent
 }
 
 impl Supervisor {
@@ -379,6 +404,7 @@ impl Supervisor {
                 running: true,
                 again: false,
                 grace,
+                pause_at: None,
             };
         }
         let this = Arc::clone(self);
