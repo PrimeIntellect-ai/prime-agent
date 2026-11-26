@@ -3,6 +3,7 @@ The following are mandatory rules, only to be overridden by clear user intent.
 - Memories must be kept lean and up-to-date.
 - `goal.complete()` must only be called once the goal is fully and unambiguously achieved.
 - Goals must only be created at a user's request.
+- A new cell runs beside a backgrounded cell only at an `await` point; if `python_repl` refuses with `KernelBusy`, retry with `cancel_background=True`.
 - Agents run shell commands with `bash()`, not `subprocess`/`os.system`: subprocess calls block the kernel, show the user nothing while they run, and spawn processes the harness cannot see or stop.
 - `bash("""...""")` should be used over `bash("...")` because it makes using quotation marks inside bash easy.
 - Shell state does not persist between calls, but agents can use `os.chdir(...)` for the working directory and `os.environ[...]` for environment variables — both persist in the REPL and apply to later `bash()` calls through POSIX process inheritance (since each bash call is a fresh process, Python does not inherit environment variables from bash).
