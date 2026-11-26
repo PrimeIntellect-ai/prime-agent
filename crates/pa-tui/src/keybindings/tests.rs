@@ -440,14 +440,16 @@ fn effective_config_covers_every_definition() {
 
 #[test]
 fn formats_key_text() {
-    let other = LabelPlatform::Other;
-    assert_eq!(format_key_text_on("ctrl+o", other), "Ctrl+O");
+    // `alt` renders with the host platform's label (macOS: Option, elsewhere:
+    // Alt); `formats_alt_label_per_platform` pins both labels explicitly.
+    let alt = host_alt_label();
+    assert_eq!(format_key_text("ctrl+o"), "Ctrl+O");
     assert_eq!(
-        format_key_text_on("shift+alt+up", other),
-        "Shift+Alt+\u{2191}"
+        format_key_text("shift+alt+up"),
+        format!("Shift+{alt}+\u{2191}")
     );
-    assert_eq!(format_key_text_on("escape", other), "Esc");
-    assert_eq!(format_key_text_on("ctrl+o/alt+o", other), "Ctrl+O/Alt+O");
+    assert_eq!(format_key_text("escape"), "Esc");
+    assert_eq!(format_key_text("ctrl+o/alt+o"), format!("Ctrl+O/{alt}+O"));
 }
 
 #[test]

@@ -1,33 +1,17 @@
 //! `prime-agent factory`: the machine library commands.
 //!
-//! Every subcommand — list included — is one `rlm.factory.cli_dispatch`
-//! payload through the kernel Python. The kernel owns the whole library
-//! contract: the bundled seeds ship as wheel package data inside the
-//! runtime, the personal library lives under the agent dir, the strict
-//! MACHINE.md parser gates what lists, and the write-time validator gates
-//! what persists (an invalid spec never persists; the exact error
-//! sentences reach this command's output verbatim). The CLI never
-//! re-implements resolution or parsing, so the two sides cannot drift.
+//! The library is `pa-factory`'s scan (the same one a session's
+//! `factory.compile` resolves names with), so `list`, `export`, and
+//! `convert` read files only. `import` also asks the kernel Python's
+//! validator to check the spec's structure before the file persists (an
+//! invalid spec never persists; the exact error sentences reach this
+//! command's output verbatim).
 
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
-
-/// One machine as the kernel lists it (`cli_dispatch`'s `list` op).
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-struct MachineListing {
-    name: String,
-    description: String,
-    #[serde(default)]
-    version: String,
-    #[serde(default)]
-    author: String,
-    /// The library level: `repo` (the bundled library) or `user`.
-    source: String,
-    path: String,
-}
 
 /// The thin runner executed by the kernel Python: one JSON payload in on
 /// stdin, one JSON result out on stdout (`rlm.factory.cli_dispatch`).
@@ -53,6 +37,19 @@ enum FactoryCommand {
         out: String,
         json: bool,
     },
+    Validate {
+        path: String,
+        json: bool,
+    },
+    Compile {
+        path: String,
+        params: Vec<String>,
+    },
+    Convert {
+        source: String,
+        out: String,
+        json: bool,
+    },
 }
 
 /// Parse the subcommand and its flags; `Err` carries a usage hint.
@@ -74,6 +71,7 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
     let mut json = false;
     let mut operands: Vec<String> = Vec::new();
     let mut out: Option<String> = None;
+    let mut params: Vec<String> = Vec::new();
     let mut rest = args[1..].iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -83,6 +81,12 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
                     return Err("--out requires a file path".to_string());
                 };
                 out = Some(value.clone());
+            }
+            "--param" if subcommand == "compile" => {
+                let Some(value) = rest.next() else {
+                    return Err("--param requires name=value".to_string());
+                };
+                params.push(value.clone());
             }
             other if other.starts_with('-') => {
                 return Err(format!("unknown option {other:?}"));
@@ -123,6 +127,33 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
                 json,
             })
         }
+        "validate" => match operands.as_slice() {
+            [path] => Ok(FactoryCommand::Validate {
+                path: path.clone(),
+                json,
+            }),
+            _ => Err("Usage: prime-agent factory validate <dir> [--json]".to_string()),
+        },
+        "compile" => match operands.as_slice() {
+            [path] if !json => Ok(FactoryCommand::Compile {
+                path: path.clone(),
+                params,
+            }),
+            _ => {
+                Err("Usage: prime-agent factory compile <dir> [--param name=value]...".to_string())
+            }
+        },
+        "convert" => match (operands.as_slice(), out) {
+            ([source], Some(out)) => Ok(FactoryCommand::Convert {
+                source: source.clone(),
+                out,
+                json,
+            }),
+            _ => Err(
+                "Usage: prime-agent factory convert <MACHINE.md|name> --out <dir> [--json]"
+                    .to_string(),
+            ),
+        },
         _ => Err(String::new()),
     }
 }
@@ -146,37 +177,46 @@ pub fn run_factory_command(args: &[String]) -> i32 {
         FactoryCommand::List { json } => run_list(json),
         FactoryCommand::Import { path, json } => run_import(&path, json),
         FactoryCommand::Export { name, out, json } => run_export(&name, &out, json),
+        FactoryCommand::Validate { path, json } => {
+            crate::factory_dir_command::run_validate(&path, json)
+        }
+        FactoryCommand::Compile { path, params } => {
+            crate::factory_dir_command::run_compile(&path, &params)
+        }
+        FactoryCommand::Convert { source, out, json } => run_convert(&source, &out, json),
     }
 }
 
-/// The `list` payload: the op alone — the kernel resolves every library
-/// directory itself.
-fn list_payload() -> Value {
-    json!({"op": "list"})
+fn library() -> pa_factory::Library {
+    pa_core::session_engine::factory_host::machine_library(&crate::config::get_agent_dir())
 }
 
-/// The `import` payload: the machine file the user pointed at.
-fn import_payload(path: &std::path::Path) -> Value {
-    json!({
-        "op": "import",
-        "path": path.display().to_string(),
-    })
+/// A MACHINE.md path, or a library machine's name, read as a v1 machine.
+fn read_v1_machine(source: &str) -> Result<pa_factory::MachineMd, String> {
+    let path = crate::config::expand_tilde_path(source);
+    if path.is_file() {
+        return pa_factory::read_machine_md(&path);
+    }
+    let library = library();
+    let machine = library.resolve(source)?;
+    if machine.kind == pa_factory::MachineKind::Directory {
+        return Err(format!(
+            "{source} is already a machine directory ({})",
+            machine.path.display()
+        ));
+    }
+    pa_factory::read_machine_md(&machine.path)
 }
 
-/// The `export` payload: the name and the out target the user chose.
-fn export_payload(name: &str, out: &std::path::Path) -> Value {
-    json!({
-        "op": "export",
-        "name": name,
-        "out": out.display().to_string(),
-    })
-}
-
-/// `factory list`: library contents with descriptions.
-fn run_list(json: bool) -> i32 {
-    let payload = list_payload();
-    match resolve_kernel_python().and_then(|python| dispatch_via_kernel(&python, &payload)) {
-        Ok(result) => render_list(&result, json),
+/// `factory convert <MACHINE.md|name> --out <dir>`: read the v1 machine,
+/// then write it as a directory.
+fn run_convert(source: &str, out: &str, json: bool) -> i32 {
+    match read_v1_machine(source) {
+        Ok(machine) => crate::factory_dir_command::run_convert(
+            &machine,
+            &crate::config::expand_tilde_path(out),
+            json,
+        ),
         Err(error) => {
             eprintln!("Error: {error}");
             1
@@ -184,37 +224,20 @@ fn run_list(json: bool) -> i32 {
     }
 }
 
-/// Render one `list` dispatch result: errors verbatim, warnings as
-/// warnings, machines as rows (or the whole payload for `--json`).
-fn render_list(result: &Value, json: bool) -> i32 {
-    if let Some(code) = print_dispatch_errors(result) {
-        return code;
+/// `factory list`: library contents with descriptions.
+fn run_list(json: bool) -> i32 {
+    let library = library();
+    for warning in &library.warnings {
+        eprintln!("Warning: {warning}");
     }
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(result).unwrap_or_default()
+            serde_json::to_string_pretty(&library.to_json()).unwrap_or_default()
         );
         return 0;
     }
-    let machines: Vec<MachineListing> = result
-        .get("machines")
-        .cloned()
-        .map(|value| serde_json::from_value(value).unwrap_or_default())
-        .unwrap_or_default();
-    for warning in result
-        .get("warnings")
-        .and_then(Value::as_array)
-        .map(|warnings| {
-            warnings
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-    {
-        eprintln!("Warning: {warning}");
-    }
+    let machines: Vec<&pa_factory::LibraryMachine> = library.machines().collect();
     if machines.is_empty() {
         println!("No machines in the library.");
         return 0;
@@ -224,7 +247,7 @@ fn render_list(result: &Value, json: bool) -> i32 {
         .map(|machine| machine.name.chars().count())
         .max()
         .unwrap_or(0);
-    for machine in &machines {
+    for machine in machines {
         println!("{}", listing_row(machine, name_width));
     }
     0
@@ -240,15 +263,143 @@ fn pad_end(text: &str, width: usize) -> String {
     padded
 }
 
-/// Format one listing row (exposed for the unit tests).
-#[must_use]
-fn listing_row(machine: &MachineListing, name_width: usize) -> String {
+/// Format one listing row.
+fn listing_row(machine: &pa_factory::LibraryMachine, name_width: usize) -> String {
     format!(
         "{}  {}  {}",
         pad_end(&machine.name, name_width),
-        machine.source.as_str(),
+        machine.source,
         machine.description
     )
+}
+
+/// Create `out` with `bytes`, never replacing an existing file.
+fn write_new_file(out: &Path, bytes: &[u8]) -> Result<(), String> {
+    if out.is_dir() {
+        return Err(format!(
+            "export path {} is a directory (pass a file path)",
+            out.display()
+        ));
+    }
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(out)
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                format!("export path {} already exists", out.display())
+            }
+            _ => format!("cannot write {}: {error}", out.display()),
+        })?;
+    file.write_all(bytes)
+        .map_err(|error| format!("cannot write {}: {error}", out.display()))
+}
+
+/// `factory export <name> --out <path>`: copy a library MACHINE.md.
+fn export_machine(name: &str, out: &Path) -> Result<Value, String> {
+    let library = library();
+    let machine = library.resolve(name)?;
+    if machine.kind == pa_factory::MachineKind::Directory {
+        return Err(format!(
+            "{name} is a machine directory ({}); copy the directory instead",
+            machine.path.display()
+        ));
+    }
+    let bytes = std::fs::read(&machine.path)
+        .map_err(|error| format!("cannot read {}: {error}", machine.path.display()))?;
+    write_new_file(out, &bytes)?;
+    Ok(
+        json!({"ok": true, "name": machine.name, "path": out.display().to_string(), "source": "library"}),
+    )
+}
+
+fn run_export(name: &str, out: &str, json: bool) -> i32 {
+    let result = export_machine(name, &crate::config::expand_tilde_path(out));
+    print_result(result, json, |result| {
+        format!(
+            "Exported {} to {} (from library).",
+            text_field(result, "name"),
+            text_field(result, "path")
+        )
+    })
+}
+
+/// `factory import <path>`: parse and bound-check the MACHINE.md here, ask
+/// the kernel validator to check its spec, then copy it byte for byte into
+/// the personal library.
+fn import_machine(source: &Path, user_dir: &Path) -> Result<Value, String> {
+    if !source.is_file() {
+        return Err(format!("machine file not found: {}", source.display()));
+    }
+    let machine = pa_factory::read_machine_md(source)?;
+    let folder = user_dir.join(&machine.name);
+    if folder.join(pa_factory::MACHINE_FILE).is_file() {
+        return Err(format!(
+            "{} is a machine directory, which the library uses before a MACHINE.md; rename the machine or move the directory first",
+            folder.display()
+        ));
+    }
+    let checked = resolve_kernel_python().and_then(|python| {
+        dispatch_via_kernel(&python, &json!({"op": "validate", "spec": machine.spec}))
+    })?;
+    let errors = dispatch_error_sentences(&checked);
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    let bytes = std::fs::read(source)
+        .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    let destination = folder.join(pa_factory::MACHINE_MD_FILE);
+    let created = !destination.exists();
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    std::fs::write(&destination, bytes)
+        .map_err(|error| format!("cannot write {}: {error}", destination.display()))?;
+    Ok(
+        json!({"ok": true, "name": machine.name, "path": destination.display().to_string(), "created": created}),
+    )
+}
+
+fn run_import(path: &str, json: bool) -> i32 {
+    let user_dir = crate::config::get_agent_dir().join("machines");
+    let result = import_machine(&crate::config::expand_tilde_path(path), &user_dir);
+    print_result(result, json, |result| {
+        format!(
+            "Imported {} into {}.",
+            text_field(result, "name"),
+            text_field(result, "path")
+        )
+    })
+}
+
+fn text_field<'a>(result: &'a Value, key: &str) -> &'a str {
+    result.get(key).and_then(Value::as_str).unwrap_or_default()
+}
+
+/// Print an import or export result as JSON or one line; errors verbatim.
+fn print_result(result: Result<Value, String>, json: bool, line: impl Fn(&Value) -> String) -> i32 {
+    match result {
+        Ok(result) if json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            );
+            0
+        }
+        Ok(result) => {
+            println!("{}", line(&result));
+            0
+        }
+        Err(error) => {
+            eprintln!("Error: {error}");
+            1
+        }
+    }
 }
 
 /// Resolve the kernel Python (bootstrapping the venv on first use), the
@@ -305,35 +456,6 @@ fn dispatch_via_kernel(python: &std::path::Path, payload: &Value) -> Result<Valu
         .map_err(|error| format!("unreadable kernel result: {error}"))
 }
 
-/// `factory import <path>`: validate through the kernel gate and persist.
-fn run_import(path: &str, json: bool) -> i32 {
-    let source = crate::config::expand_tilde_path(path);
-    if !source.is_file() {
-        eprintln!("Error: machine file not found: {}", source.display());
-        return 1;
-    }
-    let payload = import_payload(&source);
-    match resolve_kernel_python().and_then(|python| dispatch_via_kernel(&python, &payload)) {
-        Ok(result) => print_dispatch_result(&result, json, "imported"),
-        Err(error) => {
-            eprintln!("Error: {error}");
-            1
-        }
-    }
-}
-
-/// `factory export <name> --out <path>`: serialize a machine to MACHINE.md.
-fn run_export(name: &str, out: &str, json: bool) -> i32 {
-    let payload = export_payload(name, &crate::config::expand_tilde_path(out));
-    match resolve_kernel_python().and_then(|python| dispatch_via_kernel(&python, &payload)) {
-        Ok(result) => print_dispatch_result(&result, json, "exported"),
-        Err(error) => {
-            eprintln!("Error: {error}");
-            1
-        }
-    }
-}
-
 /// The failed dispatch's error sentences (the validator's exact text,
 /// unwrapped from the JSON envelope — printing the `Value` would show the
 /// JSON quoting around every sentence).
@@ -343,52 +465,6 @@ fn dispatch_error_sentences(result: &Value) -> Vec<&str> {
         .and_then(Value::as_array)
         .map(|errors| errors.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default()
-}
-
-/// Print a failed dispatch's errors verbatim (the validator's exact
-/// sentences); `Some(exit code)` when the result is not an ok-payload.
-fn print_dispatch_errors(result: &Value) -> Option<i32> {
-    if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        return None;
-    }
-    for error in dispatch_error_sentences(result) {
-        eprintln!("Error: {error}");
-    }
-    Some(1)
-}
-
-/// Print one dispatch result: errors verbatim (the validator's exact
-/// sentences), or the ok-payload as text or JSON. `verb` is the done-word
-/// of the subcommand that ran ("imported" or "exported").
-fn print_dispatch_result(result: &Value, json: bool, verb: &str) -> i32 {
-    if let Some(code) = print_dispatch_errors(result) {
-        return code;
-    }
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(result).unwrap_or_default()
-        );
-        return 0;
-    }
-    let name = result
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let path = result
-        .get("path")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let source = result.get("source").and_then(Value::as_str);
-    if verb == "exported" {
-        match source {
-            Some(source) => println!("Exported {name} to {path} (from {source})."),
-            None => println!("Exported {name} to {path}."),
-        }
-    } else {
-        println!("Imported {name} into {path}.");
-    }
-    0
 }
 
 #[cfg(test)]
@@ -433,6 +509,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_machine_directory_subcommands() {
+        assert_eq!(
+            parse_factory_command(&arg(&["validate", "~/machines/rsi", "--json"])),
+            Ok(FactoryCommand::Validate {
+                path: "~/machines/rsi".to_string(),
+                json: true
+            })
+        );
+        assert_eq!(
+            parse_factory_command(&arg(&[
+                "compile",
+                "rsi",
+                "--param",
+                "task=@task.md",
+                "--param",
+                "max_loc=300"
+            ])),
+            Ok(FactoryCommand::Compile {
+                path: "rsi".to_string(),
+                params: vec!["task=@task.md".to_string(), "max_loc=300".to_string()],
+            })
+        );
+        assert_eq!(
+            parse_factory_command(&arg(&["convert", "builder", "--out", "/tmp/builder"])),
+            Ok(FactoryCommand::Convert {
+                source: "builder".to_string(),
+                out: "/tmp/builder".to_string(),
+                json: false
+            })
+        );
+        assert!(parse_factory_command(&arg(&["convert", "builder"]))
+            .unwrap_err()
+            .starts_with("Usage: prime-agent factory convert"));
+        assert_eq!(
+            parse_factory_command(&arg(&["validate", "a", "--param", "x=1"])),
+            Err("unknown option \"--param\"".to_string())
+        );
+    }
+
+    #[test]
     fn rejects_missing_and_unknown_subcommands() {
         assert_eq!(parse_factory_command(&arg(&[])), Err(String::new()));
         let unknown = parse_factory_command(&arg(&["run"]));
@@ -455,81 +571,58 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_results_print_errors_verbatim() {
-        let failure: Value = serde_json::from_str(
-            r#"{"ok": false, "errors": ["run max_parallel must be an integer between 1 and 64"]}"#,
-        )
-        .expect("fixture");
-        // Errors go to stderr inside print_dispatch_result; the exit code is the pin.
-        assert_eq!(print_dispatch_result(&failure, false, "imported"), 1);
-        assert_eq!(render_list(&failure, false), 1);
-        // The sentence prints verbatim: unwrapped from the JSON envelope,
-        // never with JSON quoting.
-        assert_eq!(
-            dispatch_error_sentences(&failure),
-            ["run max_parallel must be an integer between 1 and 64"]
-        );
-    }
-
-    #[test]
     fn dispatch_runner_contract_is_the_json_facade() {
         assert!(CLI_DISPATCH_RUNNER.contains("from rlm.factory import cli_dispatch"));
         assert!(CLI_DISPATCH_RUNNER.contains("print(json.dumps(cli_dispatch(payload)))"));
     }
 
     #[test]
-    fn payloads_carry_only_what_the_user_typed() {
-        // The kernel resolves every library directory itself, so the
-        // payloads carry no directory fields to drift out of sync.
-        assert_eq!(list_payload(), serde_json::json!({"op": "list"}));
-        assert_eq!(
-            import_payload(std::path::Path::new("/tmp/m.MACHINE.md")),
-            serde_json::json!({"op": "import", "path": "/tmp/m.MACHINE.md"})
-        );
-        assert_eq!(
-            export_payload("sweep", std::path::Path::new("/tmp/s.MACHINE.md")),
-            serde_json::json!({
-                "op": "export",
-                "name": "sweep",
-                "out": "/tmp/s.MACHINE.md",
-            })
-        );
-    }
-
-    #[test]
     fn listing_row_renders_name_source_description() {
-        let listing = MachineListing {
+        let machine = pa_factory::LibraryMachine {
             name: "sweep".to_string(),
             description: "A machine that sweeps.".to_string(),
             version: "1".to_string(),
             author: "Tester".to_string(),
             source: "repo".to_string(),
-            path: "/machines/sweep/MACHINE.md".to_string(),
+            path: PathBuf::from("/machines/sweep/MACHINE.md"),
+            kind: pa_factory::MachineKind::File,
         };
         assert_eq!(
-            listing_row(&listing, 5),
+            listing_row(&machine, 5),
             "sweep  repo  A machine that sweeps."
         );
     }
 
     #[test]
-    fn render_list_parses_the_kernel_listing() {
-        let result: Value = serde_json::from_str(
-            r#"{"ok": true, "machines": [
-                {"name": "review-sweep", "description": "Sweep a branch.", "version": "1", "author": "Prime Agent", "source": "repo", "path": "/rlm/machines/review-sweep/MACHINE.md"},
-                {"name": "mine", "description": "Personal.", "version": "", "author": "", "source": "user", "path": "/agent/machines/mine/MACHINE.md"}
-            ], "warnings": []}"#,
+    fn an_import_never_hides_behind_a_machine_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("MACHINE.md");
+        std::fs::write(
+            &source,
+            "---\nname: sweep\ndescription: Sweep.\n---\n```machine-spec\n{\"states\": []}\n```\n",
         )
-        .expect("fixture");
-        // The rows print to stdout; the exit code pins the ok-path.
-        assert_eq!(render_list(&result, false), 0);
-        assert_eq!(render_list(&result, true), 0);
+        .unwrap();
+        let user = dir.path().join("machines");
+        std::fs::create_dir_all(user.join("sweep")).unwrap();
+        std::fs::write(user.join("sweep/machine.toml"), "format = 1\n").unwrap();
+        assert!(import_machine(&source, &user)
+            .unwrap_err()
+            .contains("is a machine directory"));
+        assert!(!user.join("sweep/MACHINE.md").exists());
     }
 
     #[test]
-    fn render_list_exits_cleanly_with_no_machines() {
-        let result: Value = serde_json::from_str(r#"{"ok": true, "machines": [], "warnings": []}"#)
-            .expect("fixture");
-        assert_eq!(render_list(&result, false), 0);
+    fn an_export_never_replaces_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("nested/sweep.MACHINE.md");
+        write_new_file(&out, b"first").unwrap();
+        assert_eq!(
+            write_new_file(&out, b"second").unwrap_err(),
+            format!("export path {} already exists", out.display())
+        );
+        assert_eq!(std::fs::read(&out).unwrap(), b"first");
+        assert!(write_new_file(dir.path(), b"x")
+            .unwrap_err()
+            .ends_with("is a directory (pass a file path)"));
     }
 }

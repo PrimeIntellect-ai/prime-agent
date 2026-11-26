@@ -474,6 +474,30 @@ async fn get_state_reports_owed_background_completions_on_every_read() {
         json!(1),
         "ordinary summaries carry the queued cell completion"
     );
+    // The factory task observation opts in to the wider aggregate; ordinary
+    // summaries do not carry it.
+    assert!(
+        ordinary
+            .data
+            .as_ref()
+            .unwrap_or(&Value::Null)
+            .get("outstandingBackgroundJobs")
+            .is_none(),
+        "only the factory task observation reports outstanding jobs"
+    );
+    let observed = worker
+        .dispatch("get_state", &json!({ "taskObservation": "factory" }))
+        .await;
+    assert_eq!(
+        observed.data.as_ref().unwrap_or(&Value::Null)["outstandingBackgroundJobs"],
+        json!(1),
+        "the opt-in reports the pending completion delivery"
+    );
+    // The handler reads the summary and the count under one core guard; the
+    // locked variant must not re-lock it (that would deadlock here).
+    let core = worker.core.lock().unwrap();
+    assert_eq!(worker.outstanding_background_jobs_locked(&core), 1);
+    drop(core);
     // The zero case: the field is present with 0, so a dropped insertion
     // fails this assertion instead of silently returning the old shape.
     worker.core.lock().unwrap().steering.clear();

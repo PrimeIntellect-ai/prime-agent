@@ -70,67 +70,82 @@ impl MockSupervisor {
         } else {
             &[]
         };
-        serve_connection(stream, capabilities, |writer, Request { id, kind, .. }| {
-            match kind {
-                "create" => {
-                    write_json(writer, &create_response(id));
-                }
-                "attach" => {
-                    write_json(writer, &attach_response(id, "dock arrows session"));
-                    if let Some(goal) = &self.goal {
-                        write_session_event(writer, goal);
+        serve_connection(
+            stream,
+            capabilities,
+            |writer, Request { id, kind, command }| {
+                match kind {
+                    "create" => {
+                        write_json(writer, &create_response(id));
                     }
-                }
-                "heartbeats_list" => {
-                    write_json(
-                        writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "heartbeats_list",
-                            "success": true,
-                            "data": self.heartbeats.clone().unwrap_or_else(|| json!({})),
-                        }),
-                    );
-                }
-                "factory_activity" => {
-                    write_json(
-                        writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "factory_activity",
-                            "success": true,
-                            "data": { "runs": [] },
-                        }),
-                    );
-                }
-                "roster_subscribe" => {
-                    let snapshot = self
-                        .roster
-                        .get(subscribe)
-                        .or_else(|| self.roster.last())
-                        .cloned()
-                        .unwrap_or_else(|| json!({}));
-                    subscribe += 1;
-                    write_json(
-                        writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "roster_subscribe",
-                            "success": true,
-                            "data": snapshot,
-                        }),
-                    );
-                    for frame in &self.pushes {
-                        write_json(writer, frame);
+                    "attach" => {
+                        write_json(writer, &attach_response(id, "dock arrows session"));
+                        if let Some(goal) = &self.goal {
+                            write_session_event(writer, goal);
+                        }
                     }
+                    "heartbeats_list" => {
+                        write_json(
+                            writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "heartbeats_list",
+                                "success": true,
+                                "data": self.heartbeats.clone().unwrap_or_else(|| json!({})),
+                            }),
+                        );
+                    }
+                    "factory_activity" => {
+                        // The dock's graph poll and the machines page's
+                        // fetches share the lane: the library's list action
+                        // answers the machine list (an empty library), every
+                        // other action answers the runs.
+                        let data = match (
+                            command.get("action").and_then(Value::as_str),
+                            command.get("specId").and_then(Value::as_str),
+                        ) {
+                            (Some("library"), None) => json!({ "machines": [], "warnings": [] }),
+                            _ => json!({ "runs": [] }),
+                        };
+                        write_json(
+                            writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "factory_activity",
+                                "success": true,
+                                "data": data,
+                            }),
+                        );
+                    }
+                    "roster_subscribe" => {
+                        let snapshot = self
+                            .roster
+                            .get(subscribe)
+                            .or_else(|| self.roster.last())
+                            .cloned()
+                            .unwrap_or_else(|| json!({}));
+                        subscribe += 1;
+                        write_json(
+                            writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "roster_subscribe",
+                                "success": true,
+                                "data": snapshot,
+                            }),
+                        );
+                        for frame in &self.pushes {
+                            write_json(writer, frame);
+                        }
+                    }
+                    _ => return false,
                 }
-                _ => return false,
-            }
-            true
-        });
+                true
+            },
+        );
     }
 }
 
@@ -329,7 +344,7 @@ fn enter_and_right_open_every_rows_page_and_down_wraps_to_the_top() {
     for open in [enter(), right()] {
         let steps = vec![
             HeadlessStep::WaitRender {
-                needle: "\u{2699} 0 factory  \u{b7}  Pursuing goal (0s)".to_string(),
+                needle: "\u{2699} 0 machines  \u{b7}  Pursuing goal (0s)".to_string(),
                 timeout_ms: 5_000,
             },
             HeadlessStep::Key(alt_a()),
@@ -351,10 +366,12 @@ fn enter_and_right_open_every_rows_page_and_down_wraps_to_the_top() {
             },
             HeadlessStep::Key(escape()),
             HeadlessStep::WaitMs(100),
+            // The factory row's page is the machines page: an empty
+            // library answers its list fetch.
             HeadlessStep::Key(down()),
             HeadlessStep::Key(open),
             HeadlessStep::WaitRender {
-                needle: "No live factory runs.".to_string(),
+                needle: "No machines in the library".to_string(),
                 timeout_ms: 5_000,
             },
             HeadlessStep::Key(escape()),
@@ -385,7 +402,7 @@ fn enter_and_right_open_every_rows_page_and_down_wraps_to_the_top() {
         for page in [
             "No running or paused heartbeats",
             "No background commands",
-            "No live factory runs.",
+            "No machines in the library",
             "status   active",
         ] {
             assert!(all.contains(page), "{open:?} did not open {page:?}:\n{all}");
@@ -568,10 +585,10 @@ fn a_roster_push_alone_remounts_the_dock_count_and_the_title_cost() {
             timeout_ms: 5_000,
         },
     ];
-    let pushes = vec![roster_push(&[
-        parent_row(),
-        child_row("c1", "running", 0.42),
-    ])];
+    // The parent publishes its family total (its own spend plus the child's).
+    let mut parent = parent_row();
+    parent["summary"]["totalUsage"] = json!({ "cost": 0.42 });
+    let pushes = vec![roster_push(&[parent, child_row("c1", "running", 0.42)])];
     let outcome = run_plan_with_roster(steps, None, None, Vec::new(), pushes);
     let last = outcome.frames.last().cloned().unwrap_or_default();
     assert!(

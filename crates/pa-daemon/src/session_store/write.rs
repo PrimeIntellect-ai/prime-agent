@@ -28,10 +28,6 @@ impl SessionEntry {
 impl SessionFile {
     /// Persist only the newly appended creation records on a resumed file.
     pub(crate) fn persist_appended(&self, start: usize) -> Result<()> {
-        anyhow::ensure!(
-            self.child_usage_recovery.pending.is_none(),
-            "confirm unresolved attribution before persisting appended rows"
-        );
         let mut bytes = Vec::new();
         for entry in &self.entries[start..] {
             write_line(&mut bytes, entry)?;
@@ -105,10 +101,6 @@ impl SessionFile {
     /// Returns an error when the store only holds a window, or the write,
     /// flush, sync, or rename fails; an empty path answers `Ok(())`.
     pub fn rewrite(&self) -> Result<()> {
-        anyhow::ensure!(
-            self.child_usage_recovery.pending.is_none(),
-            "confirm unresolved attribution before rewriting session"
-        );
         anyhow::ensure!(
             self.window.is_none(),
             "full history required before rewriting session"
@@ -217,20 +209,16 @@ impl SessionFile {
         self.persist_built_entry(entry)
     }
 
-    /// The durable-append core [`Self::persist_entry_at`] and the attribution
-    /// append-once share: the entry arrives fully built (its id included),
-    /// its line reaches the file first, and the entry joins the index only
-    /// after, so a failed append leaves no indexed row a reload would
-    /// resurface as the leaf.
+    /// The durable-append core: the entry arrives fully built (its id
+    /// included), its line reaches the file first, and the entry joins the
+    /// index only after, so a failed append leaves no indexed row a reload
+    /// would resurface as the leaf.
     ///
     /// # Errors
     ///
     /// Returns an error when the store only holds a window without a file,
     /// or the append, flush, sync, or the bootstrap rewrite fails.
     pub(super) fn persist_built_entry(&mut self, mut entry: SessionEntry) -> Result<String> {
-        self.confirm_child_usage_write()?;
-        // A preflight recovery can advance the leaf after the caller built its
-        // generic row. Preserve that recovered parent instead of branching it away.
         entry.parent_id.clone_from(&self.leaf_id);
         anyhow::ensure!(
             self.window.is_none() || self.path.exists(),
@@ -240,22 +228,6 @@ impl SessionFile {
         if !self.path.as_os_str().is_empty() && self.path.exists() {
             let mut bytes = Vec::new();
             write_line(&mut bytes, &entry)?;
-            #[cfg(test)]
-            if let Some(cut) = (entry.type_ == "child_usage_attributed")
-                .then(|| super::child_usage_tests::PARTIAL_CHILD_APPEND.with(std::cell::Cell::take))
-                .flatten()
-            {
-                // Isolated unleased fixture only: simulate write_all's partial
-                // prefix + Err postcondition, not a real injected OS failure.
-                anyhow::ensure!(
-                    self.lease.is_none() && cut < bytes.len(),
-                    "invalid partial append fixture"
-                );
-                let mut file = fs::OpenOptions::new().append(true).open(&self.path)?;
-                file.write_all(&bytes[..cut])?;
-                file.flush()?;
-                anyhow::bail!("injected partial attribution append error");
-            }
             match &self.lease {
                 Some(lease) => lease.append(&self.path, &bytes)?,
                 None => pa_core::session::window::append_cached(
@@ -264,13 +236,6 @@ impl SessionFile {
                     pa_core::session::window::AppendOwnership::Unleased,
                 )
                 .with_context(|| format!("append to {}", self.path.display()))?,
-            }
-            #[cfg(test)]
-            if entry.type_ == "child_usage_attributed"
-                && super::child_usage_tests::FAIL_AFTER_CHILD_APPEND
-                    .with(|fault| fault.replace(false))
-            {
-                anyhow::bail!("injected post-append pre-index error");
             }
             // The line is in the file now: index it so the in-memory leaf matches what a
             // reload sees.
@@ -283,30 +248,22 @@ impl SessionFile {
             // indexed first; a failed rewrite rolls the index back. The live
             // attribution fold is DEFERRED until the rewrite succeeds.
             let previous_leaf = self.leaf_id.clone();
-            #[cfg(test)]
-            let entry_is_child = entry.type_ == "child_usage_attributed";
             self.push_index_inner(entry, false);
-            let rewritten = self.rewrite();
-            #[cfg(test)]
-            let rewritten = rewritten.and_then(|()| {
-                if entry_is_child
-                    && super::child_usage_tests::FAIL_AFTER_CHILD_APPEND
-                        .with(|fault| fault.replace(false))
-                {
-                    anyhow::bail!("injected post-bootstrap pre-index error");
-                }
-                Ok(())
-            });
-            if let Err(error) = rewritten {
+            if let Err(error) = self.rewrite() {
                 self.unindex_last();
                 self.set_leaf(previous_leaf);
                 return Err(error);
             }
             self.fold_attribution_id(&id);
         }
-        if let (Some(sink), Some(entry)) = (&self.billed_row_sink.0, self.entry(&id)) {
-            if let Some(row) = crate::session_usage::billed_store_row(entry) {
-                sink(&row);
+        if let (Some(sink), Some(entry)) = (&self.usage_row_sink.0, self.entry(&id)) {
+            if let Some((usage, billed)) = crate::session_usage::store_usage_row(entry) {
+                sink(&super::UsageRow {
+                    session_file: &self.path,
+                    id: &id,
+                    usage,
+                    billed,
+                });
             }
         }
         Ok(id)
