@@ -64,7 +64,11 @@ pub fn login_rule_hosts(provider: &str) -> &'static [&'static str] {
     match provider {
         ANTHROPIC_PROVIDER_ID => &["api.anthropic.com"],
         OPENAI_CODEX_PROVIDER_ID => &["chatgpt.com"],
-        GITHUB_COPILOT_PROVIDER_ID => &["api.business.githubcopilot.com", "api.githubcopilot.com"],
+        GITHUB_COPILOT_PROVIDER_ID => &[
+            "api.individual.githubcopilot.com",
+            "api.business.githubcopilot.com",
+            "api.githubcopilot.com",
+        ],
         XAI_PROVIDER_ID => &["api.x.ai"],
         _ => &[],
     }

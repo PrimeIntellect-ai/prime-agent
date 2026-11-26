@@ -432,6 +432,12 @@ impl BotManager {
         if record.logins.is_empty() {
             return;
         }
+        // Inside a bot the guest's auth holds placeholders, never
+        // refreshable tokens: the owner's Mac refreshes the login secrets
+        // the child's rules reference.
+        if super::nested::NestedContext::read(&self.agent_dir).is_some() {
+            return;
+        }
         self.logins
             .tick(&record.logins.iter().cloned().collect())
             .await;
