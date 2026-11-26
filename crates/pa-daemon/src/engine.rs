@@ -334,6 +334,14 @@ pub trait SessionEngine: Send + Sync {
         false
     }
 
+    /// True while the session's kernel runs background work behind the
+    /// settled turn: a live background `bash()` handle awaiting its
+    /// completion notice. Engines without a kernel (the scripted
+    /// harness) run none.
+    fn has_background_kernel_work(&self) -> bool {
+        false
+    }
+
     /// Apply a live model switch (the daemon `set_model` command, TS
     /// `session.setModel`): the selection merges over the current one and
     /// a built session's agent and provider stream follow the new model on

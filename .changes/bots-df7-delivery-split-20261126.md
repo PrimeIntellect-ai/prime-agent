@@ -1,0 +1,1 @@
+- Fixed a bot's settled reply waiting on background work: the delivery lane now reads turn work only, while the idle pause still holds on background kernel work and factory runs.

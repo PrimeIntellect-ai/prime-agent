@@ -12,6 +12,7 @@ use serde_json::json;
 
 use super::TICK_MS;
 use super::{heartbeat_due_soon, self_pause_loop, SelfPauseConfig, DEFAULT_IDLE_MINUTES, TICK};
+use crate::supervisor::{Supervisor, SupervisorOptions};
 
 fn write_config(dir: &std::path::Path, value: &serde_json::Value) -> PathBuf {
     let path = dir.join("bot-self-pause.json");
@@ -258,11 +259,51 @@ fn a_running_session_summary_is_busy() {
         "isRunningTools",
         "hasRunningSubagents",
         "hasRunningRlmChildren",
+        "hasBackgroundKernelWork",
     ] {
         assert!(super::summary_busy(&json!({ flag: true })), "{flag}");
     }
     assert!(!super::summary_busy(&json!({"isStreaming": false})));
     assert!(!super::summary_busy(&json!({})));
+}
+
+/// One roster row the supervisor's self-pause reads: the shape a resident
+/// worker's summary push writes, with the new busy flags flipped on.
+#[test]
+fn background_kernel_work_and_factory_runs_hold_off_the_self_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let supervisor = Supervisor::new(SupervisorOptions {
+        socket_path: dir.path().join("daemon.sock"),
+        agent_dir: dir.path().join("agent"),
+    })
+    .expect("supervisor");
+    let mut summary = json!({
+        "sessionId": "s1",
+        "activeSessionId": "a1",
+        "sessionFile": dir.path().join("s1.jsonl"),
+        "activity": "idle",
+    });
+    supervisor
+        .roster
+        .lock()
+        .unwrap()
+        .write_seeded(summary.clone(), false);
+    assert!(!supervisor.self_pause_active());
+    summary["hasBackgroundKernelWork"] = json!(true);
+    supervisor
+        .roster
+        .lock()
+        .unwrap()
+        .write_seeded(summary.clone(), false);
+    assert!(supervisor.self_pause_active());
+    // Once the background work and the run finish, the pause may proceed.
+    summary["hasBackgroundKernelWork"] = json!(false);
+    supervisor
+        .roster
+        .lock()
+        .unwrap()
+        .write_seeded(summary.clone(), false);
+    assert!(!supervisor.self_pause_active());
 }
 
 /// Spawn the loop with a wall clock that advances one tick per call, a

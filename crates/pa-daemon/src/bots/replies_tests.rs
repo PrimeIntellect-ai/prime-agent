@@ -220,6 +220,63 @@ async fn a_settled_idle_bot_pauses_after_its_turn() {
     assert_eq!(busy, PauseVerdict::FollowAgain);
 }
 
+#[tokio::test]
+async fn background_kernel_work_and_factory_runs_hold_off_the_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut guest = FakeGuest::default();
+    guest.turn("a1", "done");
+    guest.state = json!({ "isStreaming": false, "sessionActions": { "queuedCount": 0 } });
+    assert_eq!(sync(dir.path(), &mut guest).await, ["done"]);
+    // A background shell, a backgrounded cell, or an active factory run
+    // outlives the settled turn: the bot must not pause mid-job.
+    guest.state["hasBackgroundKernelWork"] = json!(true);
+    let verdict = pause_verdict(&mut guest, "guest-session", || true)
+        .await
+        .unwrap();
+    assert_eq!(verdict, PauseVerdict::FollowAgain);
+    // Once the background work and the run finish, the pause proceeds.
+    guest.state = json!({ "isStreaming": false, "sessionActions": { "queuedCount": 0 } });
+    let pause = pause_verdict(&mut guest, "guest-session", || true)
+        .await
+        .unwrap();
+    assert_eq!(pause, PauseVerdict::Pause);
+}
+
+#[tokio::test]
+async fn a_settled_answer_delivers_while_background_work_holds_the_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut guest = FakeGuest::default();
+    guest.turn("a1", "done");
+    // Background kernel work outlives the turn: the delivery lane reads
+    // turn work only, so the settled answer still delivers (a stuck
+    // settle loop would time out here).
+    guest.state = json!({
+        "isStreaming": false,
+        "hasBackgroundKernelWork": true,
+        "sessionActions": { "queuedCount": 0 },
+    });
+    let delivered = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        sync(dir.path(), &mut guest),
+    )
+    .await;
+    assert_eq!(
+        delivered.expect("the answer delivers while background work runs"),
+        ["done"]
+    );
+    // The idle pause still holds on the same state.
+    let verdict = pause_verdict(&mut guest, "guest-session", || true)
+        .await
+        .unwrap();
+    assert_eq!(verdict, PauseVerdict::FollowAgain);
+    // Once the background work ends, the pause proceeds.
+    guest.state = json!({ "isStreaming": false, "sessionActions": { "queuedCount": 0 } });
+    let pause = pause_verdict(&mut guest, "guest-session", || true)
+        .await
+        .unwrap();
+    assert_eq!(pause, PauseVerdict::Pause);
+}
+
 #[test]
 fn a_send_during_a_boot_catch_up_waits_the_full_grace() {
     follows().lock().unwrap().insert(

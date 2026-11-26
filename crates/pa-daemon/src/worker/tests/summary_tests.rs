@@ -9,6 +9,7 @@ fn inputs() -> SummaryInputs {
         bash_running: false,
         quota_parked: false,
         subagents_running: false,
+        background_kernel_work: false,
         progress_note: None,
     }
 }
@@ -130,6 +131,24 @@ fn summary_lifecycle_is_message_based() {
     let with_message = SessionCore::test_core(Some(session), "/tmp".to_string());
     assert_eq!(session_summary(&with_message, inputs()).lifecycle, "live");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The bot-pause busy flag reaches the summary wire: background kernel
+/// work from the engine inputs.
+#[test]
+fn the_background_work_flag_reaches_the_summary() {
+    let core = SessionCore::test_core(None, "/tmp".to_string());
+    let plain = serde_json::to_value(session_summary(&core, inputs())).expect("wire");
+    assert_eq!(plain["hasBackgroundKernelWork"], json!(false));
+    let working = serde_json::to_value(session_summary(
+        &core,
+        SummaryInputs {
+            background_kernel_work: true,
+            ..inputs()
+        },
+    ))
+    .expect("wire");
+    assert_eq!(working["hasBackgroundKernelWork"], json!(true));
 }
 
 /// A session whose own turn ended keeps reporting `working` while any of

@@ -719,6 +719,7 @@ async fn a_turns_tool_executions_count_onto_the_summary() {
                 bash_running: false,
                 quota_parked: false,
                 subagents_running: false,
+                background_kernel_work: false,
                 progress_note: None,
             },
         )

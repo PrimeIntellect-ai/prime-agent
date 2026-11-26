@@ -596,6 +596,14 @@ impl SessionEngine for AgentSessionEngine {
             .is_some_and(|children| children.has_running_children())
     }
 
+    fn has_background_kernel_work(&self) -> bool {
+        // A live background `bash()` handle behind the settled turn: its
+        // `[bash-done]` notice is the wake-up that ends the hold, so the
+        // flag cannot stick on work that finished. The detached-cell term
+        // joins this aggregate when that lane lands here.
+        self.has_live_background_bash_handles()
+    }
+
     /// `compact` over the hosted pa-core session: the session summarizes
     /// its own branch, persists the entry on its in-memory store, and
     /// rebuilds the loop context; the worker persists the durable entry.

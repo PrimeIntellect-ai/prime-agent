@@ -409,6 +409,7 @@ pub(crate) struct SummaryInputs {
     pub(crate) bash_running: bool,
     pub(crate) quota_parked: bool,
     pub(crate) subagents_running: bool,
+    pub(crate) background_kernel_work: bool,
     pub(crate) progress_note: Option<String>,
 }
 
@@ -445,6 +446,7 @@ impl SummaryInputs {
             bash_running: user_bash.is_running(),
             quota_parked: engine.is_quota_parked(),
             subagents_running: engine.has_running_subagents(),
+            background_kernel_work: engine.has_background_kernel_work(),
             progress_note: engine.progress_note(),
         }
     }
@@ -569,6 +571,7 @@ pub(crate) fn session_summary(core: &SessionCore, inputs: SummaryInputs) -> Sess
         is_bash_running: Some(inputs.bash_running),
         is_running_tools: streaming && !core.running_tool_calls.is_empty(),
         has_running_subagents: inputs.subagents_running,
+        has_background_kernel_work: inputs.background_kernel_work,
         attached_clients: core.attached_client_ids.len() as u32,
         message_count: store.map_or(0, crate::session_store::SessionFile::message_count) as u32,
         session_actions: session_snapshot(core),

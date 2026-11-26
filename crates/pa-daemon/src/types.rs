@@ -85,6 +85,12 @@ pub struct SessionSummary {
     /// ended.
     #[serde(default)]
     pub has_running_subagents: bool,
+    /// The session's kernel runs live background work behind the settled
+    /// turn: a live background `bash()` handle awaiting its completion
+    /// notice. The bot pause paths read it: such work outlives the turn,
+    /// so the session is not idle.
+    #[serde(default)]
+    pub has_background_kernel_work: bool,
     pub attached_clients: u32,
     pub message_count: u32,
     pub session_actions: SessionActionSnapshot,
