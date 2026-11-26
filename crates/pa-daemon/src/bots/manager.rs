@@ -1211,8 +1211,8 @@ impl BotManager {
             // adoption, which writes under this lock: a lifecycle snapshot
             // taken before an adoption must not overwrite the adopted
             // choice with the stale one.
-            record.model = current.model.clone();
-            record.thinking = current.thinking.clone();
+            record.model.clone_from(&current.model);
+            record.thinking.clone_from(&current.thinking);
         }
         (record.status_since, record.running_ms) = match current {
             // A record from before the stamp counts from its first save.
