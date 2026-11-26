@@ -10,7 +10,7 @@
 //! passivation can reclaim the worker; the next task re-opens the session
 //! file (a live worker is reused) and attaches again.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -19,7 +19,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
 
 use super::jsonrpc::{self, A2aError};
-use super::tasks::{SubscribeError, Tasks};
+use super::tasks::{ContextKey, SubscribeError, Tasks};
 use super::types::{
     prompt_text, ListTasksParams, PartsError, Role, SendMessageRequest, StreamResponse, Task,
     TaskQuery, TaskState,
@@ -33,9 +33,11 @@ pub struct A2aOptions {
     pub socket_path: PathBuf,
     pub bind_host: String,
     pub bind_port: u16,
-    pub bearer_token: String,
-    /// Set when the token was minted for this run: the agent dir its
-    /// owner-only token file is written to once the listener binds.
+    /// Client name -> bearer token. A client sees only the tasks and
+    /// contexts it created.
+    pub clients: BTreeMap<String, String>,
+    /// Set when the one client's token was minted for this run: the agent
+    /// dir its owner-only token file is written to once the listener binds.
     pub minted_token_dir: Option<PathBuf>,
     /// The most contexts with a live worker or task; a new context beyond
     /// it is refused.
@@ -85,9 +87,9 @@ struct Context {
 #[derive(Default)]
 struct State {
     tasks: Tasks,
-    contexts: HashMap<String, Context>,
-    /// Daemon active session id -> context id (the event routing).
-    sessions: HashMap<String, String>,
+    contexts: HashMap<ContextKey, Context>,
+    /// Daemon active session id -> context (the event routing).
+    sessions: HashMap<String, ContextKey>,
     shutting_down: bool,
 }
 
@@ -138,13 +140,11 @@ impl Server {
         let field = |key: &str| binding.get(key).and_then(Value::as_str).unwrap_or_default();
         let (previous, current) = (field("previousActiveSessionId"), field("activeSessionId"));
         let mut state = self.state();
-        let Some(context_id) = state.sessions.remove(previous) else {
+        let Some(key) = state.sessions.remove(previous) else {
             return;
         };
-        state
-            .sessions
-            .insert(current.to_string(), context_id.clone());
-        if let Some(context) = state.contexts.get_mut(&context_id) {
+        state.sessions.insert(current.to_string(), key.clone());
+        if let Some(context) = state.contexts.get_mut(&key) {
             context.active_session_id = current.to_string();
         }
         let link = Arc::clone(&self.link);
@@ -173,7 +173,7 @@ impl Server {
         let Some(context) = state
             .sessions
             .get(session)
-            .and_then(|context_id| state.contexts.get_mut(context_id))
+            .and_then(|key| state.contexts.get_mut(key))
         else {
             return;
         };
@@ -249,12 +249,17 @@ impl Server {
         }
     }
 
-    pub(crate) async fn dispatch(self: &Arc<Self>, request: jsonrpc::Request) -> Reply {
+    /// Answer one request from the authenticated `client`.
+    pub(crate) async fn dispatch(
+        self: &Arc<Self>,
+        request: jsonrpc::Request,
+        client: &str,
+    ) -> Reply {
         let jsonrpc::Request { id, method, params } = request;
         match method.as_str() {
-            "SendMessage" => self.send_message(id, params, false).await,
-            "SendStreamingMessage" => self.send_message(id, params, true).await,
-            "GetTask" => Reply::Json(match parse::<TaskQuery>(&id, params) {
+            "SendMessage" => self.send_message(id, params, client, false).await,
+            "SendStreamingMessage" => self.send_message(id, params, client, true).await,
+            "GetTask" => Reply::Json(match self.own_task(&id, params, client) {
                 Ok(query) => match self.state().tasks.snapshot(&query.id, query.history_length) {
                     Some(task) => task_reply(&id, &task),
                     None => task_not_found(&id, &query.id),
@@ -262,13 +267,13 @@ impl Server {
                 Err(reply) => reply,
             }),
             "ListTasks" => Reply::Json(match parse::<ListTasksParams>(&id, params) {
-                Ok(params) => match self.state().tasks.list(&params) {
+                Ok(params) => match self.state().tasks.list(client, &params) {
                     Ok(page) => jsonrpc::response(&id, &to_json(&page)),
                     Err(field) => jsonrpc::invalid_params(&id, field, "invalid value"),
                 },
                 Err(reply) => reply,
             }),
-            "CancelTask" => Reply::Json(match parse::<TaskQuery>(&id, params) {
+            "CancelTask" => Reply::Json(match self.own_task(&id, params, client) {
                 Ok(query) => match self.cancel_task(&query.id).await {
                     Ok(task) => task_reply(&id, &task),
                     Err(error) => {
@@ -277,7 +282,7 @@ impl Server {
                 },
                 Err(reply) => reply,
             }),
-            "SubscribeToTask" => match parse::<TaskQuery>(&id, params) {
+            "SubscribeToTask" => match self.own_task(&id, params, client) {
                 Ok(query) => match self
                     .state()
                     .tasks
@@ -315,9 +320,27 @@ impl Server {
         }
     }
 
+    /// The caller's own task named by `params`. Another client's task
+    /// answers exactly like an unknown one, checked before anything touches
+    /// the task (spec 3.3.2, 13.1).
+    fn own_task(&self, id: &Value, params: Value, client: &str) -> Result<TaskQuery, Value> {
+        let query = parse::<TaskQuery>(id, params)?;
+        if self.state().tasks.owned(client, &query.id) {
+            Ok(query)
+        } else {
+            Err(task_not_found(id, &query.id))
+        }
+    }
+
     /// The task runs detached from the HTTP request, so a client disconnect
     /// never strands it.
-    async fn send_message(self: &Arc<Self>, id: Value, params: Value, streaming: bool) -> Reply {
+    async fn send_message(
+        self: &Arc<Self>,
+        id: Value,
+        params: Value,
+        client: &str,
+        streaming: bool,
+    ) -> Reply {
         let request = match parse::<SendMessageRequest>(&id, params) {
             Ok(request) => request,
             Err(reply) => return Reply::Json(reply),
@@ -344,6 +367,15 @@ impl Server {
                 ))
             }
         };
+        // Every reply part is the card's one output mode; a client that takes
+        // none of it gets no task (the error table's "implied for an artifact").
+        if !config.accepts_output(super::http::OUTPUT_MODE) {
+            return Reply::Json(jsonrpc::a2a_error(
+                &id,
+                A2aError::ContentTypeNotSupported,
+                Some(json!({ "supported": super::http::OUTPUT_MODE })),
+            ));
+        }
         if config.task_push_notification_config.is_some() {
             return Reply::Json(jsonrpc::a2a_error(
                 &id,
@@ -355,23 +387,27 @@ impl Server {
         if let Some(referenced) = message.task_id.as_deref().filter(|task| !task.is_empty()) {
             return Reply::Json(self.refuse_task_message(
                 &id,
+                client,
                 referenced,
                 message.context_id.as_deref(),
             ));
         }
-        let context_id = message
-            .context_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let context = ContextKey {
+            client: client.to_string(),
+            id: message
+                .context_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        };
         // New contexts are admitted one at a time, so the count and the
         // admission cannot interleave with another new context's.
-        let new_context_gate = if self.state().contexts.contains_key(&context_id) {
+        let new_context_gate = if self.state().contexts.contains_key(&context) {
             None
         } else {
             Some(self.new_contexts.lock().await)
         };
         if new_context_gate.is_some()
-            && !self.state().contexts.contains_key(&context_id)
+            && !self.state().contexts.contains_key(&context)
             && self.live_contexts().await >= self.max_contexts
         {
             return Reply::Json(server_error(
@@ -394,10 +430,10 @@ impl Server {
                 ));
             }
             message.task_id = Some(task_id.clone());
-            message.context_id = Some(context_id.clone());
+            message.context_id = Some(context.id.clone());
             state
                 .contexts
-                .entry(context_id.clone())
+                .entry(context.clone())
                 .or_insert_with(|| Context {
                     active_session_id: String::new(),
                     session_file: None,
@@ -405,7 +441,7 @@ impl Server {
                     crediting: false,
                     turn: Arc::default(),
                 });
-            state.tasks.admit(&task_id, message);
+            state.tasks.admit(&task_id, client, message);
             let (first, frames) = state
                 .tasks
                 .subscribe(&task_id, config.history_length)
@@ -414,7 +450,7 @@ impl Server {
             (first, frames, terminal)
         };
         drop(new_context_gate);
-        tokio::spawn(Arc::clone(self).run_task(task_id.clone(), context_id, text));
+        tokio::spawn(Arc::clone(self).run_task(task_id.clone(), context, text));
         if streaming {
             return Reply::Stream(id, Box::new(first), frames);
         }
@@ -432,13 +468,27 @@ impl Server {
     /// a different `contextId` is rejected. A task is one turn here, so
     /// continuing one is refused: a terminal task takes no more messages,
     /// and a running one has no mid-turn input surface.
-    fn refuse_task_message(&self, id: &Value, task_id: &str, context_id: Option<&str>) -> Value {
+    fn refuse_task_message(
+        &self,
+        id: &Value,
+        client: &str,
+        task_id: &str,
+        context_id: Option<&str>,
+    ) -> Value {
         let state = self.state();
-        let (Some(task_state), Some(task_context)) =
-            (state.tasks.state(task_id), state.tasks.context_id(task_id))
-        else {
+        let (Some(task_state), Some(task_context)) = (
+            state.tasks.state(task_id),
+            state
+                .tasks
+                .context(task_id)
+                .map(|context| context.id.as_str()),
+        ) else {
             return task_not_found(id, task_id);
         };
+        // Another client's task answers like an unknown one.
+        if !state.tasks.owned(client, task_id) {
+            return task_not_found(id, task_id);
+        }
         if context_id.is_some_and(|context_id| context_id != task_context) {
             return jsonrpc::invalid_params(
                 id,
@@ -483,25 +533,25 @@ impl Server {
             })
             .collect();
         let state = self.state();
-        let busy: HashSet<&str> = state
+        let busy: HashSet<&ContextKey> = state
             .tasks
             .live_ids()
             .iter()
-            .filter_map(|task_id| state.tasks.context_id(task_id))
+            .filter_map(|task_id| state.tasks.context(task_id))
             .collect();
         state
             .contexts
             .iter()
-            .filter(|(context_id, context)| {
-                busy.contains(context_id.as_str()) || resident.contains(&context.active_session_id)
+            .filter(|(key, context)| {
+                busy.contains(key) || resident.contains(&context.active_session_id)
             })
             .count()
     }
 
     /// One task's flow: wait for the context's turn, run the prompt, and
     /// settle, unless `CancelTask` took the verdict.
-    async fn run_task(self: Arc<Self>, task_id: String, context_id: String, text: String) {
-        let turn = Arc::clone(&self.state().contexts[&context_id].turn);
+    async fn run_task(self: Arc<Self>, task_id: String, key: ContextKey, text: String) {
+        let turn = Arc::clone(&self.state().contexts[&key].turn);
         let _turn = turn.lock().await;
         let Some(mut terminal) = self.state().tasks.terminal_watch(&task_id) else {
             return;
@@ -509,13 +559,11 @@ impl Server {
         if *terminal.borrow() {
             return;
         }
-        let outcome = self
-            .run_turn(&task_id, &context_id, text, &mut terminal)
-            .await;
+        let outcome = self.run_turn(&task_id, &key, text, &mut terminal).await;
         {
             let mut state = self.state();
             let state = &mut *state;
-            let running = state.contexts[&context_id].running.as_ref();
+            let running = state.contexts[&key].running.as_ref();
             if !running.is_some_and(|running| running.cancel_requested) {
                 match outcome.and_then(|()| {
                     running
@@ -530,7 +578,7 @@ impl Server {
         // A cancel that took the verdict settles once its stop finished;
         // the detach and the next task wait for that.
         let _ = terminal.wait_for(|terminal| *terminal).await;
-        let session = self.current_session(&context_id);
+        let session = self.current_session(&key);
         if !session.is_empty() {
             let _ = self
                 .link
@@ -542,14 +590,14 @@ impl Server {
                 .await;
         }
         let mut state = self.state();
-        let context = state.contexts.get_mut(&context_id).expect("contexts stay");
+        let context = state.contexts.get_mut(&key).expect("contexts stay");
         context.running = None;
         context.crediting = false;
     }
 
     /// The context's current daemon session id (a worker re-host moves it).
-    fn current_session(&self, context_id: &str) -> String {
-        self.state().contexts[context_id].active_session_id.clone()
+    fn current_session(&self, context: &ContextKey) -> String {
+        self.state().contexts[context].active_session_id.clone()
     }
 
     /// Host the session, send the prompt, and wait for the run to settle.
@@ -558,18 +606,18 @@ impl Server {
     async fn run_turn(
         &self,
         task_id: &str,
-        context_id: &str,
+        key: &ContextKey,
         text: String,
         terminal: &mut tokio::sync::watch::Receiver<bool>,
     ) -> Result<(), String> {
-        let session = self.host_session(context_id).await?;
+        let session = self.host_session(key).await?;
         let admission_id = format!("a2a-admission:{}", uuid::Uuid::new_v4());
         let prompt = {
             let mut state = self.state();
             if !state.tasks.start(task_id) {
                 return Ok(());
             }
-            let context = state.contexts.get_mut(context_id).expect("contexts stay");
+            let context = state.contexts.get_mut(key).expect("contexts stay");
             context.running = Some(Running {
                 task_id: task_id.to_string(),
                 admission_id: admission_id.clone(),
@@ -595,7 +643,7 @@ impl Server {
             .link
             .dispatch(DaemonCommand::WaitForIdle {
                 id: None,
-                active_session_id: self.current_session(context_id),
+                active_session_id: self.current_session(key),
                 wait_for_rlm_quiescence: Some(true),
                 timeout_ms: None,
                 rest: Map::default(),
@@ -611,10 +659,10 @@ impl Server {
     /// Make the context's session live and attached: the first task creates
     /// it; later tasks re-open its file (the daemon reuses a live worker and
     /// revives a passivated one) and attach.
-    async fn host_session(&self, context_id: &str) -> Result<String, String> {
+    async fn host_session(&self, key: &ContextKey) -> Result<String, String> {
         let (mut active, file) = {
             let state = self.state();
-            let context = &state.contexts[context_id];
+            let context = &state.contexts[key];
             (
                 context.active_session_id.clone(),
                 context.session_file.clone(),
@@ -632,10 +680,8 @@ impl Server {
             let session_file = summary_str(&summary, "sessionFile");
             let mut state = self.state();
             state.sessions.remove(&active);
-            state
-                .sessions
-                .insert(created.clone(), context_id.to_string());
-            let context = state.contexts.get_mut(context_id).expect("contexts stay");
+            state.sessions.insert(created.clone(), key.clone());
+            let context = state.contexts.get_mut(key).expect("contexts stay");
             context.active_session_id.clone_from(&created);
             context.session_file = (!session_file.is_empty()).then_some(session_file);
             active = created;
@@ -661,8 +707,8 @@ impl Server {
                 }
                 Some(_) => {}
             }
-            let context_id = state.tasks.context_id(task_id).unwrap_or_default();
-            let context = state.contexts.get_mut(context_id).expect("contexts stay");
+            let key = state.tasks.context(task_id).expect("the task exists");
+            let context = state.contexts.get_mut(key).expect("contexts stay");
             match context
                 .running
                 .as_mut()
@@ -845,9 +891,11 @@ fn task_not_found(id: &Value, task_id: &str) -> Value {
 ///
 /// # Errors
 ///
-/// Fails before serving when the daemon connect, the bind, or the minted
-/// token file write fails, and when the daemon connection closes.
+/// Fails before serving when the clients are invalid or the daemon
+/// connect, the bind, or the minted token file write fails, and when the
+/// daemon connection closes.
 pub async fn run_daemon_attached_a2a_mode(options: A2aOptions) -> anyhow::Result<i32> {
+    let clients = super::http::Clients::new(&options.clients)?;
     let link = Arc::new(DaemonLink::connect(&options.socket_path, "a2a").await?);
     let server = Server::new(link, options.create, options.max_contexts);
     let listener =
@@ -864,8 +912,9 @@ pub async fn run_daemon_attached_a2a_mode(options: A2aOptions) -> anyhow::Result
         let address = bound.ip().to_string().replace([':', '.'], "-");
         dir.join(format!("a2a-token-{}-{address}", bound.port()))
     });
-    if let Some(path) = &token_file {
-        write_private_file(path, &options.bearer_token)?;
+    // A minted token is the only client's.
+    if let Some((path, token)) = token_file.as_ref().zip(options.clients.values().next()) {
+        write_private_file(path, token)?;
         eprintln!(
             "a2a: minted a bearer token for this run in {} (send \"Authorization: Bearer <token>\")",
             path.display()
@@ -875,7 +924,7 @@ pub async fn run_daemon_attached_a2a_mode(options: A2aOptions) -> anyhow::Result
     let serve = super::http::serve(
         listener,
         Arc::clone(&server),
-        options.bearer_token,
+        clients,
         options.product_version,
         options.public_url,
     );

@@ -87,13 +87,17 @@ impl A2a {
             lines.push(line);
         }
         std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
+        // An `--a2a-clients` run has no single token: its test picks one.
         let token = env
             .iter()
             .find(|(name, _)| *name == "PRIME_AGENT_A2A_TOKEN")
-            .map_or_else(
-                || std::fs::read_to_string(token_file.as_ref().expect("a minted token")).unwrap(),
-                |(_, token)| (*token).to_string(),
-            )
+            .map(|(_, token)| (*token).to_string())
+            .or_else(|| {
+                token_file
+                    .as_ref()
+                    .map(|path| std::fs::read_to_string(path).unwrap())
+            })
+            .unwrap_or_default()
             .trim()
             .to_string();
         A2a {
@@ -153,7 +157,11 @@ impl A2a {
     }
 
     fn post(&self, method: &str, params: &Value) -> (u16, String) {
-        let auth = format!("Bearer {}", self.token);
+        self.post_as(&self.token, method, params)
+    }
+
+    fn post_as(&self, token: &str, method: &str, params: &Value) -> (u16, String) {
+        let auth = format!("Bearer {token}");
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
         let (status, _, body) = self.http(
             "POST",
@@ -169,7 +177,11 @@ impl A2a {
     }
 
     fn rpc(&self, method: &str, params: &Value) -> Value {
-        let (status, body) = self.post(method, params);
+        self.rpc_as(&self.token, method, params)
+    }
+
+    fn rpc_as(&self, token: &str, method: &str, params: &Value) -> Value {
+        let (status, body) = self.post_as(token, method, params);
         assert_eq!(status, 200, "{body}");
         serde_json::from_str(&body).unwrap()
     }
@@ -759,4 +771,89 @@ fn a_child_agents_notice_turn_belongs_to_the_task() {
         artifact_text(&task).ends_with("the child's result is in"),
         "{task}"
     );
+}
+
+#[test]
+fn a_client_sees_only_its_own_tasks_and_contexts() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let clients = dir.path().join("clients.json");
+    std::fs::write(
+        &clients,
+        json!({ "alice": "alice-token", "bob": "bob-token" }).to_string(),
+    )
+    .unwrap();
+    let mut server = A2a::start_with_args(
+        &json!({ "engine": "faux", "tokensPerSecond": 8, "responses": ["a reply slow enough to probe while it streams"] }),
+        &["--a2a-clients", clients.to_str().unwrap()],
+    );
+    server.token = "alice-token".to_string();
+    let task = server.send("go", Some("ctx"), &json!({ "returnImmediately": true }))["result"]
+        ["task"]
+        .clone();
+    let id = task["id"].as_str().unwrap();
+    server.wait_task(id, |frame| frame_state(frame) == "TASK_STATE_WORKING");
+
+    // Alice's running task answers Bob exactly like an unknown task.
+    let bob = |method: &str, params: &Value| server.rpc_as("bob-token", method, params);
+    let unknown = bob("GetTask", &json!({ "id": "unknown" }))["error"].clone();
+    let same_as_unknown = |answer: &Value| {
+        (&answer["error"]["code"], &answer["error"]["message"])
+            == (&unknown["code"], &unknown["message"])
+    };
+    for method in ["GetTask", "SubscribeToTask", "CancelTask"] {
+        let answer = bob(method, &json!({ "id": id }));
+        assert!(same_as_unknown(&answer), "{method}: {answer}");
+    }
+    let continued = bob(
+        "SendMessage",
+        &json!({ "message": { "messageId": "m", "role": "ROLE_USER", "taskId": id, "parts": [{ "text": "x" }] } }),
+    );
+    assert!(same_as_unknown(&continued), "{continued}");
+    assert_eq!(bob("ListTasks", &json!({}))["result"]["totalSize"], 0);
+
+    // Bob's message on the same contextId opens his own conversation.
+    let own =
+        bob("SendMessage", &send_params("hi", Some("ctx"), &json!({})))["result"]["task"].clone();
+    assert_eq!(state(&own), "TASK_STATE_COMPLETED", "{own}");
+    assert_eq!(
+        server.sessions().len(),
+        2,
+        "one session per client's context"
+    );
+    let listed = bob("ListTasks", &json!({}))["result"].clone();
+    assert_eq!(
+        (
+            listed["totalSize"].clone(),
+            listed["tasks"][0]["id"].clone()
+        ),
+        (json!(1), own["id"].clone())
+    );
+    // Bob's cancel left Alice's task running to completion.
+    let done = server.wait_task(id, |frame| frame_state(frame) == "TASK_STATE_COMPLETED");
+    assert_eq!(state(&done), "TASK_STATE_COMPLETED", "{done}");
+    assert_eq!(
+        server.rpc("ListTasks", &json!({}))["result"]["totalSize"],
+        1
+    );
+}
+
+#[test]
+fn a_client_that_accepts_none_of_the_output_modes_gets_no_task() {
+    let server = A2a::start(&json!({ "engine": "faux", "responses": ["ok"] }), None, &[]);
+    let (_, _, card) = server.http("GET", "/.well-known/agent-card.json", &[], "");
+    let card: Value = serde_json::from_str(&card).unwrap();
+    let produced = card["defaultOutputModes"][0].as_str().unwrap();
+    let refused = server.send("hi", None, &json!({ "acceptedOutputModes": ["image/png"] }));
+    assert_eq!(refused["error"]["code"], -32005, "{refused}");
+    assert_eq!(
+        server.rpc("ListTasks", &json!({}))["result"]["totalSize"],
+        0
+    );
+    let accepted = server.send(
+        "hi",
+        None,
+        &json!({ "acceptedOutputModes": ["image/png", produced] }),
+    )["result"]["task"]
+        .clone();
+    assert_eq!(state(&accepted), "TASK_STATE_COMPLETED", "{accepted}");
 }

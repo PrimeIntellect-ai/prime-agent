@@ -1,7 +1,8 @@
-//! Every route but the agent card needs the bearer token. `Origin` is
+//! Every route but the agent card needs a client's bearer token. `Origin` is
 //! refused (no browser client, no CORS), and a loopback bind refuses a
 //! foreign `Host` (DNS rebinding).
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use futures::StreamExt as _;
@@ -17,7 +18,7 @@ use super::server::{Reply, Server};
 use super::types::{StreamResponse, Task};
 
 pub(crate) const INPUT_MODE: &str = "text/plain";
-const OUTPUT_MODE: &str = "text/markdown";
+pub(crate) const OUTPUT_MODE: &str = "text/markdown";
 const CARD_PATH: &str = "/.well-known/agent-card.json";
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
@@ -27,7 +28,7 @@ type Body = BoxBody<Bytes, std::io::Error>;
 pub(crate) async fn serve(
     listener: tokio::net::TcpListener,
     server: Arc<Server>,
-    bearer_token: String,
+    clients: Clients,
     product_version: String,
     public_url: Option<String>,
 ) -> anyhow::Result<()> {
@@ -37,7 +38,7 @@ pub(crate) async fn serve(
         rest.split('/').next().unwrap_or_default().to_string()
     });
     let gate = Arc::new(Gate {
-        bearer_digest: digest(&bearer_token),
+        clients,
         loopback,
         product_version,
         public_url,
@@ -73,8 +74,40 @@ pub(crate) async fn serve(
     }
 }
 
+/// The accepted bearer tokens by SHA-256 digest, each naming its client:
+/// a lookup by digest leaks nothing about a token through timing.
+pub(crate) struct Clients(HashMap<[u8; 32], String>);
+
+impl Clients {
+    /// Refuses an empty set, an empty token, and a token two clients share
+    /// (it could not name one client).
+    pub(crate) fn new(tokens: &BTreeMap<String, String>) -> anyhow::Result<Self> {
+        anyhow::ensure!(!tokens.is_empty(), "no A2A clients are configured");
+        let mut clients = HashMap::new();
+        for (client, token) in tokens {
+            anyhow::ensure!(
+                !token.trim().is_empty(),
+                "the A2A client {client:?} has an empty token"
+            );
+            if let Some(other) = clients.insert(digest(token.trim()), client.clone()) {
+                anyhow::bail!("the A2A clients {other:?} and {client:?} share a token");
+            }
+        }
+        Ok(Self(clients))
+    }
+
+    /// The client an `Authorization` header authenticates.
+    fn authenticate(&self, authorization: &str) -> Option<&str> {
+        let (scheme, token) = authorization.split_once(' ')?;
+        if !scheme.eq_ignore_ascii_case("bearer") {
+            return None;
+        }
+        self.0.get(&digest(token.trim())).map(String::as_str)
+    }
+}
+
 struct Gate {
-    bearer_digest: [u8; 32],
+    clients: Clients,
     loopback: bool,
     product_version: String,
     /// The public URL of a TLS front (`--a2a-public-url`), and its
@@ -117,18 +150,17 @@ async fn handle(
             &header(hyper::header::IF_NONE_MATCH),
         ));
     }
-    let authorized = header(hyper::header::AUTHORIZATION)
-        .split_once(' ')
-        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-        .is_some_and(|(_, token)| digest(token.trim()) == gate.bearer_digest);
-    if !authorized {
+    let Some(client) = gate
+        .clients
+        .authenticate(&header(hyper::header::AUTHORIZATION))
+    else {
         let mut response = plain(StatusCode::UNAUTHORIZED, "unauthorized");
         response.headers_mut().insert(
             "www-authenticate",
             hyper::header::HeaderValue::from_static("Bearer"),
         );
         return Ok(response);
-    }
+    };
     if request.method() != Method::POST || request.uri().path() != "/" {
         return Ok(plain(StatusCode::NOT_FOUND, "not found"));
     }
@@ -184,7 +216,7 @@ async fn handle(
             Some(json!({ "supported": "1.0" })),
         )));
     }
-    Ok(match server.dispatch(request).await {
+    Ok(match server.dispatch(request, client).await {
         Reply::Json(reply) => json_response(&reply),
         Reply::Stream(id, first, frames) => Response::builder()
             .header("content-type", "text/event-stream")
@@ -338,6 +370,29 @@ fn json_response(envelope: &Value) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_token_authenticates_its_own_client() {
+        let tokens = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(client, token)| ((*client).to_string(), (*token).to_string()))
+                .collect()
+        };
+        let clients = Clients::new(&tokens(&[("alice", "a-token"), ("bob", "b-token")])).unwrap();
+        assert_eq!(clients.authenticate("Bearer a-token"), Some("alice"));
+        assert_eq!(clients.authenticate("Bearer b-token"), Some("bob"));
+        for header in ["Bearer c-token", "Basic a-token", "Bearer ", ""] {
+            assert_eq!(clients.authenticate(header), None, "{header}");
+        }
+        for refused in [
+            tokens(&[]),
+            tokens(&[("alice", " ")]),
+            tokens(&[("alice", "same"), ("bob", "same")]),
+        ] {
+            assert!(Clients::new(&refused).is_err(), "{refused:?}");
+        }
+    }
 
     #[test]
     fn the_host_gate_accepts_only_loopback_names() {

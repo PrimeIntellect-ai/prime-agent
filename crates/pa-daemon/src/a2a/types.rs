@@ -201,11 +201,29 @@ pub struct SendMessageRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageConfiguration {
     #[serde(default)]
+    pub accepted_output_modes: Vec<String>,
+    #[serde(default)]
     pub task_push_notification_config: Option<Value>,
     #[serde(default)]
     pub history_length: Option<u32>,
     #[serde(default)]
     pub return_immediately: bool,
+}
+
+impl SendMessageConfiguration {
+    /// Whether the client takes `media_type` in the reply; no list takes
+    /// anything.
+    #[must_use]
+    pub fn accepts_output(&self, media_type: &str) -> bool {
+        self.accepted_output_modes.is_empty()
+            || self.accepted_output_modes.iter().any(|mode| {
+                mode.split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .eq_ignore_ascii_case(media_type)
+            })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

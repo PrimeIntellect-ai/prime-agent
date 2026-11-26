@@ -74,6 +74,8 @@ pub struct A2aArgs {
     pub port: Option<u16>,
     pub max_contexts: Option<usize>,
     pub public_url: Option<String>,
+    /// A JSON file mapping each client name to its token.
+    pub clients_file: Option<String>,
 }
 
 /// A parse-time diagnostic: warnings are printed, errors also exit 1.
@@ -298,6 +300,7 @@ pub fn parse_args(args: &[String]) -> Args {
                 )),
             },
             "--a2a-public-url" => result.a2a.public_url = Some(require_value!(arg)),
+            "--a2a-clients" => result.a2a.clients_file = Some(require_value!(arg)),
             "--continue" | "-c" => result.continue_ = true,
             "--resume" | "-r" => match args.get(i + 1) {
                 Some(next)

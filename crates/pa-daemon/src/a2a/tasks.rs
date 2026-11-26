@@ -20,8 +20,17 @@ const STREAM_CAPACITY: usize = 1024;
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 100;
 
+/// A context as the server keys it: each client names its contexts in its
+/// own namespace, so one `contextId` from two clients is two conversations.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContextKey {
+    pub client: String,
+    pub id: String,
+}
+
 struct TaskEntry {
-    context_id: String,
+    /// The client that created the task's context owns the task.
+    context: ContextKey,
     state: TaskState,
     user_message: Message,
     reply_message_id: String,
@@ -72,7 +81,7 @@ impl TaskEntry {
         if !self.reply.is_empty() {
             history.push(Message {
                 message_id: self.reply_message_id.clone(),
-                context_id: Some(self.context_id.clone()),
+                context_id: Some(self.context.id.clone()),
                 task_id: Some(id.to_string()),
                 role: Role::Agent,
                 parts: vec![Part::text(self.reply.clone())],
@@ -83,7 +92,7 @@ impl TaskEntry {
         history.drain(..history.len() - keep);
         Task {
             id: id.to_string(),
-            context_id: self.context_id.clone(),
+            context_id: self.context.id.clone(),
             status: self.status(),
             artifacts: artifacts.then(|| {
                 let text = if self.state.is_terminal() {
@@ -116,7 +125,7 @@ impl TaskEntry {
         self.updated_at = crate::util::now_ms();
         self.publish(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
             task_id: id.to_string(),
-            context_id: self.context_id.clone(),
+            context_id: self.context.id.clone(),
             status: self.status(),
         }));
     }
@@ -147,13 +156,17 @@ impl Default for Tasks {
 }
 
 impl Tasks {
-    /// Admit a SUBMITTED task for `message` (its ids already set).
-    pub fn admit(&mut self, id: &str, message: Message) {
-        let context_id = message.context_id.clone().unwrap_or_default();
+    /// Admit a SUBMITTED task for `message` (its ids already set), owned by
+    /// `client`.
+    pub fn admit(&mut self, id: &str, client: &str, message: Message) {
+        let context = ContextKey {
+            client: client.to_string(),
+            id: message.context_id.clone().unwrap_or_default(),
+        };
         self.entries.insert(
             id.to_string(),
             TaskEntry {
-                context_id,
+                context,
                 state: TaskState::Submitted,
                 user_message: message,
                 reply_message_id: uuid::Uuid::new_v4().to_string(),
@@ -173,8 +186,14 @@ impl Tasks {
         self.entries.get(id).map(|entry| entry.state)
     }
 
-    pub fn context_id(&self, id: &str) -> Option<&str> {
-        self.entries.get(id).map(|entry| entry.context_id.as_str())
+    pub fn context(&self, id: &str) -> Option<&ContextKey> {
+        self.entries.get(id).map(|entry| &entry.context)
+    }
+
+    /// Whether the task exists and belongs to `client`.
+    pub fn owned(&self, client: &str, id: &str) -> bool {
+        self.context(id)
+            .is_some_and(|context| context.client == client)
     }
 
     /// SUBMITTED -> WORKING. `false` when the task already settled (a
@@ -220,7 +239,7 @@ impl Tasks {
         }
         entry.publish(StreamResponse::ArtifactUpdate(TaskArtifactUpdateEvent {
             task_id: id.to_string(),
-            context_id: entry.context_id.clone(),
+            context_id: entry.context.id.clone(),
             artifact: TaskEntry::artifact(id, text),
             append,
             last_chunk: false,
@@ -247,7 +266,7 @@ impl Tasks {
         if !entry.reply.is_empty() {
             entry.publish(StreamResponse::ArtifactUpdate(TaskArtifactUpdateEvent {
                 task_id: id.to_string(),
-                context_id: entry.context_id.clone(),
+                context_id: entry.context.id.clone(),
                 artifact: TaskEntry::artifact(id, entry.reply.clone()),
                 append: false,
                 last_chunk: true,
@@ -255,7 +274,7 @@ impl Tasks {
         }
         entry.status_message = error.map(|error| Message {
             message_id: uuid::Uuid::new_v4().to_string(),
-            context_id: Some(entry.context_id.clone()),
+            context_id: Some(entry.context.id.clone()),
             task_id: Some(id.to_string()),
             role: Role::Agent,
             parts: vec![Part::text(error)],
@@ -315,10 +334,14 @@ impl Tasks {
             .filter(|entry| !entry.state.is_terminal())
     }
 
-    /// One `ListTasks` page: newest update first (ties by id), resuming
-    /// strictly after the page token's `updatedAt:id` boundary. `Err`
-    /// names the invalid parameter.
-    pub fn list(&self, params: &ListTasksParams) -> Result<ListTasksResponse, &'static str> {
+    /// One `ListTasks` page of `client`'s tasks: newest update first (ties
+    /// by id), resuming strictly after the page token's `updatedAt:id`
+    /// boundary. `Err` names the invalid parameter.
+    pub fn list(
+        &self,
+        client: &str,
+        params: &ListTasksParams,
+    ) -> Result<ListTasksResponse, &'static str> {
         let page_size = match params.page_size {
             None => DEFAULT_PAGE_SIZE,
             Some(size @ 1..=MAX_PAGE_SIZE) => size,
@@ -349,7 +372,8 @@ impl Tasks {
             .entries
             .iter()
             .filter(|(_, entry)| {
-                context.is_none_or(|context| entry.context_id == context)
+                entry.context.client == client
+                    && context.is_none_or(|context| entry.context.id == context)
                     && params.status.is_none_or(|state| entry.state == state)
                     && after.is_none_or(|after| entry.updated_at >= after)
             })
@@ -404,7 +428,7 @@ mod tests {
     #[test]
     fn a_task_streams_chunks_then_its_final_artifact_and_terminal_status() {
         let mut tasks = Tasks::default();
-        tasks.admit("t", message("c"));
+        tasks.admit("t", "client", message("c"));
         let (first, mut rx) = tasks.subscribe("t", None).unwrap();
         assert_eq!(first.status.state, TaskState::Submitted);
         assert!(tasks.start("t"));
@@ -472,7 +496,7 @@ mod tests {
     #[test]
     fn a_failed_task_carries_its_own_status_message_and_history_trims() {
         let mut tasks = Tasks::default();
-        tasks.admit("t", message("c"));
+        tasks.admit("t", "client", message("c"));
         tasks.start("t");
         tasks.assistant_message_end("t", "partial");
         let failed = tasks
@@ -488,7 +512,7 @@ mod tests {
     #[test]
     fn an_unfinished_message_stays_in_the_reply() {
         let mut tasks = Tasks::default();
-        tasks.admit("t", message("c"));
+        tasks.admit("t", "client", message("c"));
         tasks.start("t");
         assert_eq!(
             tasks.snapshot("t", None).unwrap().artifacts,
@@ -511,7 +535,7 @@ mod tests {
     #[test]
     fn a_canceled_submitted_task_never_starts() {
         let mut tasks = Tasks::default();
-        tasks.admit("t", message("c"));
+        tasks.admit("t", "client", message("c"));
         let mut terminal = tasks.terminal_watch("t").unwrap();
         tasks.settle("t", TaskState::Canceled, None).unwrap();
         assert!(*terminal.borrow_and_update());
@@ -523,16 +547,19 @@ mod tests {
         let mut tasks = Tasks::default();
         for (index, context) in ["a", "b", "a"].iter().enumerate() {
             let id = format!("t{index}");
-            tasks.admit(&id, message(context));
+            tasks.admit(&id, "client", message(context));
             tasks.entries.get_mut(&id).unwrap().updated_at = index as u64;
         }
         let page = |token: Option<String>| {
             tasks
-                .list(&ListTasksParams {
-                    page_size: Some(2),
-                    page_token: token,
-                    ..Default::default()
-                })
+                .list(
+                    "client",
+                    &ListTasksParams {
+                        page_size: Some(2),
+                        page_token: token,
+                        ..Default::default()
+                    },
+                )
                 .unwrap()
         };
         let first = page(None);
@@ -542,10 +569,13 @@ mod tests {
         assert_eq!(second.tasks[0].id, "t0");
         assert_eq!(second.next_page_token, "");
         let filtered = tasks
-            .list(&ListTasksParams {
-                context_id: Some("a".into()),
-                ..Default::default()
-            })
+            .list(
+                "client",
+                &ListTasksParams {
+                    context_id: Some("a".into()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(filtered.total_size, 2);
         assert!(filtered.tasks.iter().all(|task| task.artifacts.is_none()));
@@ -568,7 +598,7 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            assert!(tasks.list(&bad).is_err());
+            assert!(tasks.list("client", &bad).is_err());
         }
     }
 }
