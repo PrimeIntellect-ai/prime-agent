@@ -614,7 +614,6 @@ impl AgentSession {
 #[must_use]
 pub fn default_refiner_call(api_key: Option<String>) -> crate::refinement::executor::RefinerFn {
     Box::new(move |model, system_prompt, prompt| {
-        let api_key = api_key;
         Box::pin(async move {
             let context = pa_types::ai::Context {
                 system_prompt: Some(system_prompt.to_string()),
@@ -625,12 +624,28 @@ pub fn default_refiner_call(api_key: Option<String>) -> crate::refinement::execu
                 })],
                 tools: None,
             };
-            let stream_options =
-                pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
-                    api_key,
-                    ..Default::default()
-                });
-            Ok(pa_ai::complete_simple(&model, &context, Some(stream_options)).await?)
+            // The 429 path: a rate-limited refinement call retries on the
+            // same provider (bounded exponential backoff, Retry-After
+            // honored) before the refinement fails.
+            super::provider_retry::complete_with_rate_limit_retry(
+                &super::provider_retry::ONE_SHOT_PROVIDER_RETRY_POLICY,
+                |delay| async move {
+                    tokio::time::sleep(delay).await;
+                    true
+                },
+                || {
+                    let stream_options =
+                        pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
+                            api_key: api_key.clone(),
+                            ..Default::default()
+                        });
+                    let (model, context) = (&model, &context);
+                    async move {
+                        Ok(pa_ai::complete_simple(model, context, Some(stream_options)).await?)
+                    }
+                },
+            )
+            .await
         })
     })
 }

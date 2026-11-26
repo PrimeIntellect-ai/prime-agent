@@ -920,4 +920,47 @@ mod tests {
             ])
         );
     }
+
+    /// Regression (the park-feeding wire): a codex usage-limit 429 whose
+    /// `resets_at` sits ~10 minutes out derives its wait from the reset —
+    /// the friendly text names the wait, and the provider error keeps a
+    /// `rate_limit` kind with the same distant wait, which downstream
+    /// exceeds the quick-retry cap and parks the session instead of
+    /// churning bounded retries.
+    #[test]
+    fn codex_usage_limit_derives_the_park_wait_from_resets_at() {
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+        let resets_at = (now_ms() / 1000 + 600) as i64;
+        let body = json!({
+            "code": "usage_limit_reached",
+            "plan_type": "pro",
+            "resets_at": resets_at,
+        });
+        let payload = error_payload(&body);
+        let (message, retry_after_ms) =
+            codex_usage_limit_message(&payload, Some(429)).expect("usage-limit shapes");
+        assert_eq!(
+            message,
+            "You have hit your ChatGPT usage limit (pro plan). Try again in ~10 min."
+        );
+        let retry_after_ms = retry_after_ms.expect("reset-derived wait");
+        assert!(
+            (599_000..=600_000).contains(&retry_after_ms),
+            "wait {retry_after_ms} not the resets_at delta"
+        );
+        let error = CodexApiError {
+            message,
+            code: Some("usage_limit_reached".to_string()),
+            status: Some(429),
+            retry_after_ms: Some(retry_after_ms),
+            payload: None,
+        }
+        .into_provider_error();
+        let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
+        assert_eq!(
+            info.kind,
+            crate::utils_inner::stream_failure::StreamFailureKind::RateLimit
+        );
+        assert_eq!(info.retry_after_ms, Some(retry_after_ms));
+    }
 }

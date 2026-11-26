@@ -30,7 +30,8 @@ use crate::utils_inner::json_parse::{
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 use crate::utils_inner::sse::SseDecoder;
 use crate::utils_inner::stream_failure::{
-    record_stream_failure, stream_failure_from_stop_reason, ProviderError, ProviderHttpError,
+    malformed_chunk_failure, record_stream_failure, stream_failure_from_stop_reason, ProviderError,
+    ProviderHttpError,
 };
 
 const MAX_MISTRAL_ERROR_BODY_CHARS: usize = 4000;
@@ -325,7 +326,9 @@ async fn run_stream(
                     continue;
                 }
                 let parsed = parse_json_with_repair(&sse.data).map_err(|error| {
-                    ProviderError::Message(format!("Could not parse Mistral SSE chunk: {error}"))
+                    ProviderError::StreamFailure(malformed_chunk_failure(format!(
+                        "Could not parse Mistral SSE chunk: {error}"
+                    )))
                 })?;
                 state.handle_chunk(&parsed, model, output, writer);
             }
@@ -335,7 +338,9 @@ async fn run_stream(
                 continue;
             }
             let parsed = parse_json_with_repair(&sse.data).map_err(|error| {
-                ProviderError::Message(format!("Could not parse Mistral SSE chunk: {error}"))
+                ProviderError::StreamFailure(malformed_chunk_failure(format!(
+                    "Could not parse Mistral SSE chunk: {error}"
+                )))
             })?;
             state.handle_chunk(&parsed, model, output, writer);
         }

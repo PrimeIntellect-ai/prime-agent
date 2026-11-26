@@ -157,34 +157,61 @@ pub async fn complete_summary_call(
     // The daemon races this future against cancellation at the compaction boundary.
     let cancel = tokio_util::sync::CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
-    let mut stream_options =
-        pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
-            signal: Some(cancel),
-            max_tokens: Some(max_tokens),
-            api_key,
-            headers: headers.map(|headers| headers.into_iter().collect()),
-            ..Default::default()
-        });
     // Keep the provider default unless the model explicitly requires thinking.
     // Omitted reasoning disables thinking on toggle-based provider routes.
     let minimum = pa_types::ai::clamp_thinking_level(model, pa_types::ai::ModelThinkingLevel::Off);
-    stream_options.reasoning =
-        (minimum != pa_types::ai::ModelThinkingLevel::Off).then_some(minimum);
-    let assistant = match on_delta {
-        None => pa_ai::complete_simple(model, &context, Some(stream_options)).await?,
-        Some(on_delta) => {
-            // The live path rides the same provider stream: every text delta
-            // forwards to the sink, and the terminal event's message is the
-            // summary; thinking deltas stay off the sink.
-            let mut stream = pa_ai::stream_simple(model, &context, Some(stream_options))?;
-            while let Some(event) = stream.next_event().await {
-                if let pa_types::ai::AssistantMessageEvent::TextDelta { delta, .. } = &event {
-                    on_delta(delta);
-                }
+    // The 429 path: a rate-limited summarizer call retries on the same
+    // provider (bounded exponential backoff, Retry-After honored) before
+    // the run fails. A cancellation racing the wait aborts like the wire
+    // call's own drop guard.
+    let wait = |delay: std::time::Duration| {
+        let cancel = cancel.clone();
+        async move {
+            tokio::select! {
+                () = cancel.cancelled() => false,
+                () = tokio::time::sleep(delay) => true,
             }
-            stream.result().await
         }
     };
+    let attempt = || {
+        let mut stream_options =
+            pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
+                signal: Some(cancel.clone()),
+                max_tokens: Some(max_tokens),
+                api_key: api_key.clone(),
+                headers: headers.clone().map(|headers| headers.into_iter().collect()),
+                ..Default::default()
+            });
+        stream_options.reasoning =
+            (minimum != pa_types::ai::ModelThinkingLevel::Off).then_some(minimum);
+        let on_delta = on_delta.clone();
+        let context = &context;
+        async move {
+            match on_delta {
+                None => Ok(pa_ai::complete_simple(model, context, Some(stream_options)).await?),
+                Some(on_delta) => {
+                    // The live path rides the same provider stream: every text
+                    // delta forwards to the sink, and the terminal event's
+                    // message is the summary; thinking deltas stay off the
+                    // sink.
+                    let mut stream = pa_ai::stream_simple(model, context, Some(stream_options))?;
+                    while let Some(event) = stream.next_event().await {
+                        if let pa_types::ai::AssistantMessageEvent::TextDelta { delta, .. } = &event
+                        {
+                            on_delta(delta);
+                        }
+                    }
+                    Ok(stream.result().await)
+                }
+            }
+        }
+    };
+    let assistant = super::provider_retry::complete_with_rate_limit_retry(
+        &super::provider_retry::ONE_SHOT_PROVIDER_RETRY_POLICY,
+        wait,
+        attempt,
+    )
+    .await?;
     if assistant.stop_reason == pa_types::ai::StopReason::Error {
         anyhow::bail!(
             "{failure}: {}",

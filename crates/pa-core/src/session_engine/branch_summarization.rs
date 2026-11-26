@@ -452,14 +452,31 @@ pub async fn generate_branch_summary(
             .collect(),
         tools: None,
     };
-    let stream_options =
-        pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
-            max_tokens: Some(BRANCH_SUMMARY_MAX_TOKENS),
-            api_key,
-            headers: summary_headers.map(|headers| headers.into_iter().collect()),
-            ..Default::default()
-        });
-    let response = match pa_ai::complete_simple(model, &context, Some(stream_options)).await {
+    // The 429 path: a rate-limited branch summary retries on the same
+    // provider (bounded exponential backoff, Retry-After honored) before
+    // the result carries the failure.
+    let response = match super::provider_retry::complete_with_rate_limit_retry(
+        &super::provider_retry::ONE_SHOT_PROVIDER_RETRY_POLICY,
+        |delay| async move {
+            tokio::time::sleep(delay).await;
+            true
+        },
+        || {
+            let stream_options =
+                pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
+                    max_tokens: Some(BRANCH_SUMMARY_MAX_TOKENS),
+                    api_key: api_key.clone(),
+                    headers: summary_headers
+                        .clone()
+                        .map(|headers| headers.into_iter().collect()),
+                    ..Default::default()
+                });
+            let context = &context;
+            async move { Ok(pa_ai::complete_simple(model, context, Some(stream_options)).await?) }
+        },
+    )
+    .await
+    {
         Ok(response) => response,
         Err(error) => {
             return BranchSummaryResult {

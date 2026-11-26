@@ -3,7 +3,6 @@
 //! conversion and cache points, credential/region resolution; bearer-token auth, `SigV4` skip for
 //! local gateways, GovCloud-safe request fields.
 
-use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use serde_json::{json, Value};
@@ -160,11 +159,14 @@ fn bedrock_http_error(
         .map_or_else(|| "UnknownError".to_string(), str::to_string);
     ProviderError::Http(ProviderHttpError {
         message: bedrock_exception_message(&exception_name, &message),
-        // AWS SDK exceptions carry no `.status` field for the TS classifier
-        // (`$metadata.httpStatusCode` is not read).
-        status: None,
+        // SANCTIONED DIVERGENCE (429 handling): the TS classifier drops
+        // `$metadata.httpStatusCode` and the response headers, so AWS
+        // throttling and 5xx surface as Unknown. The port keeps both:
+        // the shared classifier keys on the status (429 -> rate_limit,
+        // >=500 -> server_error) and parses `Retry-After` from the headers.
+        status: Some(status),
         body: None,
-        headers: HashMap::default(),
+        headers: headers.clone(),
         request_id: None,
         sdk_name: Some(exception_name),
         retry_after_ms: None,
@@ -842,6 +844,7 @@ mod tests {
     use crate::providers::bedrock::auth::{
         get_standard_bedrock_endpoint_region, should_use_explicit_bedrock_endpoint,
     };
+    use std::collections::HashMap;
 
     /// The TS `formatBedrockError` shape for an HTTP-level failure: the AWS SDK exception name
     /// (from the body `__type` after the namespace) maps to a stable human-readable prefix; unknown
@@ -859,31 +862,42 @@ mod tests {
             info.provider_error_type.as_deref(),
             Some("ValidationException")
         );
-        // AWS exceptions carry no HTTP status to the TS classifier.
-        assert_eq!(info.status, None);
+        // SANCTIONED DIVERGENCE (429 handling): the status now reaches the
+        // classifier, so a 400 validates as an invalid request instead of
+        // surfacing as an unlabeled Unknown.
+        assert_eq!(info.status, Some(400));
         assert_eq!(
             info.kind,
-            crate::utils_inner::stream_failure::StreamFailureKind::Unknown
+            crate::utils_inner::stream_failure::StreamFailureKind::InvalidRequest
         );
         let diagnostic = crate::utils_inner::stream_failure::diagnostic_error_info(&error);
         assert_eq!(diagnostic.name.as_deref(), Some("ValidationException"));
     }
 
     /// Throttling exceptions keep their name as the classification key ("throttl" -> `rate_limit`),
-    /// like the TS rethrown stream exception.
+    /// like the TS rethrown stream exception; the 429 status now corroborates, and a
+    /// `Retry-After` header survives into the server-requested wait (SANCTIONED DIVERGENCE: the
+    /// TS classifier drops both).
     #[test]
     fn bedrock_throttling_error_classifies() {
+        let headers = HashMap::from([
+            ("Retry-After".to_string(), "7".to_string()),
+            ("x-request-id".to_string(), "req-1".to_string()),
+        ]);
         let error = bedrock_http_error(
             429,
             "{\"__type\":\"ThrottlingException\",\"message\":\"too many\"}",
-            &HashMap::default(),
+            &headers,
         );
         assert_eq!(error.to_string(), "Throttling error: too many");
         let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
+        assert_eq!(info.status, Some(429));
         assert_eq!(
             info.kind,
             crate::utils_inner::stream_failure::StreamFailureKind::RateLimit
         );
+        assert_eq!(info.retry_after_ms, Some(7_000));
+        assert_eq!(info.request_id.as_deref(), Some("req-1"));
     }
 
     /// An unrecognized error body names the generic fallback by the raw status text

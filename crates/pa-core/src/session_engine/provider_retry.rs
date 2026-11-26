@@ -274,6 +274,96 @@ fn with_stop_reason_aborted(mut message: AssistantMessage) -> AssistantMessage {
     message
 }
 
+/// The one-shot completion policy (the compaction/branch-summary/refine
+/// arms' 429 path): three same-provider retries on the 1s/2s/4s
+/// exponential ladder, the server's `Retry-After` honored up to the
+/// 60-second cap, before the caller fails upward.
+pub const ONE_SHOT_PROVIDER_RETRY_POLICY: ProviderRetryPolicy = ProviderRetryPolicy {
+    enabled: true,
+    max_retries: 3,
+    base_delay_ms: 1000,
+    max_retry_delay_ms: 60_000,
+    max_delay_ms: UNBOUNDED_BACKOFF_MS,
+};
+
+/// The pa-ai wire message's `provider_stream_failure` classification, in
+/// this module's vocabulary: the one-shot completion arms (compaction,
+/// branch summary, refinement) exchange pa-ai wire messages, so their
+/// failures cross the crate boundary by wire round-trip (the same seam
+/// [`is_context_overflow_failure`] uses). `None` when the message
+/// carries no provider stream failure.
+fn wire_stream_failure(message: &pa_types::ai::AssistantMessage) -> Option<AssistantMessage> {
+    serde_json::to_value(message)
+        .ok()
+        .and_then(|value| serde_json::from_value::<AssistantMessage>(value).ok())
+        .filter(|message| provider_stream_failure_details(message).is_some())
+}
+
+/// One-shot completion with the shared 429 path, over the pa-ai wire
+/// message shape (the compaction/branch-summary/refine arms): a
+/// rate-limit failure is retried on the same provider, bounded by the
+/// policy — the exponential ladder with the server's `Retry-After`
+/// honored up to the cap — before the final message is returned for the
+/// caller to fail upward. Every other failure kind returns immediately;
+/// the one-shot arms own their non-429 error surfacing. A `wait`
+/// returning `false` aborts.
+///
+/// # Errors
+///
+/// Returns the `attempt` future's error when the completion attempt
+/// fails outright, and an abort error when a `wait` reports
+/// cancellation.
+pub async fn complete_with_rate_limit_retry<A, AF, W, WF>(
+    policy: &ProviderRetryPolicy,
+    mut wait: W,
+    mut attempt: A,
+) -> anyhow::Result<pa_types::ai::AssistantMessage>
+where
+    A: FnMut() -> AF,
+    AF: std::future::Future<Output = anyhow::Result<pa_types::ai::AssistantMessage>>,
+    W: FnMut(std::time::Duration) -> WF,
+    WF: std::future::Future<Output = bool>,
+{
+    let max_retries = if policy.enabled {
+        policy.max_retries
+    } else {
+        0
+    };
+    let mut retries_performed = 0u32;
+    loop {
+        let message = attempt().await?;
+        if message.stop_reason != pa_types::ai::StopReason::Error {
+            return Ok(message);
+        }
+        let Some(classified) = wire_stream_failure(&message) else {
+            return Ok(message);
+        };
+        if provider_stream_failure_kind(&classified).as_deref() != Some("rate_limit") {
+            return Ok(message);
+        }
+        if retries_performed >= max_retries {
+            return Ok(message);
+        }
+        let delay = provider_retry_delay(
+            retries_performed + 1,
+            provider_stream_failure_retry_after_ms(&classified),
+            policy,
+        );
+        let ProviderRetryDelay::Wait { delay_ms } = delay else {
+            // A server-requested wait beyond the cap fails upward: a
+            // one-shot arm never parks (the session turn owns that seam).
+            return Ok(message);
+        };
+        // SANCTIONED DIVERGENCE, operator ruling 2026-09-23: the
+        // jittered value is what the caller waits.
+        let delay_ms = jittered_delay_ms(delay_ms, retry_jitter_rand01());
+        if !wait(std::time::Duration::from_millis(delay_ms)).await {
+            return Err(pa_agent::abort::aborted_error());
+        }
+        retries_performed += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,5 +1007,202 @@ mod tests {
         .unwrap();
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(message.stop_reason, StopReason::Error);
+    }
+
+    fn wire_error_message(
+        kind: Option<&str>,
+        status: Option<u16>,
+        retry_after_ms: Option<u64>,
+    ) -> pa_types::ai::AssistantMessage {
+        let details = serde_json::json!({
+            "kind": kind,
+            "status": status,
+            "retryAfterMs": retry_after_ms,
+        });
+        pa_types::ai::AssistantMessage {
+            content: vec![pa_types::ai::AssistantContentBlock::Text(
+                pa_types::ai::TextContent {
+                    text: String::new(),
+                    text_signature: None,
+                    rest: serde_json::Map::default(),
+                },
+            )],
+            api: "openai-completions".to_string(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Some(vec![pa_types::ai::AssistantMessageDiagnostic {
+                type_: "provider_stream_failure".to_string(),
+                timestamp: 0,
+                error: None,
+                details: serde_json::from_value(details).unwrap(),
+            }]),
+            usage: pa_types::ai::Usage::default(),
+            stop_reason: pa_types::ai::StopReason::Error,
+            stop_reason_raw: None,
+            error_message: Some("provider failed".to_string()),
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        }
+    }
+
+    fn wire_ok_message() -> pa_types::ai::AssistantMessage {
+        pa_types::ai::AssistantMessage {
+            content: vec![pa_types::ai::AssistantContentBlock::Text(
+                pa_types::ai::TextContent {
+                    text: "done".to_string(),
+                    text_signature: None,
+                    rest: serde_json::Map::default(),
+                },
+            )],
+            api: "openai-completions".to_string(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_types::ai::Usage::default(),
+            stop_reason: pa_types::ai::StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        }
+    }
+
+    fn fast_one_shot_policy() -> ProviderRetryPolicy {
+        ProviderRetryPolicy {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 5,
+            max_retry_delay_ms: 50,
+            max_delay_ms: UNBOUNDED_BACKOFF_MS,
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_rate_limits_retry_until_success() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_attempt = std::sync::Arc::clone(&attempts);
+        let waited = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+        let waited_for_wait = std::sync::Arc::clone(&waited);
+        let message = complete_with_rate_limit_retry(
+            &fast_one_shot_policy(),
+            move |delay| {
+                let waited = std::sync::Arc::clone(&waited_for_wait);
+                async move {
+                    waited.lock().unwrap().push(delay.as_millis() as u64);
+                    true
+                }
+            },
+            move || {
+                let attempts = std::sync::Arc::clone(&attempts_for_attempt);
+                async move {
+                    let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if attempt < 3 {
+                        // A 429 with a server-requested wait.
+                        Ok(wire_error_message(Some("rate_limit"), Some(429), Some(10)))
+                    } else {
+                        Ok(wire_ok_message())
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+        // The server wait (10ms) wins over the 5ms/10ms ladder rungs;
+        // the jittered waits sit in the [8, 12] band.
+        let waits = waited.lock().unwrap().clone();
+        assert_eq!(waits.len(), 2, "two waits: {waits:?}");
+        assert!(
+            waits.iter().all(|wait| (8..=12).contains(wait)),
+            "jittered waits {waits:?} outside the [8, 12] band"
+        );
+        assert_eq!(message.stop_reason, pa_types::ai::StopReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn other_wire_failures_return_immediately() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_attempt = std::sync::Arc::clone(&attempts);
+        let message = complete_with_rate_limit_retry(
+            &fast_one_shot_policy(),
+            |_| async { true },
+            move || {
+                let attempts = std::sync::Arc::clone(&attempts_for_attempt);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(wire_error_message(
+                        Some("server_error"),
+                        Some(500),
+                        Some(10),
+                    ))
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(message.stop_reason, pa_types::ai::StopReason::Error);
+    }
+
+    #[tokio::test]
+    async fn wire_rate_limits_exhaust_the_ladder_and_fail_upward() {
+        let policy = ProviderRetryPolicy {
+            max_retries: 2,
+            ..fast_one_shot_policy()
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_attempt = std::sync::Arc::clone(&attempts);
+        let message = complete_with_rate_limit_retry(
+            &policy,
+            |_| async { true },
+            move || {
+                let attempts = std::sync::Arc::clone(&attempts_for_attempt);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(wire_error_message(Some("rate_limit"), Some(429), None))
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(message.stop_reason, pa_types::ai::StopReason::Error);
+    }
+
+    #[tokio::test]
+    async fn a_distant_wire_retry_after_fails_upward() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_attempt = std::sync::Arc::clone(&attempts);
+        let message = complete_with_rate_limit_retry(
+            &fast_one_shot_policy(),
+            |_| async { true },
+            move || {
+                let attempts = std::sync::Arc::clone(&attempts_for_attempt);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(wire_error_message(Some("rate_limit"), Some(429), Some(51)))
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(message.stop_reason, pa_types::ai::StopReason::Error);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_wire_retry_wait_aborts() {
+        let error = complete_with_rate_limit_retry(
+            &fast_one_shot_policy(),
+            |_| async { false },
+            || async { Ok(wire_error_message(Some("rate_limit"), Some(429), None)) },
+        )
+        .await
+        .unwrap_err();
+        assert!(pa_agent::abort::is_abort_error(&error));
     }
 }

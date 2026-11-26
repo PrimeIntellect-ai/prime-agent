@@ -577,8 +577,10 @@ pub fn classify_stream_failure(
         return StreamFailureKind::MalformedResponse;
     }
     if type_lower.contains("api_error")
-        || type_lower.contains("server_error")
         || type_lower.contains("unavailable")
+        // AWS exception names say "InternalServerException", not "server_error"
+        // (`server` also subsumes the `server_error` spelling).
+        || type_lower.contains("server")
         || status.is_some_and(|status| status >= 500)
     {
         return StreamFailureKind::ServerError;
@@ -657,6 +659,19 @@ pub(crate) fn stream_drop_failure(open_block: OpenStreamBlock) -> StreamFailureE
     StreamFailureError {
         message: stream_failure_message(&info, Some(detail)),
         info,
+    }
+}
+
+/// A malformed SSE chunk: the stream payload failed to parse into a chunk
+/// event (labeled `malformed_response`, not a silent Unknown-class retry).
+#[must_use]
+pub fn malformed_chunk_failure(message: String) -> StreamFailureError {
+    StreamFailureError {
+        message,
+        info: StreamFailureInfo {
+            kind: StreamFailureKind::MalformedResponse,
+            ..StreamFailureInfo::unknown()
+        },
     }
 }
 

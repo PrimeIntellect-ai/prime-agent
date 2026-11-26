@@ -356,6 +356,35 @@ mod tests {
         );
     }
 
+    /// Regression (the codex usage-limit wire, codex `errors.rs`):
+    /// a 429 `usage_limit_reached` whose `resets_at` sits ~10 minutes out
+    /// lands as a `rate_limit` failure carrying a ~600s `retryAfterMs` —
+    /// beyond the quick-retry cap, so the retry chain gives up into the
+    /// park rather than churning bounded retries.
+    #[test]
+    fn a_codex_usage_limit_failure_parks_until_the_reset() {
+        use crate::session_engine::provider_retry::{
+            provider_retry_delay, provider_stream_failure_retry_after_ms, ProviderRetryDelay,
+            DEFAULT_PROVIDER_RETRY_POLICY,
+        };
+        let message = quota_message(Some("rate_limit"), Some(600_000));
+        let reset_ms = provider_stream_failure_retry_after_ms(&message);
+        assert_eq!(reset_ms, Some(600_000));
+        assert!(is_quota_block_failure(&message));
+        assert_eq!(
+            provider_retry_delay(1, reset_ms, &DEFAULT_PROVIDER_RETRY_POLICY),
+            ProviderRetryDelay::ExceedsCap {
+                retry_after_ms: 600_000
+            }
+        );
+        assert_eq!(
+            provider_park_decision(0, reset_ms, &policy()),
+            ProviderParkDecision::Park {
+                resume_after_ms: 600_000 + PROVIDER_RESUME_GRACE_MS
+            }
+        );
+    }
+
     #[test]
     fn parked_status_names_the_wake_time() {
         let message = quota_parked_final_error(

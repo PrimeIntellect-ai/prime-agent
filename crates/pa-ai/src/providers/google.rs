@@ -27,8 +27,8 @@ use crate::utils_inner::json_parse::parse_json_with_repair;
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 use crate::utils_inner::sse::SseDecoder;
 use crate::utils_inner::stream_failure::{
-    format_stream_failure_message, record_stream_failure, stream_failure_from_stop_reason,
-    ProviderError,
+    format_stream_failure_message, malformed_chunk_failure, record_stream_failure,
+    stream_failure_from_stop_reason, ProviderError,
 };
 
 /// Thinking configuration for the provider options.
@@ -331,7 +331,9 @@ async fn run_stream(
                 continue;
             }
             let parsed = parse_json_with_repair(&sse.data).map_err(|error| {
-                ProviderError::Message(format!("Could not parse Gemini SSE chunk: {error}"))
+                ProviderError::StreamFailure(malformed_chunk_failure(format!(
+                    "Could not parse Gemini SSE chunk: {error}"
+                )))
             })?;
             state
                 .handle_chunk(&parsed, model, output, writer)
@@ -343,7 +345,9 @@ async fn run_stream(
             continue;
         }
         let parsed = parse_json_with_repair(&sse.data).map_err(|error| {
-            ProviderError::Message(format!("Could not parse Gemini SSE chunk: {error}"))
+            ProviderError::StreamFailure(malformed_chunk_failure(format!(
+                "Could not parse Gemini SSE chunk: {error}"
+            )))
         })?;
         state
             .handle_chunk(&parsed, model, output, writer)
