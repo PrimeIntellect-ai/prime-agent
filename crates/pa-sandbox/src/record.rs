@@ -174,6 +174,34 @@ pub(crate) fn parse_sandbox_page(value: serde_json::Value) -> Result<SandboxPage
     })
 }
 
+/// One page of `GET /api/v1/sandbox/checkpoints`.
+pub(crate) struct CheckpointPage {
+    pub(crate) checkpoints: Vec<crate::types::SandboxCheckpoint>,
+    pub(crate) next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawCheckpointPage {
+    checkpoints: Vec<serde_json::Value>,
+    #[serde(default)]
+    next_cursor: Option<String>,
+}
+
+pub(crate) fn parse_checkpoint_page(
+    value: serde_json::Value,
+) -> Result<CheckpointPage, SandboxError> {
+    let raw: RawCheckpointPage = serde_json::from_value(value)
+        .map_err(|_| SandboxError::invalid_response("Checkpoint list response is malformed"))?;
+    Ok(CheckpointPage {
+        checkpoints: raw
+            .checkpoints
+            .into_iter()
+            .map(parse_checkpoint)
+            .collect::<Result<_, _>>()?,
+        next_cursor: raw.next_cursor.filter(|cursor| !cursor.is_empty()),
+    })
+}
+
 /// The checkpoint response record (validated non-empty where the
 /// platform guarantees it).
 pub(crate) fn parse_checkpoint(

@@ -12,12 +12,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use pa_core::auth::PRIME_INFERENCE_PROVIDER_ID;
+use pa_core::cron::parse_iso_millis;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
 use super::logins::{Logins, REFRESH_TICK};
 use super::platform::{
-    BotCreate, BotPlatform, BotSandbox, ExecOutput, GuestCredentials, PlatformError, PlatformResult,
+    BotCheckpoint, BotCreate, BotPlatform, BotSandbox, ExecOutput, GuestCredentials, PlatformError,
+    PlatformResult,
 };
 use super::registry::{BotRecord, BotRegistry, BotStatus};
 use super::version::{self, Install, ReleaseSource};
@@ -1344,10 +1346,108 @@ impl BotManager {
         }
     }
 
-    /// A new sandbox: restored from the recorded durable checkpoint, else
-    /// booted from the image. A restore that may still be booting keeps the
-    /// checkpoint and fails, so the next wake finds that sandbox.
+    /// Make the platform's newest durable checkpoint for the bot the
+    /// restore head. An outside pause (the relay's self-pause) freezes
+    /// checkpoints this daemon never records, so when the sandbox later
+    /// ends the recorded head may be stale, and a restore from it would
+    /// roll the bot back. A failed or empty query leaves the record
+    /// alone, and so does a head that is still uploading and newer than
+    /// the winner: that head keeps its place and the winner joins the
+    /// older list behind it. The winner is recorded without pruning, so
+    /// a failed restore keeps the older ones to fall back to; the
+    /// successful restore prunes what it supersedes.
+    async fn prefer_platform_checkpoint(&self, record: &mut BotRecord) {
+        let label = bot_label(&record.bot_id);
+        let listed = match retry(|| self.platform.list_checkpoints(&label)).await {
+            Ok(listed) => listed,
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: bot {}: checkpoint list failed ({error}); using the recorded ones",
+                    record.bot_id
+                );
+                return;
+            }
+        };
+        let mut newest: Option<&BotCheckpoint> = None;
+        for checkpoint in &listed {
+            if !checkpoint.durable {
+                continue;
+            }
+            if newest.is_none_or(|found| checkpoint_millis(checkpoint) > checkpoint_millis(found)) {
+                newest = Some(checkpoint);
+            }
+        }
+        let Some(newest) = newest else {
+            return;
+        };
+        if record.checkpoint_id.as_deref() == Some(newest.id.as_str()) {
+            return;
+        }
+        // A pending head may still be uploading and hold newer state than
+        // the newest durable checkpoint: it stays the head, and the winner
+        // joins the older list behind it. The head is never demoted to
+        // where prune would delete it, and the wake still restores from
+        // the winner.
+        let head_pending_newer = record
+            .checkpoint_id
+            .as_deref()
+            .and_then(|head| listed.iter().find(|checkpoint| checkpoint.id == head))
+            .is_some_and(|head| {
+                !head.durable && checkpoint_millis(head) > checkpoint_millis(newest)
+            });
+        if head_pending_newer {
+            if !record.older_checkpoint_ids.contains(&newest.id) {
+                // Insert at the chronological position: a pending snapshot
+                // already in the list may be newer in time, and the list
+                // must stay oldest-first or a later prune mistakes that
+                // newer pending one for an older stale one.
+                let millis = checkpoint_millis(newest);
+                let position = record
+                    .older_checkpoint_ids
+                    .iter()
+                    .position(|id| {
+                        listed
+                            .iter()
+                            .find(|checkpoint| checkpoint.id == *id)
+                            .is_some_and(|checkpoint| checkpoint_millis(checkpoint) > millis)
+                    })
+                    .unwrap_or(record.older_checkpoint_ids.len());
+                record
+                    .older_checkpoint_ids
+                    .insert(position, newest.id.clone());
+                if let Err(error) = self.save(record.clone()) {
+                    eprintln!(
+                        "pa-daemon: bot {}: could not record the newest platform checkpoint: {error:#}",
+                        record.bot_id
+                    );
+                }
+            }
+            return;
+        }
+        // The winner may already sit in the older list (the recorded head
+        // never became durable): it must exist once, as the head. The
+        // winner is recorded without pruning: the restore may still fail
+        // and fall back to the older ones, so they must outlive it. The
+        // successful restore prunes what it supersedes.
+        record.older_checkpoint_ids.retain(|id| id != &newest.id);
+        if let Some(old) = record.checkpoint_id.replace(newest.id.clone()) {
+            record.older_checkpoint_ids.push(old);
+        }
+        if let Err(error) = self.save(record.clone()) {
+            eprintln!(
+                "pa-daemon: bot {}: could not record the newest platform checkpoint: {error:#}",
+                record.bot_id
+            );
+        }
+    }
+
+    /// A new sandbox: restored from the newest durable checkpoint the
+    /// platform reports for the bot (an outside pause may have frozen one
+    /// this daemon never recorded), else from the recorded ones, else
+    /// booted from the image. A restore that may still be booting keeps
+    /// the checkpoint and fails, so the next wake finds that sandbox.
     async fn acquire_new(&self, record: &mut BotRecord, deadline: Instant) -> Result<BotSandbox> {
+        self.prefer_platform_checkpoint(record).await;
         let candidates: Vec<String> = record
             .checkpoint_id
             .iter()
@@ -1359,7 +1459,20 @@ impl BotManager {
                 continue;
             }
             match self.create(record, Some(&checkpoint), deadline).await {
-                Ok(sandbox) => return Ok(sandbox),
+                Ok(sandbox) => {
+                    // The restore succeeded: everything older than it is
+                    // superseded. A promotion defers its prune to here,
+                    // because the restore may fall back past the newest
+                    // durable one; a bot paused only by its guest never
+                    // prunes on its own.
+                    if let Err(error) = self.prune_before(record, &checkpoint).await {
+                        eprintln!(
+                            "pa-daemon: bot {}: checkpoint prune failed: {error:#}",
+                            record.bot_id
+                        );
+                    }
+                    return Ok(sandbox);
+                }
                 // The restore may exist (still booting, or its create reply was
                 // lost): keep the checkpoint and let the next wake find it.
                 Err(error) if record.sandbox_id.is_some() || is_transient(&error) => {
@@ -2004,6 +2117,28 @@ impl BotManager {
         self.prune_checkpoints(record).await
     }
 
+    /// Delete the recorded checkpoints older than `restored`, the one the
+    /// bot now runs from. Anything newer stays: it may still be uploading
+    /// or may have refused to restore.
+    async fn prune_before(&self, record: &mut BotRecord, restored: &str) -> Result<()> {
+        let order: Vec<String> = record
+            .older_checkpoint_ids
+            .iter()
+            .chain(record.checkpoint_id.iter())
+            .cloned()
+            .collect();
+        let Some(index) = order.iter().position(|id| id == restored) else {
+            return Ok(());
+        };
+        if index == 0 {
+            return Ok(());
+        }
+        let stale: Vec<String> = record.older_checkpoint_ids.drain(..index).collect();
+        lock(&self.registry).add_orphans(&stale)?;
+        self.save(record.clone())?;
+        self.delete_orphans(stale).await
+    }
+
     /// Delete every checkpoint older than the newest durable one.
     async fn prune_checkpoints(&self, record: &mut BotRecord) -> Result<()> {
         let mut oldest_first = record.older_checkpoint_ids.clone();
@@ -2280,6 +2415,14 @@ fn label_value(labels: &[String], prefix: &str) -> Option<String> {
 
 fn sort_newest_first(sandboxes: &mut [BotSandbox]) {
     sandboxes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+}
+
+/// A checkpoint's creation time as epoch milliseconds; an unparseable
+/// stamp counts as the oldest, so it never wins an ordering. A plain
+/// string comparison misorders RFC 3339 precision variants
+/// (`10:00:00Z` sorts after `10:00:00.500Z`).
+fn checkpoint_millis(checkpoint: &BotCheckpoint) -> u64 {
+    parse_iso_millis(&checkpoint.created_at).unwrap_or(0)
 }
 
 /// One `list_bots` row of a bot's daemon, as this daemon's record for the

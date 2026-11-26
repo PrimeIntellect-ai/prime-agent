@@ -330,15 +330,67 @@ async fn a_network_rules_update_replaces_the_whole_policy() {
 }
 
 fn checkpoint_wire(state: &str) -> serde_json::Value {
+    checkpoint_with_id("ckpt-1", state, "2026-09-29T00:00:00Z")
+}
+
+fn checkpoint_with_id(id: &str, state: &str, created_at: &str) -> serde_json::Value {
     json!({
-        "id": "ckpt-1",
+        "id": id,
         "sandbox_id": "sb-1",
         "state": state,
         "depth": 0,
         "docker_image": "prime-agent:test",
-        "created_at": "2026-09-29T00:00:00Z",
-        "updated_at": "2026-09-29T00:00:01Z",
+        "created_at": created_at,
+        "updated_at": created_at,
     })
+}
+
+#[tokio::test]
+async fn checkpoint_list_by_label_follows_every_page() {
+    let transport = ScriptedTransport::new(vec![
+        ok(json!({
+            "checkpoints": [checkpoint_with_id("ckpt-1", "DURABLE", "2026-09-29T00:00:00Z")],
+            "next_cursor": "c1",
+        })),
+        ok(json!({
+            "checkpoints": [checkpoint_with_id("ckpt-2", "PENDING", "2026-09-29T00:01:00Z")],
+            "next_cursor": null,
+        })),
+    ]);
+    let client = test_client(&transport);
+    let labels = vec!["prime-agent-bot:b1".to_string()];
+    let checkpoints = client.list_checkpoints(&labels).await.unwrap();
+    let ids: Vec<_> = checkpoints.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["ckpt-1", "ckpt-2"], "the platform lists oldest first");
+    assert!(checkpoints[0].is_durable());
+    assert!(!checkpoints[1].is_durable());
+
+    let urls: Vec<_> = transport.recorded().into_iter().map(|r| r.url).collect();
+    assert_eq!(
+        urls,
+        [
+            "https://api.test/api/v1/sandbox/checkpoints?limit=500&labels=prime-agent-bot%3Ab1",
+            "https://api.test/api/v1/sandbox/checkpoints?limit=500&labels=prime-agent-bot%3Ab1&cursor=c1",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_list_rejects_a_repeated_cursor_and_a_malformed_body() {
+    let page = json!({
+        "checkpoints": [checkpoint_with_id("ckpt-1", "DURABLE", "2026-09-29T00:00:00Z")],
+        "next_cursor": "c1",
+    });
+    let transport = ScriptedTransport::new(vec![ok(page.clone()), ok(page)]);
+    let client = test_client(&transport);
+    let error = client.list_checkpoints(&[]).await.unwrap_err();
+    assert_eq!(error.code(), SandboxErrorCode::InvalidResponse);
+    assert_eq!(transport.recorded().len(), 2);
+
+    let transport = ScriptedTransport::new(vec![ok(json!({"checkpoints": [json!("nope")]}))]);
+    let client = test_client(&transport);
+    let error = client.list_checkpoints(&[]).await.unwrap_err();
+    assert_eq!(error.code(), SandboxErrorCode::InvalidResponse);
 }
 
 #[tokio::test]

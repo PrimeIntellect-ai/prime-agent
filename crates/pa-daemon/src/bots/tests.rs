@@ -14,7 +14,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::exec_stream::ExecStreamHalves;
 use super::manager::ALLOW_SPAWNS_SCRIPT;
 use super::platform::{
-    BotCreate, BotPlatform, BotSandbox, ExecOutput, GuestCredentials, PlatformError, PlatformResult,
+    BotCheckpoint, BotCreate, BotPlatform, BotSandbox, ExecOutput, GuestCredentials, PlatformError,
+    PlatformResult,
 };
 use super::version::{self, GUEST_VERSION_SCRIPT, INSTALL_SCRIPT};
 use super::{bot_label, owner_label, BotManager, BotSpec, BotStatus, BOT_LABEL};
@@ -41,6 +42,13 @@ pub(crate) struct FakeState {
     pub pause_checkpoints_pending: bool,
     /// Checkpoints that exist but are not durable yet.
     pub pending_checkpoints: std::collections::HashSet<String>,
+    /// Each checkpoint's sandbox and creation stamp, as the platform's
+    /// checkpoint list reports them.
+    pub checkpoint_origins: HashMap<String, (String, String)>,
+    /// The checkpoint list fails with a transport error.
+    pub fail_checkpoint_list: bool,
+    /// A create restoring this checkpoint fails without a retry.
+    pub fail_create_from: Option<String>,
     /// The exit code of the next guest installs (0 = they succeed).
     pub install_exit_code: i32,
     /// The guest lacks the installer's tools (node, gh): the version probe
@@ -100,6 +108,48 @@ impl FakePlatform {
         );
         id
     }
+
+    /// A checkpoint an outside caller (the relay's self-pause) freezes on
+    /// the sandbox: on the platform, never in this daemon's registry.
+    pub fn external_checkpoint(&self, sandbox_id: &str, durable: bool) -> String {
+        let mut state = self.state();
+        let id = state.new_id("ckpt");
+        let version = state
+            .guest_versions
+            .get(sandbox_id)
+            .cloned()
+            .unwrap_or_default();
+        state.checkpoints.insert(id.clone(), version);
+        let origin = (sandbox_id.to_string(), state.stamp());
+        state.checkpoint_origins.insert(id.clone(), origin);
+        if !durable {
+            state.pending_checkpoints.insert(id.clone());
+        }
+        id
+    }
+
+    /// [`Self::external_checkpoint`] with an explicit creation stamp.
+    pub fn external_checkpoint_at(
+        &self,
+        sandbox_id: &str,
+        durable: bool,
+        created_at: &str,
+    ) -> String {
+        let mut state = self.state();
+        let id = state.new_id("ckpt");
+        let version = state
+            .guest_versions
+            .get(sandbox_id)
+            .cloned()
+            .unwrap_or_default();
+        state.checkpoints.insert(id.clone(), version);
+        let origin = (sandbox_id.to_string(), created_at.to_string());
+        state.checkpoint_origins.insert(id.clone(), origin);
+        if !durable {
+            state.pending_checkpoints.insert(id.clone());
+        }
+        id
+    }
 }
 
 impl FakeState {
@@ -113,6 +163,12 @@ impl FakeState {
             .get_mut(id)
             .ok_or_else(|| PlatformError::NotFound(id.to_string()))
     }
+
+    /// A creation stamp for the record `new_id` just numbered; later
+    /// stamps compare greater, like the platform's `created_at`.
+    fn stamp(&self) -> String {
+        format!("2026-11-23T00:{:02}:{:02}Z", self.next / 60, self.next % 60)
+    }
 }
 
 impl BotPlatform for FakePlatform {
@@ -121,6 +177,11 @@ impl BotPlatform for FakePlatform {
             let existing = self.state().keys.get(&request.idempotency_key).cloned();
             if let Some(id) = existing {
                 return Ok(self.state().sandboxes[&id].clone());
+            }
+            if let Some(checkpoint) = &self.state().fail_create_from {
+                if request.checkpoint_id.as_deref() == Some(checkpoint.as_str()) {
+                    return Err(PlatformError::Other("the restore was refused".into()));
+                }
             }
             let id = self.add_sandbox(&request.name, request.labels.clone());
             let mut state = self.state();
@@ -185,6 +246,8 @@ impl BotPlatform for FakePlatform {
                 .cloned()
                 .unwrap_or_default();
             state.checkpoints.insert(checkpoint.clone(), version);
+            let origin = (sandbox_id.to_string(), state.stamp());
+            state.checkpoint_origins.insert(checkpoint.clone(), origin);
             if state.pause_checkpoints_pending {
                 state.pending_checkpoints.insert(checkpoint.clone());
             }
@@ -203,6 +266,37 @@ impl BotPlatform for FakePlatform {
         .boxed()
     }
 
+    fn list_checkpoints<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<Vec<BotCheckpoint>>> {
+        async move {
+            let state = self.state();
+            if state.fail_checkpoint_list {
+                return Err(PlatformError::Transient("checkpoint list is down".into()));
+            }
+            let mut listed: Vec<BotCheckpoint> = state
+                .checkpoint_origins
+                .iter()
+                .filter(|(id, (sandbox_id, _))| {
+                    state.checkpoints.contains_key(*id)
+                        && state
+                            .sandboxes
+                            .get(sandbox_id)
+                            .is_some_and(|sandbox| sandbox.labels.iter().any(|have| have == label))
+                })
+                .map(|(id, (_, created_at))| BotCheckpoint {
+                    id: id.clone(),
+                    durable: !state.pending_checkpoints.contains(id),
+                    created_at: created_at.clone(),
+                })
+                .collect();
+            listed.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            Ok(listed)
+        }
+        .boxed()
+    }
+
     fn checkpoint<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<String>> {
         async move {
             let mut state = self.state();
@@ -214,6 +308,8 @@ impl BotPlatform for FakePlatform {
                 .cloned()
                 .unwrap_or_default();
             state.checkpoints.insert(checkpoint.clone(), version);
+            let origin = (sandbox_id.to_string(), state.stamp());
+            state.checkpoint_origins.insert(checkpoint.clone(), origin);
             Ok(checkpoint)
         }
         .boxed()
@@ -244,7 +340,10 @@ impl BotPlatform for FakePlatform {
         checkpoint_id: &'a str,
     ) -> BoxFuture<'a, PlatformResult<()>> {
         async move {
-            self.state().checkpoints.remove(checkpoint_id);
+            let mut state = self.state();
+            state.checkpoints.remove(checkpoint_id);
+            state.checkpoint_origins.remove(checkpoint_id);
+            state.pending_checkpoints.remove(checkpoint_id);
             Ok(())
         }
         .boxed()
@@ -1192,6 +1291,330 @@ async fn restore_falls_back_to_the_newest_durable_checkpoint() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_restore_prefers_an_external_checkpoint_over_the_stale_record() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    // The daemon's own pause freezes and records the older checkpoint.
+    manager.pause("bot-a").await.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // Outside this daemon, the relay pauses the sandbox: the platform
+    // freezes a newer durable checkpoint the registry never records.
+    let external = platform.external_checkpoint(&sandbox_id, true);
+    // The paused sandbox ends: only a restore can bring the bot back.
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str()),
+        "the restore must not roll back to the stale checkpoint"
+    );
+    assert_eq!(
+        manager.get("bot-a").unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str()),
+        "the record now holds the platform's newest"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restore_skips_a_newer_incomplete_checkpoint() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    manager.pause("bot-a").await.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a durable checkpoint, then a later one
+    // that never finishes uploading.
+    let external = platform.external_checkpoint(&sandbox_id, true);
+    let incomplete = platform.external_checkpoint(&sandbox_id, false);
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str()),
+        "the newest durable one wins, not the incomplete one"
+    );
+    assert!(
+        platform.state().checkpoints.contains_key(&incomplete),
+        "the incomplete one is kept for the next wake"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_checkpoint_list_falls_back_to_the_recorded_checkpoints() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let stale = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // A newer external checkpoint exists, but the checkpoint list is down.
+    platform.external_checkpoint(&sandbox_id, true);
+    platform.state().fail_checkpoint_list = true;
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(stale.as_str()),
+        "a failed list falls back to the recorded checkpoint"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pending_head_survives_a_promotion_of_an_older_durable_checkpoint() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    // The daemon's next pause freezes a checkpoint that never finishes
+    // uploading: the record's head is pending, the older one durable.
+    platform.state().pause_checkpoints_pending = true;
+    let pending = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // The paused sandbox ends: the wake restores from the older durable
+    // checkpoint, and the pending head must survive that promotion.
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(durable.as_str()),
+        "only the durable one restores"
+    );
+    assert!(
+        platform.state().checkpoints.contains_key(&pending),
+        "the newest snapshot is kept until it is durable or superseded"
+    );
+    assert_eq!(
+        manager.get("bot-a").unwrap().checkpoint_id.as_deref(),
+        Some(pending.as_str()),
+        "the pending head is not demoted where prune would delete it"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_winner_restore_falls_back_and_keeps_the_winner() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a newer durable checkpoint, and its
+    // restore is then refused: the wake falls back to the older one.
+    let external = platform.external_checkpoint(&sandbox_id, true);
+    platform.state().fail_create_from = Some(external.clone());
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(durable.as_str()),
+        "the fallback restores the older durable checkpoint"
+    );
+    assert!(
+        platform.state().checkpoints.contains_key(&external),
+        "the refused winner is kept for the next wake"
+    );
+    let record = manager.get("bot-a").unwrap();
+    assert!(
+        record.older_checkpoint_ids.contains(&durable),
+        "the restored fallback stays recorded"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_successful_restore_prunes_what_it_supersedes() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a newer durable checkpoint; the wake
+    // restores from it, and what it supersedes must then be deleted: a
+    // bot paused only by its guest never prunes on its own.
+    let external = platform.external_checkpoint(&sandbox_id, true);
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str())
+    );
+    assert!(
+        !platform.state().checkpoints.contains_key(&durable),
+        "the superseded checkpoint stops billing"
+    );
+    let record = manager.get("bot-a").unwrap();
+    assert!(
+        !record.older_checkpoint_ids.contains(&durable),
+        "the record drops what was pruned"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_promotion_orders_checkpoints_chronologically() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a checkpoint half a second later, stamped
+    // with fractional seconds: a plain string comparison calls the older
+    // whole-second stamp newer ('Z' sorts after '.').
+    let stamp = platform
+        .state()
+        .checkpoint_origins
+        .get(&durable)
+        .unwrap()
+        .1
+        .clone();
+    let fractional = format!("{}.500Z", stamp.trim_end_matches('Z'));
+    let external = platform.external_checkpoint_at(&sandbox_id, true, &fractional);
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str()),
+        "the chronologically newer checkpoint wins"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pending_head_still_records_an_unrecorded_durable_checkpoint() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    manager.pause("bot-a").await.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a durable checkpoint; then the daemon's own
+    // pause freezes a newer one that never finishes uploading.
+    let external = platform.external_checkpoint(&sandbox_id, true);
+    platform.state().pause_checkpoints_pending = true;
+    let pending = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str()),
+        "the unrecorded durable checkpoint is restored, not skipped"
+    );
+    let record = manager.get("bot-a").unwrap();
+    assert_eq!(
+        record.checkpoint_id.as_deref(),
+        Some(pending.as_str()),
+        "the pending head keeps its place"
+    );
+    assert!(
+        record.older_checkpoint_ids.contains(&external),
+        "the winner joins the older list behind the pending head"
+    );
+    assert!(
+        platform.state().checkpoints.contains_key(&pending),
+        "the pending head is not deleted"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pending_snapshot_keeps_its_place_when_a_winner_is_recorded() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    manager.pause("bot-a").await.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a durable checkpoint, then two local
+    // pauses freeze pending ones on both sides of it in time: the older
+    // list is [durable, pending] when the winner is recorded.
+    let external = platform.external_checkpoint(&sandbox_id, true);
+    platform.state().pause_checkpoints_pending = true;
+    let pending = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    manager.pause("bot-a").await.unwrap();
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str()),
+        "the newest durable one restores"
+    );
+    assert!(
+        platform.state().checkpoints.contains_key(&pending),
+        "the time-newer pending snapshot survives the prune"
+    );
+    let record = manager.get("bot-a").unwrap();
+    let older = &record.older_checkpoint_ids;
+    let external_at = older
+        .iter()
+        .position(|id| id == &external)
+        .expect("the winner is recorded");
+    let pending_at = older
+        .iter()
+        .position(|id| id == &pending)
+        .expect("the pending snapshot stays recorded");
+    assert!(
+        external_at < pending_at,
+        "the winner sits before the time-newer pending snapshot"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_failed_install_fails_spawn_and_cleans_up() {
     for exit_code in [version::UNPUBLISHED_EXIT_CODE, version::NO_GUEST_EXIT_CODE] {
         let (_dir, platform, manager) = setup();
@@ -1608,6 +2031,12 @@ impl BotPlatform for ThrowawaySecret {
     }
     fn resume<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<BotSandbox>> {
         self.inner.resume(sandbox_id)
+    }
+    fn list_checkpoints<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<Vec<BotCheckpoint>>> {
+        self.inner.list_checkpoints(label)
     }
     fn checkpoint<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<String>> {
         self.inner.checkpoint(sandbox_id)
