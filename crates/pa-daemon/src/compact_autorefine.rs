@@ -10,29 +10,6 @@ use pa_core::session_engine::refine::RefinementSource;
 use crate::agent_engine::AgentSessionEngine;
 
 impl AgentSessionEngine {
-    pub(crate) fn report_background_refinement(
-        &self,
-        pending: tokio::task::JoinHandle<
-            anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
-        >,
-        source: RefinementSource,
-    ) {
-        let sink = self.refinement_completion_sink.lock().unwrap().clone();
-        if let Some(sink) = sink {
-            sink(pending, source);
-        } else {
-            // Non-worker hosts can omit the stream sink; durable core rows still
-            // persist. Observe errors instead of silently discarding the task.
-            self.runtime.spawn(async move {
-                match pending.await {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(error)) => eprintln!("pa-daemon: refinement failed: {error:#}"),
-                    Err(error) => eprintln!("pa-daemon: refinement task failed: {error}"),
-                }
-            });
-        }
-    }
-
     /// Whether a compaction armed the compact-trigger round on the built
     /// session (TS `_compactAutoRefinePending`).
     pub(crate) fn compact_auto_refine_pending(&self) -> bool {

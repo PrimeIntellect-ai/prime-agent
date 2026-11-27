@@ -970,9 +970,10 @@ impl TurnRunner {
                         "type": "refine_complete",
                         "result": result,
                     })],
-                    EngineEvent::RefineFailed { error } => vec![json!({
+                    EngineEvent::RefineFailed { error, source } => vec![json!({
                         "type": "refine_failed",
                         "error": error,
+                        "source": source.as_str(),
                     })],
                     // The loop's run-boundary frames (TS `agent_start`/
                     // `agent_end`): the run's whole message set rides

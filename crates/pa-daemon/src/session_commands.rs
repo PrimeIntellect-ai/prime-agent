@@ -86,11 +86,37 @@ pub(crate) fn run_session_command(
             return Some(execution);
         }
     };
+    // The pending refinement is a `/refine rollback` (a plain `/refine`
+    // spawns the refinement child instead): a mechanical replay with no model
+    // call. Its outcome lands inside the command's turn, so whoever waits on
+    // the turn sees the outcome rows and event.
     if let Some(pending) = execution.pending_refinement.take() {
-        engine.report_background_refinement(
-            pending,
-            pa_core::session_engine::refine::RefinementSource::User,
-        );
+        let outcome = engine
+            .runtime
+            .block_on(pending)
+            .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")));
+        match outcome {
+            Ok(committed) => {
+                for row in &committed.rows {
+                    if !emit(EngineEvent::CustomMessage(custom_message_value(row))) {
+                        return None;
+                    }
+                }
+                let result = serde_json::to_value(&committed.result).unwrap_or_default();
+                if !emit(EngineEvent::RefineComplete { result }) {
+                    return None;
+                }
+            }
+            Err(error) => {
+                let failed = EngineEvent::RefineFailed {
+                    error: format!("{error:#}"),
+                    source: pa_core::session_engine::refine::RefinementSource::User,
+                };
+                if !emit(failed) {
+                    return None;
+                }
+            }
+        }
     }
     // The post-compaction kernel notice goes out between the compaction start
     // and its settled end (the `message_start`/`message_end` pair precedes

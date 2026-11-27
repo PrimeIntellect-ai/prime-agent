@@ -8,32 +8,6 @@ use pa_core::session_engine::refine::RefinementSource;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
-pub(super) fn completion_sink(
-    core: Arc<Mutex<SessionCore>>,
-    events: Arc<EventPump>,
-) -> crate::agent_engine::RefinementCompletionSink {
-    let runtime = tokio::runtime::Handle::current();
-    Arc::new(move |pending, source| {
-        let origin = {
-            let core = core.lock().unwrap();
-            core.store
-                .as_ref()
-                .map(|store| (store.session_id().to_string(), core.generation.clone()))
-        };
-        let core = Arc::clone(&core);
-        let events = Arc::clone(&events);
-        runtime.spawn(async move {
-            let result = pending
-                .await
-                .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")));
-            let Some((session_id, generation)) = origin else {
-                return;
-            };
-            emit_refinement_outcome(&core, &events, &session_id, &generation, source, result);
-        });
-    })
-}
-
 /// Emit one finished refinement: its durable rows and `refine_complete`, or
 /// `refine_failed` naming who triggered it (print mode fails its run on a
 /// `/refine` command's failure only).
