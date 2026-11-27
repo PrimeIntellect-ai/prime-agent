@@ -409,12 +409,12 @@ impl SettingsManager {
         self.save_global(&["onboardingCompleted"])
     }
 
-    /// The shown flag with the legacy completed flag as fallback.
+    /// The global shown flag with the legacy global completed flag as fallback.
     #[must_use]
     pub fn get_onboarding_shown(&self) -> bool {
-        self.merged
+        self.global
             .onboarding_shown
-            .or(self.merged.onboarding_completed)
+            .or(self.global.onboarding_completed)
             .unwrap_or(false)
     }
 
@@ -428,21 +428,25 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
-    /// `agentTraces.enabled`: unset means OFF — trace sharing is opt-in, exactly the TS default.
+    /// Trace uploads require global opt-in. Project and runtime settings can only disable them.
     #[must_use]
     pub fn get_agent_traces_enabled(&self) -> bool {
-        self.merged
+        self.global
             .agent_traces
             .as_ref()
-            .and_then(|traces| traces.enabled)
-            .unwrap_or(false)
+            .is_some_and(|traces| traces.enabled == Some(true))
+            && [
+                self.project.agent_traces.as_ref(),
+                self.runtime_overrides.agent_traces.as_ref(),
+            ]
+            .iter()
+            .all(|scope| scope.and_then(|traces| traces.enabled).unwrap_or(true))
     }
 
-    /// Whether a trace-sharing choice was ever written: the `agentTraces.enabled` key
-    /// present in the merged settings. Only a fresh home (no choice written) is asked, once.
+    /// Whether the user has made a global trace-sharing choice.
     #[must_use]
     pub fn agent_traces_choice_written(&self) -> bool {
-        self.merged
+        self.global
             .agent_traces
             .as_ref()
             .and_then(|traces| traces.enabled)

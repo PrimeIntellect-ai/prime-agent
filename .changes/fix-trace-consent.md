@@ -1,0 +1,1 @@
+- Require global consent for automatic trace uploads, let projects opt out, and ignore project settings when deciding whether to show onboarding.
