@@ -2,8 +2,8 @@
 //! and the abort family.
 use super::{
     clear_withdrawn_progress_note, json, persist_custom_row, response_failure, response_success,
-    KillCloseReason, Lane, QueueCheckpoint, QueuedItem, Result, SessionFile, TurnSettle, VecDeque,
-    Worker, PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
+    KillCloseReason, Lane, QueueCheckpoint, QueuedItem, Result, SessionFile, VecDeque, Worker,
+    PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 use serde_json::Value;
@@ -349,9 +349,7 @@ impl Worker {
                             self.prompt_admissions.clear(id);
                         }
                         if let Some(done) = item.done {
-                            let _ = done.send(TurnSettle::Withdrawn(
-                                PROMPT_ABORTED_BEFORE_DELIVERY.to_string(),
-                            ));
+                            done.withdraw(PROMPT_ABORTED_BEFORE_DELIVERY);
                         }
                     }
                 }

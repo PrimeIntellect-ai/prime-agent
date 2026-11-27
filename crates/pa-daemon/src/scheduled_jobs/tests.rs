@@ -280,7 +280,9 @@ async fn settles_classify_ran_failed_or_skipped() {
                     .or_else(|| core.follow_up.pop_front())
             };
             if let Some(item) = popped {
-                let done = item.done.expect("a fire settles through done");
+                let Some(crate::worker::TurnWaiter::Settled(done)) = item.done else {
+                    panic!("a fire settles through done");
+                };
                 let _ = done.send(settle.clone());
                 break;
             }

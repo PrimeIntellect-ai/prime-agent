@@ -88,6 +88,27 @@ pub(crate) enum TurnSettle {
     Failed(String),
 }
 
+/// The caller waiting on one queued item: `prompt_and_wait` waits for the turn's settle, an
+/// idle session's `prompt` ack for the run's `agent_start`.
+#[derive(Debug)]
+pub(crate) enum TurnWaiter {
+    Settled(oneshot::Sender<TurnSettle>),
+    Started(oneshot::Sender<()>),
+}
+
+impl TurnWaiter {
+    /// The item left its lane without a turn: a settle waiter gets the reason, a start waiter
+    /// answers its ack on the dropped sender.
+    pub(crate) fn withdraw(self, reason: &str) {
+        match self {
+            TurnWaiter::Settled(done) => {
+                let _ = done.send(TurnSettle::Withdrawn(reason.to_string()));
+            }
+            TurnWaiter::Started(_) => {}
+        }
+    }
+}
+
 impl TurnSettle {
     /// The wire-facing failure text of the settle (`None` when the
     /// settle is a success).
@@ -153,7 +174,7 @@ pub(crate) struct QueuedItem {
     /// Images attached to the prompt (wire `images`: base64 plus mime
     /// type).
     pub(crate) images: Vec<pa_agent::types::ImageContent>,
-    pub(crate) done: Option<oneshot::Sender<TurnSettle>>,
+    pub(crate) done: Option<TurnWaiter>,
     /// The item shows in the queue projection and projects the active-action
     /// phases; injected continuations and a direct prompt admission stay invisible.
     pub(crate) queue_visible: bool,

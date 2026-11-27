@@ -322,7 +322,7 @@ async fn compacting_window_parks_a_cleared_suspension_until_it_ends() {
             queue_key: None,
             admission_id: None,
             images: Vec::new(),
-            done: Some(done_tx),
+            done: Some(TurnWaiter::Settled(done_tx)),
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,

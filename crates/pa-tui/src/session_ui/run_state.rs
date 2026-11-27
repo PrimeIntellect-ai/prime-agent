@@ -9,8 +9,9 @@ pub(crate) enum RunState {
     Idle,
     /// A prompt was submitted on an idle session and its run has not started yet.
     Submitted,
-    /// The daemon accepted a submitted prompt and its run has not started yet: a later submit's
-    /// failure keeps the state.
+    /// The daemon accepted a submitted prompt without starting its run (a parked runner answers
+    /// at once; a started run's `agent_start` arrives before its ack): a later submit's failure
+    /// keeps the state.
     Admitted,
     /// `agent_start` .. `agent_end`.
     Running,

@@ -232,6 +232,14 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
 async fn cancelled_admission_drop_settles_the_verdict() {
     let worker = created_worker_with_journal().await;
     worker.dispatch("clear_queue", &json!({})).await;
+    // The input pause parks the runner, so the admitted prompt stays queued.
+    let pause = worker
+        .dispatch(
+            "acquire_session_input_pause",
+            &json!({ "activeSessionId": "target-session", "leaseKey": "verdict", "clientId": "test" }),
+        )
+        .await;
+    assert!(pause.success, "pause failed: {pause:?}");
     let admitted = worker
         .dispatch("prompt", &json!({ "admissionId": "a1", "message": "go" }))
         .await;

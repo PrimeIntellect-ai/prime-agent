@@ -20,7 +20,7 @@ async fn suspended_runner_parks_a_queued_item_until_resumed() {
             queue_key: None,
             admission_id: None,
             images: Vec::new(),
-            done: Some(done_tx),
+            done: Some(TurnWaiter::Settled(done_tx)),
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
