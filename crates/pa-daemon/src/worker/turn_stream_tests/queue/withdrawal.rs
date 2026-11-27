@@ -35,7 +35,7 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
             worker.roster_pushes = roster_pushes;
             // Represent a run whose AgentEnd retained its note for queued work.
             *engine.note.lock().unwrap() = Some("checking deployment".to_string());
-            worker.register_prompt_admission("owned-note");
+            worker.register_prompt_admission("owned-note", None);
             assert!(worker.prompt_admissions.commit("owned-note"));
             {
                 let mut core = worker.core.lock().unwrap();

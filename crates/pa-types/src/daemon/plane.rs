@@ -77,6 +77,7 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
         | "abort_compaction"
         | "abort_branch_summary"
         | "abort_retry"
+        | "retire_continuations"
         | "execute_bash_and_wait"
         | "reload"
         | "new_session"

@@ -16,6 +16,10 @@ pub const ENV_SESSION_DIR: &str = "PRIME_AGENT_SESSION_DIR";
 /// on the default socket would treat the schema-id mismatch as staleness).
 pub const ENV_DAEMON_SOCKET: &str = "PRIME_AGENT_DAEMON_SOCKET";
 
+/// `PRIME_AGENT_A2A_TOKEN`: the `--mode a2a` bearer token (minted per run
+/// when unset).
+pub const ENV_A2A_TOKEN: &str = "PRIME_AGENT_A2A_TOKEN";
+
 /// The daemon socket path: an explicit `--daemon-socket` flag wins, then
 /// [`ENV_DAEMON_SOCKET`], then the per-user default.
 pub fn resolve_daemon_socket_path(daemon_socket: Option<&str>) -> PathBuf {

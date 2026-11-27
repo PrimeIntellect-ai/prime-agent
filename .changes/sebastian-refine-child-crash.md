@@ -1,0 +1,1 @@
+- Fixed a refinement whose child died without replying never reporting a failure; it now fails visibly and frees the refinement slot at once.

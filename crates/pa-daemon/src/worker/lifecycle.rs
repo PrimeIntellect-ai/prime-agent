@@ -541,22 +541,7 @@ impl Worker {
                         // The state change is durable before the announcement: the mint runs
                         // outside a turn, so the store write rides here, not the emit closure.
                         if let Some(goal) = continuation.goal_update {
-                            {
-                                let mut core = self.core.lock().unwrap();
-                                if let Some(store) = core.store.as_mut() {
-                                    let _ = store.persist_entry(
-                                        "custom",
-                                        json!({
-                                            "customType": pa_core::goals::GOAL_STATE_CUSTOM_TYPE,
-                                            "data": goal,
-                                        }),
-                                    );
-                                }
-                            }
-                            self.emit_worker_event(json!({
-                                "type": "goal_update",
-                                "goal": goal,
-                            }));
+                            super::persist_and_emit_goal_update(&self.core, &self.events, &goal);
                         }
                         {
                             let mut core = self.core.lock().unwrap();

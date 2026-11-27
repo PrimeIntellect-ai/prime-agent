@@ -250,6 +250,10 @@ pub(crate) fn block_diagram(
     // Every transition source is one edge; a join labels its edges "join".
     let mut edges: Vec<(usize, usize, Option<String>)> = Vec::new();
     let mut self_loops: Vec<Vec<String>> = vec![Vec::new(); n];
+    // Each self-loop's own fired status, by state and label (a loop lights
+    // only when that loop's transition is in the fired window).
+    let mut fired_loops: std::collections::HashSet<(usize, String)> =
+        std::collections::HashSet::new();
     for transition in transitions {
         let Some(to) = index_of(&transition.to) else {
             continue;
@@ -260,7 +264,18 @@ pub(crate) fn block_diagram(
                 continue;
             };
             if from == to {
-                self_loops[from].push(label.clone().unwrap_or_else(|| "again".to_string()));
+                let label = label.clone().unwrap_or_else(|| "again".to_string());
+                let fired = overlay.is_some_and(|overlay| {
+                    overlay.fired.contains(&DiagramOverlay::fired_key(
+                        &transition.from,
+                        &transition.to,
+                        transition.when.as_deref(),
+                    ))
+                });
+                if fired {
+                    fired_loops.insert((from, label.clone()));
+                }
+                self_loops[from].push(label);
             } else {
                 edges.push((from, to, label.clone()));
             }
@@ -745,12 +760,23 @@ pub(crate) fn block_diagram(
                 canvas.put(x[item] + width[item] - 1, line_y, &side.to_string(), role);
             }
             if !self_loops[item].is_empty() {
-                canvas.put(
-                    x[item] + width[item] + 1,
-                    top + 2,
-                    &format!("↺ {}", self_loops[item].join(", ")),
-                    Role::Label,
-                );
+                // Each self-loop label lights only when ITS loop fired.
+                let mut at = x[item] + width[item] + 1;
+                canvas.put(at, top + 2, "↺ ", Role::Label);
+                at += 2;
+                for (index, label) in self_loops[item].iter().enumerate() {
+                    if index > 0 {
+                        canvas.put(at, top + 2, ", ", Role::Label);
+                        at += 2;
+                    }
+                    let role = if fired_loops.contains(&(item, label.clone())) {
+                        Role::Fired
+                    } else {
+                        Role::Label
+                    };
+                    canvas.put(at, top + 2, label, role);
+                    at += label.chars().count();
+                }
             }
         }
     }
