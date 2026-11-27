@@ -1,0 +1,2 @@
+- Bots: the global harness (memories, skills, prompt notes) now syncs two ways with a sandboxed bot. A spawn or wake pushes the owner's state into the bot before its daemon reads it, and each settled turn merges the bot's own global refinements back into the owner's.
+- The merge is three-way against a per-bot base file, so an owner's deletions never resurrect from a stale bot copy and a concurrent edit resolves by version, then recency, then the owner. An unchanged bot transfers nothing beyond one sha256 probe.

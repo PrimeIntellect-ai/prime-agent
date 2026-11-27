@@ -360,7 +360,7 @@ pub struct BotManager {
     guest_auth: Mutex<HashMap<String, GuestCredentials>>,
     image: String,
     /// The owner's agent dir: its `factory.enabled` carries into the bot.
-    agent_dir: PathBuf,
+    pub(super) agent_dir: PathBuf,
 }
 
 impl BotManager {
@@ -1909,6 +1909,15 @@ impl BotManager {
                 version::guest_tarball_path(local),
             );
         }
+        // The owner's global harness rides into the bot before its daemon
+        // boots, and the bot's own refinements merge back. Best effort: a
+        // failed sync never blocks the spawn or wake; the next one retries.
+        if let Err(error) = self.sync_global_harness(record, deadline).await {
+            eprintln!(
+                "pa-daemon: bots: {}: the harness sync failed: {error:#}",
+                record.name
+            );
+        }
         let output = self
             .exec_ready(&sandbox_id, BOOTSTRAP_SCRIPT, &env, None, deadline)
             .await?;
@@ -2265,7 +2274,7 @@ impl BotManager {
 
     /// Run a guest command once the sandbox gateway answers: retries
     /// transport errors, and stops when the sandbox ends.
-    async fn exec_ready(
+    pub(super) async fn exec_ready(
         &self,
         sandbox_id: &str,
         script: &str,
@@ -2398,6 +2407,7 @@ impl BotManager {
         if spawns.remove(bot_id) {
             let _ = write_spawns_marker(&self.agent_dir, &spawns);
         }
+        super::harness_sync::remove_base(&self.agent_dir, bot_id);
         self.delete_orphans(checkpoints).await
     }
 }
@@ -2599,7 +2609,7 @@ fn bootstrap_env(record: &BotRecord, self_pause: &SelfPauseSettings) -> BTreeMap
     env
 }
 
-fn check_exit(action: &str, output: &ExecOutput) -> Result<()> {
+pub(super) fn check_exit(action: &str, output: &ExecOutput) -> Result<()> {
     if output.exit_code == 0 {
         return Ok(());
     }

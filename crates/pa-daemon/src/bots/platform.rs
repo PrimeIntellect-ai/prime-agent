@@ -19,6 +19,7 @@ use pa_sandbox::{
 use super::credentials;
 use super::exec_stream::{spawn_exec_halves, ExecStreamHalves, SandboxAuthSource};
 use super::BotStatus;
+use tokio::io::AsyncReadExt;
 
 /// The parts of a sandbox the manager reads.
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +147,13 @@ pub trait BotPlatform: Send + Sync {
         path: &'a str,
         bytes: &'a [u8],
     ) -> BoxFuture<'a, PlatformResult<()>>;
+    /// Read `path` in the guest and return its bytes, at most
+    /// [`MAX_DOWNLOAD_BYTES`]. A missing file is [`PlatformError::NotFound`].
+    fn download<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<Vec<u8>>>;
     /// Start `command` in the guest with its stdio as a byte stream; dropping
     /// the write half ends the process.
     fn open_stream<'a>(
@@ -220,6 +228,8 @@ const EXEC_WAIT: Duration = Duration::from_millis(EXEC_DEADLINE_MS + 60_000);
 const UPLOAD_TIMEOUT: Duration = Duration::from_mins(10);
 /// The daemon keeps this much of each guest output channel; the rest is dropped.
 const MAX_EXEC_OUTPUT_BYTES: usize = 1024 * 1024;
+/// The largest guest file one `download` returns.
+pub const MAX_DOWNLOAD_BYTES: usize = 32 * 1024 * 1024;
 
 /// [`BotPlatform`] over the Prime Sandboxes REST client and the VM command session.
 pub struct PrimePlatform {
@@ -622,6 +632,53 @@ impl BotPlatform for PrimePlatform {
                 .await
                 .map(|_upload| ())
                 .map_err(|error| map_error(&error))
+        }
+        .boxed()
+    }
+
+    fn download<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<Vec<u8>>> {
+        async move {
+            // `cat` over the exec stream: the buffered exec path caps its
+            // output at one mebibyte, too small for a harness state.
+            let command = CommandSpec {
+                cmd: "cat".into(),
+                args: vec!["--".into(), path.to_string()],
+                envs: BTreeMap::new(),
+                cwd: None,
+            };
+            let mut halves = self.open_stream(sandbox_id, &command).await?;
+            let mut bytes = Vec::new();
+            let mut buffer = vec![0u8; 64 * 1024];
+            loop {
+                let read = halves
+                    .read
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| PlatformError::Other(error.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+                if bytes.len() > MAX_DOWNLOAD_BYTES {
+                    return Err(PlatformError::Other(format!(
+                        "the guest file {path} is larger than the download limit"
+                    )));
+                }
+            }
+            let end = halves.ended.await.unwrap_or_default();
+            if end.starts_with("exit code 0,") {
+                return Ok(bytes);
+            }
+            if end.contains("No such file") {
+                return Err(PlatformError::NotFound(format!("no {path} in the bot")));
+            }
+            Err(PlatformError::Other(format!(
+                "cat {path} in the bot failed: {end}"
+            )))
         }
         .boxed()
     }

@@ -73,6 +73,10 @@ pub(crate) struct FakeState {
     pub secret_puts: usize,
     /// Each network rules update: the sandbox and its rule hosts.
     pub rule_updates: Vec<(String, Vec<String>)>,
+    /// The guest files uploads and syncs wrote, by sandbox and path.
+    pub harness_files: HashMap<String, BTreeMap<String, Vec<u8>>>,
+    /// How many guest file downloads ran.
+    pub harness_downloads: usize,
 }
 
 /// An in-memory Prime account: sandboxes are running as soon as they exist.
@@ -392,6 +396,26 @@ impl BotPlatform for FakePlatform {
                 // The guest's tarball copy is present.
             } else if script == version::TARBALL_RESTORE_SCRIPT {
                 state.installs += 1;
+            } else if script == super::harness_sync::HARNESS_PROBE_SCRIPT {
+                // The sha256 probe of the bot's global harness state.
+                let path = env["PA_HARNESS_STATE"].clone();
+                output.stdout = match state
+                    .harness_files
+                    .get(sandbox_id)
+                    .and_then(|files| files.get(&path))
+                {
+                    Some(bytes) => super::sha256_hex(bytes),
+                    None => super::harness_sync::NO_STATE_MARKER.to_string(),
+                };
+            } else if script == super::harness_sync::HARNESS_MOVE_SCRIPT {
+                let files = state
+                    .harness_files
+                    .entry(sandbox_id.to_string())
+                    .or_default();
+                let bytes = files
+                    .remove(&env["PA_HARNESS_TMP"])
+                    .expect("the uploaded temp harness state");
+                files.insert(env["PA_HARNESS_STATE"].clone(), bytes);
             } else {
                 assert!(env.contains_key("BOT_CLIENT"), "unexpected guest script");
                 let file = env
@@ -423,7 +447,33 @@ impl BotPlatform for FakePlatform {
             if state.upload_fails {
                 return Err(PlatformError::Transient("upload refused".into()));
             }
+            state
+                .harness_files
+                .entry(sandbox_id.to_string())
+                .or_default()
+                .insert(path.to_string(), bytes.to_vec());
             Ok(())
+        }
+        .boxed()
+    }
+
+    fn download<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<Vec<u8>>> {
+        async move {
+            let mut state = self.state();
+            if state.sandbox(sandbox_id)?.status != BotStatus::Running {
+                return Err(PlatformError::Transient("gateway not ready".into()));
+            }
+            state.harness_downloads += 1;
+            state
+                .harness_files
+                .get(sandbox_id)
+                .and_then(|files| files.get(path))
+                .cloned()
+                .ok_or_else(|| PlatformError::NotFound(format!("no {path} in the bot")))
         }
         .boxed()
     }
@@ -2124,6 +2174,13 @@ impl BotPlatform for ThrowawaySecret {
         bytes: &'a [u8],
     ) -> BoxFuture<'a, PlatformResult<()>> {
         self.inner.upload(sandbox_id, path, bytes)
+    }
+    fn download<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<Vec<u8>>> {
+        self.inner.download(sandbox_id, path)
     }
     fn open_stream<'a>(
         &'a self,
