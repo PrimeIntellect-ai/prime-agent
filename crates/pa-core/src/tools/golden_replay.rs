@@ -101,6 +101,14 @@ impl IpythonKernelProvisioner for MockProvisioner {
         self.kill_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(std::future::ready(()))
     }
+
+    fn stop_cell(
+        &self,
+        _cell_id: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ipython::CellStop> + Send>> {
+        // The mock kernel never backgrounds a cell.
+        Box::pin(std::future::ready(ipython::CellStop::NotRunning))
+    }
 }
 
 fn mock_execution(entry: &serde_json::Value) -> ExecuteResult {

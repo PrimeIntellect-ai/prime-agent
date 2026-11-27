@@ -390,15 +390,25 @@ impl TurnRunner {
 
     /// The run's `agent_start`, tagged with its anchor row: the client's
     /// own admission id for an admitted prompt, or `continuation` for a row
-    /// that continues the session's own work. An inbox wake that shows an
-    /// agent message brings a new delivery, so it is no continuation.
+    /// that continues the session's own work. An inbox wake (arrival or
+    /// reminder) while the inbox holds an agent message brings a new
+    /// delivery, so it is no continuation.
     fn agent_start_frame(&self, first: &QueuedItem) -> Value {
         let mut frame = json!({ "type": "agent_start" });
-        let agent_message_wake =
-            first.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY)
-                && self.inbox_arrivals.lock().unwrap().iter().any(|message| {
-                    message.class == pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE
-                });
+        let agent_message_wake = matches!(
+            first.queue_key.as_deref(),
+            Some(INBOX_ARRIVAL_QUEUE_KEY | super::INBOX_REMINDER_QUEUE_KEY)
+        ) && self
+            .inbox_engine
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .and_then(|engine| engine.inbox())
+            .is_some_and(|inbox| {
+                inbox
+                    .count()
+                    .2
+                    .contains_key(pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE)
+            });
         if let Some(client_id) = first
             .admission_id
             .as_deref()
