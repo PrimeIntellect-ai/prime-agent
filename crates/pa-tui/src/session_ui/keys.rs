@@ -629,6 +629,20 @@ impl SessionUi {
             self.cycle_detail(view);
             return Ok(());
         }
+        // Expand or collapse every thought and tool step. A view action: the saved `chatDetail`
+        // level stays, so the next chat opens at the level the Ctrl+O cycle picked.
+        if view
+            .editor
+            .keybindings()
+            .matches(&id, "app.steps.toggleAll")
+        {
+            view.toggle_all_steps();
+            if let Some(pane) = view.side_pane.as_mut() {
+                pane.expanded = view.detail == crate::chat::Detail::All;
+            }
+            self.dirty = true;
+            return Ok(());
+        }
         if view
             .editor
             .keybindings()
@@ -922,9 +936,9 @@ pub(crate) fn opening_echo_key_claimed(
 ) -> bool {
     // The always-fire arms: the transcript viewport, the image paste, the
     // escape ladder, the interrupt family, suspend, the model picker and
-    // cycles, the detail cycle, the dock focus, the external editor, the
-    // stash, the session-level commands, the queue browse, and the
-    // follow-up key.
+    // cycles, the detail cycle, the steps toggle, the dock focus, the
+    // external editor, the stash, the session-level commands, the queue
+    // browse, and the follow-up key.
     if kb.matches(id, "tui.viewport.pageUp")
         || kb.matches(id, "tui.viewport.pageDown")
         || kb.matches(id, "tui.viewport.top")
@@ -938,6 +952,7 @@ pub(crate) fn opening_echo_key_claimed(
         || kb.matches(id, "app.model.cycleForward")
         || kb.matches(id, "app.model.cycleBackward")
         || kb.matches(id, "app.tools.expand")
+        || kb.matches(id, "app.steps.toggleAll")
         || kb.matches(id, "app.subagents.focus")
         || kb.matches(id, "app.editor.external")
         || kb.matches(id, "app.prompt.stash")

@@ -1,0 +1,1 @@
+- New opt-in `Compact steps` setting (`/settings` → Display): each thought and tool call renders as one summary line (`▸ Thought for 3.2s - …`, `✓ Edited path (+N -M)`, `✓ Ran <cmd> (0.8s)`, `✓ Python: …`); click a line to expand it in place, or press Alt+O to expand or collapse every step.

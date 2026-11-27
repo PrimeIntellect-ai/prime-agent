@@ -548,7 +548,7 @@ impl AgentView {
             // map — bounded by the rows on screen.
             if before < rows.len() && section >= 1 && section < last {
                 self.click
-                    .record_window_section(section - 1, before, rows.len());
+                    .record_window_section(section - 1, before, rows.len(), from);
             }
             section += 1;
             row = 0;

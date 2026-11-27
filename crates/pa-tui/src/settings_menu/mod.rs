@@ -315,6 +315,14 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             submenu: None,
         },
         SettingsMenuRow {
+            id: "compact-steps",
+            label: "Compact steps",
+            description: "Show each thought and tool call as one summary line; click a line to expand it",
+            current: current.compact_steps.to_string(),
+            values: Some(bool_value()),
+            submenu: None,
+        },
+        SettingsMenuRow {
             id: "quiet-startup",
             label: "Quiet startup",
             description: "Disable verbose printing at startup",
@@ -386,6 +394,7 @@ pub struct SettingsCurrentValues {
     pub transport: String,
     pub default_service_tier: String,
     pub mermaid: String,
+    pub compact_steps: bool,
     pub quiet_startup: bool,
     pub tree_filter_mode: String,
     pub warnings_anthropic_extra_usage: bool,

@@ -22,6 +22,48 @@ pub(super) fn render_diffs(
     theme: &Theme,
     width: usize,
 ) {
+    let by_path = group_by_path(diffs);
+    if by_path.is_empty() {
+        return;
+    }
+    if has_code {
+        lines.push(|| vec![Span::raw(" ")]);
+    }
+    for (path, edits) in &by_path {
+        render_file(lines, path, edits, expanded, theme, width);
+    }
+}
+
+/// A cell's edits in one compact-steps line: the edited path (`N files` for several) and the
+/// added and removed line counts.
+pub(super) struct EditTotals {
+    pub(super) subject: String,
+    pub(super) added: usize,
+    pub(super) removed: usize,
+}
+
+pub(super) fn edit_totals(diffs: &[Value]) -> Option<EditTotals> {
+    let by_path = group_by_path(diffs);
+    let (added, removed) = by_path
+        .iter()
+        .map(|(_, edits)| count_changes(edits))
+        .fold((0, 0), |(added, removed), (more_added, more_removed)| {
+            (added + more_added, removed + more_removed)
+        });
+    let subject = match by_path.as_slice() {
+        [] => return None,
+        [(path, _)] => (*path).to_string(),
+        files => format!("{} files", files.len()),
+    };
+    Some(EditTotals {
+        subject,
+        added,
+        removed,
+    })
+}
+
+/// The `details.diffs` entries' diff texts per path, in first-seen order.
+fn group_by_path(diffs: &[Value]) -> Vec<(&str, Vec<&str>)> {
     let mut by_path: Vec<(&str, Vec<&str>)> = Vec::new();
     for entry in diffs {
         let (Some(path), Some(diff)) = (
@@ -35,15 +77,20 @@ pub(super) fn render_diffs(
             None => by_path.push((path, vec![diff])),
         }
     }
-    if by_path.is_empty() {
-        return;
+    by_path
+}
+
+/// The added and removed line counts of one file's edits.
+fn count_changes(edits: &[&str]) -> (usize, usize) {
+    let (mut added, mut removed) = (0usize, 0usize);
+    for line in edits.iter().flat_map(|diff| diff.split('\n')) {
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
     }
-    if has_code {
-        lines.push(|| vec![Span::raw(" ")]);
-    }
-    for (path, edits) in &by_path {
-        render_file(lines, path, edits, expanded, theme, width);
-    }
+    (added, removed)
 }
 
 /// The summary line, then (expanded) each edit's rows with a `⋮` separator between edits.
@@ -55,14 +102,7 @@ fn render_file(
     theme: &Theme,
     width: usize,
 ) {
-    let (mut added, mut removed) = (0usize, 0usize);
-    for line in edits.iter().flat_map(|diff| diff.split('\n')) {
-        if line.starts_with('+') {
-            added += 1;
-        } else if line.starts_with('-') {
-            removed += 1;
-        }
-    }
+    let (added, removed) = count_changes(edits);
     lines.push(|| summary_line(path, added, removed, theme, width));
     if !expanded {
         return;

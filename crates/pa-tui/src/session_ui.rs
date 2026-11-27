@@ -266,6 +266,9 @@ pub(crate) struct SessionUi {
     /// turn at the boundary; `one-at-a-time` one per turn (product default `all`).
     pub(crate) steering_mode: String,
     streaming_index: Option<usize>,
+    /// When the open message's thinking block started streaming: its `thinking_end` hands the
+    /// elapsed time to the compact-steps thought line.
+    thinking_started: Option<Instant>,
     working_tokens: LoaderTokenTracker,
     /// The turn already surfaced its error (a failed assistant message or
     /// a retry-exhausted banner); the `turn_end` error stays silent then.

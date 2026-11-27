@@ -8,6 +8,9 @@ pub mod highlight;
 pub mod ipython;
 pub mod ipython_details;
 mod layout;
+mod step;
+
+pub(crate) use step::{format_step_duration, step_line};
 
 use std::time::Instant;
 

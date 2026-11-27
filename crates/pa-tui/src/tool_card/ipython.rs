@@ -33,7 +33,7 @@ use crate::{Line, Span};
 const OUTPUT_INDENT: &str = "   ";
 
 /// The card status (TS `statusKind`).
-enum CardStatus {
+pub(super) enum CardStatus {
     Queued,
     Running,
     Done,
@@ -42,6 +42,20 @@ enum CardStatus {
 }
 
 impl CardStatus {
+    /// The status glyph a summary line leads with.
+    pub(super) fn marker(&self, frame: usize, theme: &Theme) -> Span {
+        match self {
+            CardStatus::Error => Span::styled("\u{2717}", theme.fg_style(ThemeColor::Error)),
+            CardStatus::Aborted => Span::styled("\u{2717}", theme.fg_style(ThemeColor::Warning)),
+            CardStatus::Done => Span::styled("\u{2713}", theme.fg_style(ThemeColor::Success)),
+            CardStatus::Running => Span::styled(
+                super::working_icon(frame),
+                theme.fg_style(ThemeColor::BashMode),
+            ),
+            CardStatus::Queued => Span::styled("\u{25c7}", theme.fg_style(ThemeColor::Muted)),
+        }
+    }
+
     fn of(card: &ToolCallCard, details: &IpythonDetails) -> CardStatus {
         // An interrupted cell never renders as a success: a settled
         // straggler's kept partial can still carry a background shell
@@ -234,9 +248,6 @@ fn collapsed_line(
     let muted = theme.fg_style(ThemeColor::Muted);
     let dim = theme.fg_style(ThemeColor::Dim);
     let error = theme.fg_style(ThemeColor::Error);
-    let warning = theme.fg_style(ThemeColor::Warning);
-    let success = theme.fg_style(ThemeColor::Success);
-    let bash_mode = theme.fg_style(ThemeColor::BashMode);
 
     let dominant = dominant_bash(details, code);
     let preview = preview_ipython_code(code);
@@ -251,20 +262,10 @@ fn collapsed_line(
         }
     };
 
-    let marker: Line = match CardStatus::of(card, details) {
-        CardStatus::Error => vec![Span::styled("\u{2717}".to_string(), error)],
-        CardStatus::Aborted => vec![Span::styled("\u{2717}".to_string(), warning)],
-        CardStatus::Done => vec![Span::styled("\u{2713}".to_string(), success)],
-        CardStatus::Running => vec![Span::styled(
-            super::working_icon(frame).to_string(),
-            bash_mode,
-        )],
-        CardStatus::Queued => vec![Span::styled("\u{25c7}".to_string(), muted)],
-    };
+    let mut marker: Line = vec![CardStatus::of(card, details).marker(frame, theme)];
 
     let mut parts: Vec<Line> = Vec::new();
     let mut preview_index: Option<usize> = None;
-    let mut marker = marker;
     marker.push(Span::raw(" "));
     marker.push(Span::styled(language_label, muted));
     parts.push(marker);
@@ -361,6 +362,86 @@ fn collapsed_line(
         row.extend(part.iter().cloned());
     }
     truncate_line(&row, width, "")
+}
+
+/// The compact-steps summary of a cell behind its status marker: `Edited <path> (+N -M)` for
+/// edit cells, `Ran <command> (<time>)` for bash-dominated cells, `Python: <intent>` otherwise,
+/// then the error name or the background shell's failed exit.
+pub(super) fn step_summary(card: &ToolCallCard, frame: usize, theme: &Theme) -> Line {
+    let code = cell_code(card).trim_end();
+    let details = card.result.as_ref().map_or_else(
+        || IpythonDetails::parse(&Value::Null),
+        |result| IpythonDetails::parse(&result.details),
+    );
+    let muted = theme.fg_style(ThemeColor::Muted);
+    let dim = theme.fg_style(ThemeColor::Dim);
+    let error = theme.fg_style(ThemeColor::Error);
+    let mut line: Line = vec![
+        CardStatus::of(card, &details).marker(frame, theme),
+        Span::raw(" "),
+    ];
+    if let Some(edits) = diffs::edit_totals(&details.diffs) {
+        line.extend([
+            Span::styled("Edited ", muted),
+            Span::styled(edits.subject, muted),
+            Span::styled(" (", dim),
+            Span::styled(
+                format!("+{}", edits.added),
+                theme.fg_style(ThemeColor::ToolDiffAdded),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("-{}", edits.removed),
+                theme.fg_style(ThemeColor::ToolDiffRemoved),
+            ),
+            Span::styled(")", dim),
+        ]);
+    } else if let Some(bash) = dominant_bash(&details, code) {
+        line.push(Span::styled("Ran ", muted));
+        line.push(Span::styled(preview_bash_command(&bash.first).text, dim));
+        if bash.count > 1 {
+            line.push(Span::styled(format!(" +{} more", bash.count - 1), dim));
+        }
+        let running_ms = card
+            .started_at
+            .filter(|_| card.ended_at.is_none())
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0);
+        if let Some(ms) = details.duration_ms.or(running_ms) {
+            line.push(Span::styled(
+                format!(" ({})", super::format_step_duration(ms)),
+                dim,
+            ));
+        }
+    } else {
+        let preview = preview_ipython_code(code).text;
+        line.push(Span::styled("Python: ", muted));
+        line.push(Span::styled(
+            if preview.is_empty() {
+                "waiting for code".to_string()
+            } else {
+                preview
+            },
+            dim,
+        ));
+    }
+    let error_name = details
+        .error
+        .as_ref()
+        .map(|e| e.ename.clone())
+        .or_else(|| details.error_ename.clone())
+        .filter(|_| !card.result_partial);
+    let failed_exit = card
+        .result
+        .as_ref()
+        .and_then(|result| read_background_shell(code, &result.details))
+        .and_then(|shell| shell.exit_code)
+        .filter(|exit_code| *exit_code != 0)
+        .map(|exit_code| format!("exit {exit_code}"));
+    for failure in [error_name, failed_exit].into_iter().flatten() {
+        line.push(Span::styled(" \u{b7} ", dim));
+        line.push(Span::styled(failure, error));
+    }
+    line
 }
 
 /// A cell renders as bash when its executed `bash()` lines are at least

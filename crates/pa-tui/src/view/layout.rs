@@ -7,8 +7,16 @@ use crate::chat::{render_loader, ChatEntry};
 use crate::chrome::render_splash;
 use crate::Line;
 
-/// Inputs shared by local entry caches and cross-view handoffs.
-pub(super) type LayoutOptions = (crate::theme::Theme, String, bool, bool, Option<url::Url>);
+/// Inputs shared by local entry caches and cross-view handoffs: the theme, the code-block
+/// indent, `show_images`, the fullscreen image fallback, `compact_steps`, and the link base.
+pub(super) type LayoutOptions = (
+    crate::theme::Theme,
+    String,
+    bool,
+    bool,
+    bool,
+    Option<url::Url>,
+);
 
 #[cfg(test)]
 thread_local! {
@@ -341,6 +349,7 @@ impl AgentView {
             self.code_block_indent.clone(),
             self.show_images,
             crate::image_component::fullscreen_image_fallback_active(),
+            self.compact_steps,
             url::Url::from_directory_path(&self.chrome.cwd).ok(),
         );
         if self.layout_width != width || self.layout_options.as_ref() != Some(&options) {
@@ -463,7 +472,12 @@ impl AgentView {
             // The entry's visible span feeds the click surface's window
             // map — bounded by the rows on screen.
             if from < rows.len() {
-                self.click.record_window_section(index, from, rows.len());
+                self.click.record_window_section(
+                    index,
+                    from,
+                    rows.len(),
+                    start.saturating_sub(offset),
+                );
             }
         }
         Self::slice_rows(

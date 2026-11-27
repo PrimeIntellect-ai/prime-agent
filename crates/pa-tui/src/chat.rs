@@ -3,7 +3,9 @@
 //! working loader line. Tool-call cards live in `crate::tool_card`.
 
 mod geometry;
+mod thinking_step;
 pub(crate) use geometry::{assistant_row_count, user_block_row_count};
+pub(crate) use thinking_step::{ThinkingStep, THINKING_STEP_ROW};
 
 use crate::snapshot::RetryStartReason;
 use crate::theme::{Theme, ThemeBg, ThemeColor};
@@ -165,15 +167,40 @@ pub struct AssistantMessage {
 
 impl AssistantMessage {
     /// The tool-call separator renders for visible bodies, aborted
-    /// messages, and messages not following tool activity.
+    /// messages, and messages not following tool activity. `thinking_shown`:
+    /// the thinking renders rows (the full reasoning, or the compact-steps line).
     #[must_use]
-    pub fn has_trailing_space(&self, detail: Detail, preceded_by_tool_activity: bool) -> bool {
+    pub fn has_trailing_space(
+        &self,
+        thinking_shown: bool,
+        preceded_by_tool_activity: bool,
+    ) -> bool {
         let has_visible_content = self.blocks.iter().any(|block| match block {
-            MessageBlock::Thinking(text) => detail.show_thinking() && !text.trim().is_empty(),
+            MessageBlock::Thinking(text) => thinking_shown && !text.trim().is_empty(),
             MessageBlock::Text(text) => !text.trim().is_empty(),
         });
         self.has_tool_calls && (has_visible_content || self.aborted || !preceded_by_tool_activity)
     }
+
+    /// Whether the message carries any non-blank reasoning.
+    #[must_use]
+    pub fn has_thinking(&self) -> bool {
+        self.blocks
+            .iter()
+            .any(|block| matches!(block, MessageBlock::Thinking(text) if !text.trim().is_empty()))
+    }
+}
+
+/// The per-entry inputs one assistant message lays out under.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AssistantLayout {
+    /// The message's own level: the conversation level, flipped by a click on its thinking.
+    pub(crate) detail: Detail,
+    /// TS `precededByToolActivity`: the message follows a compact-neighbor row.
+    pub(crate) preceded_by_tool_activity: bool,
+    /// Compact steps: the thinking renders behind one line, the collapsed summary or the header
+    /// over the full reasoning.
+    pub(crate) thinking_step: Option<ThinkingStep>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -392,32 +419,40 @@ pub fn render_assistant(
 ) -> Vec<Line> {
     let mut md = crate::markdown::MarkdownStyle::from_theme(theme);
     md.code_block_indent = code_block_indent.to_string();
-    render_assistant_with_style(
-        message,
+    let layout = AssistantLayout {
         detail,
-        theme,
-        &md,
-        width,
         preceded_by_tool_activity,
-        cache,
-    )
+        thinking_step: None,
+    };
+    render_assistant_with_style(message, &layout, theme, &md, width, cache)
 }
 
 /// Render with the owning view's session-local Markdown context.
 pub(crate) fn render_assistant_with_style(
     message: &AssistantMessage,
-    detail: Detail,
+    layout: &AssistantLayout,
     theme: &Theme,
     md: &crate::markdown::MarkdownStyle,
     width: usize,
-    preceded_by_tool_activity: bool,
     cache: &mut crate::markdown::MarkdownBlockCache,
 ) -> Vec<Line> {
+    let detail = layout.detail;
     let visible_blocks = geometry::visible_blocks(message, detail);
-    let has_visible_content = !visible_blocks.is_empty();
+    let step = layout.thinking_step.filter(|_| message.has_thinking());
+    let has_visible_content = step.is_some() || !visible_blocks.is_empty();
     let mut out: Vec<Line> = Vec::new();
     if has_visible_content {
         out.push(spacer());
+    }
+    // The step line sits on `THINKING_STEP_ROW`, right below the leading spacer.
+    if let Some(step) = step {
+        let expanded = detail.show_thinking();
+        out.push(thinking_step::thinking_step_line(
+            message, step, expanded, theme, width,
+        ));
+        if !expanded && !visible_blocks.is_empty() {
+            out.push(spacer());
+        }
     }
     for (index, block) in visible_blocks.iter().enumerate() {
         match block {
@@ -447,7 +482,11 @@ pub(crate) fn render_assistant_with_style(
             width,
         ));
     }
-    if geometry::trailing_space(message, has_visible_content, preceded_by_tool_activity) {
+    if geometry::trailing_space(
+        message,
+        has_visible_content,
+        layout.preceded_by_tool_activity,
+    ) {
         out.push(spacer());
     }
     // Zone markers on message bodies without tool calls (TS `AssistantMessageComponent.render`:

@@ -318,14 +318,19 @@ pub(crate) fn draw(
 /// Render one frame as plain text (the headless structural dump the tmux verifier and diff
 /// tests use). ANSI styling and OSC zone markers are stripped.
 pub fn render_frame_text(view: &mut AgentView, width: u16, height: u16) -> Vec<String> {
-    let frame = view.render_frame(width as usize, height as usize);
-    frame
+    render_frame_styled(view, width, height)
         .iter()
-        .map(|line| {
-            let mut stripped = line.clone();
-            crate::osc133::strip(&mut stripped);
-            crate::hyperlinks::strip_osc8(&mut stripped);
-            stripped.iter().map(|s| s.content.as_str()).collect()
-        })
+        .map(crate::ansi::line_to_plain)
         .collect()
+}
+
+/// Render one frame's styled rows without the OSC zone markers and OSC 8 links (the
+/// `pa-tui-replay --frame --color` dump).
+pub fn render_frame_styled(view: &mut AgentView, width: u16, height: u16) -> Vec<crate::Line> {
+    let mut frame = view.render_frame(width as usize, height as usize);
+    for line in &mut frame {
+        crate::osc133::strip(line);
+        crate::hyperlinks::strip_osc8(line);
+    }
+    frame
 }

@@ -1,6 +1,7 @@
 //! `pa-tui-replay`: render a captured agent session in the pa-tui agent view. Modes: live
 //! (default) — full-screen TUI in a real terminal; `--frame WxH` — one frame as plain
-//! text to stdout (the tmux verifier); `--panic-exit` — panic mid-loop after the first
+//! text to stdout (the tmux verifier), ANSI-styled with `--color`, with the step flags driving
+//! the view's own expansion state; `--panic-exit` — panic mid-loop after the first
 //! paint (the exit-restore verifier: a real unwind must leave the terminal whole).
 // Casts: terminal-layout arithmetic narrows structurally bounded values.
 #![allow(
@@ -20,7 +21,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use pa_tui::app::{render_frame_text, run_app, AppOptions};
+use pa_tui::app::{render_frame_styled, render_frame_text, run_app, AppOptions};
 use pa_tui::session::{JsonlSessionStream, SessionStream, TranscriptItem};
 use pa_tui::theme::{ColorMode, Theme};
 use pa_tui::view::AgentView;
@@ -42,9 +43,20 @@ struct Args {
     /// Print the frame with ANSI colors (only with --frame).
     #[arg(long, default_value_t = false)]
     color: bool,
-    /// Show thinking blocks in the transcript dump.
+    /// Show thinking blocks in the transcript dump (the `details` level; only with --frame).
     #[arg(long, default_value_t = false)]
     show_thinking: bool,
+    /// Render each thought and tool call as one summary line (the `compactSteps` setting; only
+    /// with --frame).
+    #[arg(long, default_value_t = false)]
+    compact_steps: bool,
+    /// Expand every step, as the expand/collapse-all shortcut does (only with --frame).
+    #[arg(long, default_value_t = false)]
+    expand_all: bool,
+    /// Toggle transcript entry N (0-based) as a click on it does; repeatable, applied after
+    /// --expand-all (only with --frame).
+    #[arg(long, value_name = "N")]
+    expand_entry: Vec<usize>,
     /// Panic mid-loop after the first paint (the exit-restore verifier's
     /// panic-path driver: a real unwind on the live surface).
     #[arg(long, default_value_t = false)]
@@ -87,8 +99,18 @@ fn replay() -> Result<()> {
         Some(p) => std::path::PathBuf::from(p),
         None => newest_session()?,
     };
-    let stream = JsonlSessionStream::from_path(&path)?;
-    let _ = args.show_thinking;
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading session {}", path.display()))?;
+    let entries = pa_tui::session::parse_jsonl(&raw)?;
+    // The session header names the working directory the splash shows.
+    let cwd = entries.iter().find_map(|entry| {
+        if let pa_types::session::FileEntry::Header { header } = entry {
+            Some(header.cwd.clone())
+        } else {
+            None
+        }
+    });
+    let stream = JsonlSessionStream::from_entries(entries);
 
     if let Some(size) = &args.frame {
         let (w, h) = size
@@ -97,6 +119,14 @@ fn replay() -> Result<()> {
             .context("--frame expects WxH, e.g. 80x24")?;
         let theme = Theme::builtin(&args.theme, ColorMode::TrueColor);
         let mut view = AgentView::new(theme);
+        view.chrome.version = env!("CARGO_PKG_VERSION").to_string();
+        if let Some(cwd) = cwd {
+            view.chrome.cwd = cwd;
+        }
+        view.compact_steps = args.compact_steps;
+        if args.show_thinking {
+            view.detail = pa_tui::chat::Detail::Details;
+        }
         let mut stream: Box<dyn SessionStream> = Box::new(stream);
         while let pa_tui::session::SessionEvent::Item(item) = stream.poll()? {
             if let TranscriptItem::ModelChange { provider, model_id } = &item {
@@ -105,10 +135,26 @@ fn replay() -> Result<()> {
             }
             view.push(item);
         }
-        for line in render_frame_text(&mut view, w, h) {
-            println!("{line}");
+        // The same view state the shortcut and a click flip.
+        if args.expand_all {
+            view.toggle_all_steps();
         }
-        let _ = &args.color;
+        for &entry in &args.expand_entry {
+            anyhow::ensure!(
+                entry < view.chat_len(),
+                "--expand-entry {entry}: the transcript has {} entries",
+                view.chat_len()
+            );
+            view.toggle_card_expansion(entry);
+        }
+        if args.color {
+            let frame = render_frame_styled(&mut view, w, h);
+            print!("{}", pa_tui::ansi::lines_to_ansi_block(&frame, w.into()));
+        } else {
+            for line in render_frame_text(&mut view, w, h) {
+                println!("{line}");
+            }
+        }
         return Ok(());
     }
 

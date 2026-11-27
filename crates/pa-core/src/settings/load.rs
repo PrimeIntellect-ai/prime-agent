@@ -61,6 +61,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "autocompleteMaxVisible",
     "showHardwareCursor",
     "emojiShortcodes",
+    "compactSteps",
     "markdown",
     "warnings",
     "sessionDir",
