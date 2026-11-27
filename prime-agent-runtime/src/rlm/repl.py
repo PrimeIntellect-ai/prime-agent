@@ -93,6 +93,10 @@ _active: dict[str, asyncio.Task[Any]] = {}
 _interrupted: set[str] = set()
 _cell_counter = 0
 _pending_host: dict[str, "asyncio.Future[dict[str, Any]]"] = {}
+# Synchronous host requests by id: [reply-ready event, reply]. The reader
+# thread fills them directly, so a blocked loop thread is no obstacle.
+_pending_host_sync: dict[str, list[Any]] = {}
+_host_sync_closed = False
 # Set on the loop thread once stdin hits EOF or a shutdown request arrives; no
 # host reply can arrive after that, so waiting (and future) host_request calls fail.
 _host_closed = False
@@ -117,13 +121,19 @@ _handoff_interrupted: set[str] = set()
 # Execute handlers run as tasks so a new cell can start while a backgrounded
 # one waits at an await point; shutdown cancels the set.
 _cell_tasks: "set[asyncio.Task[None]]" = set()
+# The request behind each running cell's `<cell-N>` code file: names the cell
+# that holds the kernel in a KernelBusy refusal.
+_cell_files: dict[str, str] = {}
 # How long a new cell waits for a running cell's synchronous code to reach
 # an await point before the kernel refuses it.
 _SYNC_CELL_ADMISSION_WAIT_S = 5.0
 _KERNEL_BUSY_SYNC_CELL = (
-    "A backgrounded cell is running synchronous code, so this cell did not run. "
-    "A new cell can start while the backgrounded cell waits at an await point. "
-    "Try again later, or end the turn and read the cell's completion notice when it arrives."
+    "cell '{holder}' is running blocking code and holds the kernel, so this cell did not run. "
+    'Retry with `stop_cell: "{holder}"` to stop it and run this cell.'
+)
+_KERNEL_BUSY_UNKNOWN_CELL = (
+    "a backgrounded cell is running blocking code and holds the kernel, so this cell did not run. "
+    "Retry with `stop_cell` set to the cell id from its auto-background notice to stop it and run this cell."
 )
 
 
@@ -212,22 +222,42 @@ def active_cell_task() -> asyncio.Task[Any] | None:
     return next((task for task in reversed(tasks) if not task.done()), None)
 
 
-def _beside_sync_cell() -> bool:
-    """Whether a cell is running and the loop thread is inside cell code.
+def _loop_cell_files() -> list[str]:
+    """The `<cell-N>` code files on the loop thread's stack, innermost first.
 
     A cell waiting at an await point has no frame on the main thread's
     stack; a cell running synchronous code (or blocked in a sync call) does.
     Read from the reader thread, so the answer is a snapshot.
     """
-    with _interrupt_lock:
-        if not _active:
-            return False
+    files: list[str] = []
     frame = sys._current_frames().get(threading.main_thread().ident)  # noqa: SLF001
     while frame is not None:
         if frame.f_code.co_filename.startswith("<cell-"):
-            return True
+            files.append(frame.f_code.co_filename)
         frame = frame.f_back
-    return False
+    return files
+
+
+def _beside_sync_cell() -> bool:
+    """Whether a cell is running and the loop thread is inside cell code."""
+    with _interrupt_lock:
+        if not _active:
+            return False
+    return bool(_loop_cell_files())
+
+
+def _kernel_busy_message() -> str:
+    """The refusal naming the cell whose code holds the loop thread.
+
+    The outermost running cell's frame names it: inner frames can belong to
+    functions defined by earlier cells, finished or still running.
+    """
+    files = _loop_cell_files()
+    with _interrupt_lock:
+        holders = [_cell_files[name] for name in files if name in _cell_files]
+    if not holders:
+        return _KERNEL_BUSY_UNKNOWN_CELL
+    return _KERNEL_BUSY_SYNC_CELL.format(holder=holders[-1])
 
 
 def _admit_beside_sync_cell(req: dict[str, Any], queue: asyncio.Queue[dict[str, Any]]) -> None:
@@ -249,7 +279,7 @@ def _admit_beside_sync_cell(req: dict[str, Any], queue: asyncio.Queue[dict[str, 
             if interrupted:
                 _send({"event": "error", "id": rid, "ename": "KeyboardInterrupt", "evalue": "", "traceback": ["KeyboardInterrupt\n"]})
             else:
-                _send({"event": "error", "id": rid, "ename": "KernelBusy", "evalue": _KERNEL_BUSY_SYNC_CELL, "traceback": []})
+                _send({"event": "error", "id": rid, "ename": "KernelBusy", "evalue": _kernel_busy_message(), "traceback": []})
             _send({"event": "done", "id": rid, "status": "error"})
             return
         time.sleep(0.02)
@@ -271,6 +301,42 @@ async def host_request(data: dict[str, Any]) -> dict[str, Any]:
         return await future
     finally:
         _pending_host.pop(rid, None)
+
+
+def host_request_sync(data: dict[str, Any]) -> dict[str, Any]:
+    """Send one typed request to the host and block until its raw reply.
+
+    For synchronous APIs (a harness write in a cell): the reader thread
+    resolves the reply without the event loop, so blocking the loop thread
+    here cannot deadlock."""
+    if _loop is None:
+        raise RuntimeError("repl runtime is not serving")
+    if _host_closed:
+        raise RuntimeError("host connection closed; host_request cannot be answered")
+    _check_payload("host_request", data)
+    rid = uuid.uuid4().hex
+    slot: list[Any] = [threading.Event(), None]
+    _pending_host_sync[rid] = slot
+    try:
+        if _host_sync_closed:
+            raise RuntimeError("host connection closed; host_request cannot be answered")
+        _send({"event": "host_request", "id": rid, "data": data})
+        slot[0].wait()
+        return slot[1]
+    finally:
+        _pending_host_sync.pop(rid, None)
+
+
+def _fail_pending_sync_host_requests() -> None:
+    """Reader-thread half of teardown for synchronous waiters: no reply can
+    arrive anymore, and their thread may be the loop thread itself."""
+    global _host_sync_closed
+    _host_sync_closed = True
+    for slot in list(_pending_host_sync.values()):
+        if slot[0].is_set():
+            continue  # its reply already arrived
+        slot[1] = {"status": "error", "error": "host connection closed; host_request cannot be answered"}
+        slot[0].set()
 
 
 def _fail_pending_host_requests() -> None:
@@ -296,6 +362,11 @@ def teardown_started() -> bool:
 def _resolve_host_reply(rid: str, data: dict[str, Any]) -> None:
     """Reader-thread half of the host bridge; late/unknown replies are dropped."""
     assert _loop is not None
+    slot = _pending_host_sync.get(rid)
+    if slot is not None:
+        slot[1] = data
+        slot[0].set()
+        return
 
     def deliver() -> None:
         future = _pending_host.get(rid)
@@ -769,6 +840,8 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     cell_id = req["id"]
     _cell_counter += 1
     filename = f"<cell-{_cell_counter}>"
+    with _interrupt_lock:
+        _cell_files[filename] = cell_id
     execution = _CellExecution()
     cell_token = _current_cell.set(cell_id)
     execution_token = _current_cell_execution.set(execution)
@@ -805,6 +878,8 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     finally:
         execution.owner = None
         execution.finished.set()
+        with _interrupt_lock:
+            del _cell_files[filename]
         _current_cell_execution.reset(execution_token)
         _current_cell.reset(cell_token)
 
@@ -1749,6 +1824,7 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
     if rtype == "shutdown":
         # No host reply follows a shutdown; a cell awaiting host_request
         # must fail now or it would block _serve from ever consuming this.
+        _fail_pending_sync_host_requests()
         _loop.call_soon_threadsafe(_fail_pending_host_requests)
     _loop.call_soon_threadsafe(queue.put_nowait, req)
 
@@ -1770,6 +1846,7 @@ def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
     # Host closed stdin: shut the runtime down. The marker distinguishes
     # this from the host's explicit shutdown request (which runs after the
     # host flushed its own final snapshot, so no runtime-side flush runs).
+    _fail_pending_sync_host_requests()
     _loop.call_soon_threadsafe(_fail_pending_host_requests)
     _loop.call_soon_threadsafe(queue.put_nowait, {"type": "shutdown", "eof": True})
 

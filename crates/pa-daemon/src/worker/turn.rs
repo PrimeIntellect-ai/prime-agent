@@ -175,7 +175,7 @@ impl TurnRunner {
     /// event here — sequenced by this runner so they never interleave with
     /// a turn's rows.
     async fn apply_parked_refine_replies(&self) {
-        while let Some(outcome) = self.engine.apply_pending_refine_outcome().await {
+        while let Some((source, outcome)) = self.engine.apply_pending_refine_outcome().await {
             let origin = {
                 let core = self.core.lock().unwrap();
                 core.store
@@ -188,6 +188,7 @@ impl TurnRunner {
                     &self.events,
                     &session_id,
                     &generation,
+                    source,
                     outcome,
                 );
             }
@@ -969,9 +970,10 @@ impl TurnRunner {
                         "type": "refine_complete",
                         "result": result,
                     })],
-                    EngineEvent::RefineFailed { error } => vec![json!({
+                    EngineEvent::RefineFailed { error, source } => vec![json!({
                         "type": "refine_failed",
                         "error": error,
+                        "source": source.as_str(),
                     })],
                     // The loop's run-boundary frames (TS `agent_start`/
                     // `agent_end`): the run's whole message set rides

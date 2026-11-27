@@ -1,0 +1,1 @@
+- Factory specs are checked by one validator in Rust: a factory harness write, a run start, `prime-agent factory import`, and the machine library list all use it, so a structurally broken `MACHINE.md` now shows as a warning in `factory list` without starting a kernel. A factory harness write outside a Prime Agent session is refused.

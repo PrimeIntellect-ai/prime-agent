@@ -121,7 +121,7 @@ fn attach_transitions(transitions: &[Value], order: &mut [StateOut], problems: &
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        if let Some(when) = transition.get("when") {
+        if let Some(when) = transition.get("when").filter(|when| !when.is_null()) {
             let from = transition
                 .get("from")
                 .map(Value::to_string)
@@ -158,6 +158,11 @@ fn attach_transitions(transitions: &[Value], order: &mut [StateOut], problems: &
                     }
                 }
                 match index.get(&to) {
+                    Some(&at) if !order[at].join.is_empty() => {
+                        problems.push(format!(
+                            "more than one join ends at state {to:?}, which machine.toml cannot express"
+                        ));
+                    }
                     Some(&at) => order[at].join = members,
                     None => problems.push(format!("a join ends at unknown state {to:?}")),
                 }

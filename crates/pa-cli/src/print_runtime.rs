@@ -1823,6 +1823,12 @@ pub(crate) fn emit_goal_cap_result(
     }
 }
 
+/// The text-mode report of a failed refinement; json mode streams the
+/// `refine_failed` event instead. Both print paths print it.
+pub(crate) fn emit_refinement_failure(error: &str) {
+    eprintln!("pa-cli: refinement failed: {error}");
+}
+
 /// The text-mode terminal output: the selected primary message (an error to
 /// stderr with exit 1, the settled answer to stdout) and the compaction
 /// outcomes after it. Both print paths read the session's messages into it.

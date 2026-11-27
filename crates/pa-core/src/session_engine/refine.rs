@@ -102,7 +102,9 @@ pub enum RefinementSource {
 }
 
 impl RefinementSource {
-    fn as_str(self) -> &'static str {
+    /// The wire and history name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             RefinementSource::Auto => "auto",
             RefinementSource::User => "user",

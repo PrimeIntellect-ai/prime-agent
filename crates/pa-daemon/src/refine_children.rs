@@ -194,11 +194,11 @@ impl AgentSessionEngine {
         true
     }
 
-    /// Apply the oldest parked outcome at the session's idle boundary.
-    /// `None` when nothing is parked.
+    /// Apply the oldest parked outcome at the session's idle boundary,
+    /// with its flight's source. `None` when nothing is parked.
     pub(crate) async fn apply_pending_refine_outcome(
         &self,
-    ) -> Option<anyhow::Result<CommittedRefinement>> {
+    ) -> Option<(RefinementSource, anyhow::Result<CommittedRefinement>)> {
         if self
             .pending_refine_outcomes
             .lock()
@@ -217,7 +217,8 @@ impl AgentSessionEngine {
                 .unwrap_or_else(PoisonError::into_inner);
             (!pending.is_empty()).then(|| pending.remove(0))
         }?;
-        Some(self.apply_flight_outcome(pending).await)
+        let source = pending.flight.source;
+        Some((source, self.apply_flight_outcome(pending).await))
     }
 
     /// Commit one refinement child's proposal, then finish the
@@ -421,7 +422,8 @@ mod tests {
                 .runtime
                 .block_on(async { engine.apply_pending_refine_outcome().await })
         };
-        let first = apply().expect("a parked outcome").expect("the first apply");
+        let (_, first) = apply().expect("a parked outcome");
+        let first = first.expect("the first apply");
         assert!(first.result.applied_edits[0].applied);
         assert!(
             first
@@ -469,6 +471,7 @@ mod tests {
             .runtime
             .block_on(async { engine.apply_pending_refine_outcome().await })
             .expect("the parked failure applies")
+            .1
             .expect_err("the refinement fails");
         assert!(
             error.to_string().contains("Child worker unreachable"),

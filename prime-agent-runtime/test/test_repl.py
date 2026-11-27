@@ -2189,7 +2189,20 @@ class ConcurrentCellTest(unittest.TestCase):
         self.assertEqual(dones, [("next", "error"), ("slow", "ok")])
         refusal = next(e for e in events if e.get("event") == "error" and e.get("id") == "next")
         self.assertEqual(refusal["ename"], "KernelBusy")
+        self.assertIn("cell 'slow' is running blocking code", refusal["evalue"])
         self.assertNotIn("next ran", stream_text(events, "stdout"))
+
+    def test_the_refusal_names_the_running_cell_inside_an_earlier_cells_function(self):
+        self.repl.execute("define", "import time\ndef block():\n    print('started')\n    time.sleep(30)")
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "holder", "code": "block()"})
+        self.until_started("holder", events)
+        refused = self.repl.execute("next", "print('next ran')")
+        refusal = next(e for e in refused if e.get("event") == "error" and e.get("id") == "next")
+        self.assertEqual(refusal["ename"], "KernelBusy")
+        self.assertIn("cell 'holder' is running blocking code", refusal["evalue"])
+        self.repl.send({"type": "interrupt", "id": "holder"})
+        self.assertEqual(one(self.repl.until_done("holder"), "done")["status"], "error")
 
     def test_interrupting_the_awaiting_cell_leaves_the_synchronous_cell_running(self):
         events: list[dict] = []
@@ -2256,6 +2269,24 @@ class EofFinalFlushTest(unittest.TestCase):
         with mock.patch.object(repl_module, "_flush_final_snapshot", lambda flushed_ns: flushed.append(flushed_ns["x"])):
             asyncio.run(run())
         self.assertEqual(flushed, [1, 42])
+
+
+class SyncHostRequestTeardownTest(unittest.TestCase):
+    """In-process checks of the synchronous host-request teardown."""
+
+    def test_teardown_keeps_a_reply_that_already_arrived(self) -> None:
+        import rlm.repl as repl
+
+        answered = [threading.Event(), {"status": "ok", "result": {"errors": []}}]
+        answered[0].set()
+        waiting = [threading.Event(), None]
+        repl._pending_host_sync.update({"answered": answered, "waiting": waiting})
+        self.addCleanup(repl._pending_host_sync.clear)
+        self.addCleanup(setattr, repl, "_host_sync_closed", False)
+        repl._fail_pending_sync_host_requests()
+        self.assertEqual(answered[1], {"status": "ok", "result": {"errors": []}})
+        self.assertTrue(waiting[0].is_set())
+        self.assertEqual(waiting[1]["status"], "error")
 
 
 class FinishRequestTest(unittest.TestCase):
