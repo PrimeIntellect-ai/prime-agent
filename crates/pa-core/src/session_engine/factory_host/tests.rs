@@ -1341,29 +1341,38 @@ fn factory_compile_resolves_names_through_the_library_scan() {
     );
 }
 
-/// `factory.limits` answers the `max_transitions` bound for a spec inside
-/// the limits, else every bound it breaks.
+/// `factory.validate` answers the spec's errors (structure, then limits),
+/// then the name's and description's, and the `max_transitions` bound.
 #[tokio::test]
-async fn factory_limits_checks_a_stored_spec() {
+async fn factory_validate_checks_a_spec_and_its_export_fields() {
     let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
     super::register_factory_compile_host_handler(&mut handlers, Path::new("/nonexistent"));
     let handler = handlers
-        .get(super::FACTORY_LIMITS_REQUEST_TYPE)
+        .get(super::FACTORY_VALIDATE_REQUEST_TYPE)
         .unwrap()
         .clone();
     let call =
         |data: serde_json::Value| handler(crate::kernel::shared::HostRequestPayload { data });
+    let valid = json!({"states": [{"id": "a", "entry": true, "subagent": "w"}]});
     assert_eq!(
-        call(json!({"spec": {"run": {"max_parallel": 4}, "states": []}}))
-            .await
-            .unwrap(),
-        json!({"max_transitions": 10_000})
+        call(json!({"spec": valid})).await.unwrap(),
+        json!({"errors": [], "max_transitions": 10_000})
     );
+    let reply = call(json!({
+        "spec": {"run": {"max_parallel": 65}, "states": [{"id": "a", "subagent": "w", "retries": 11}]},
+        "name": "Bad Name",
+        "description": "two\nlines",
+    }))
+    .await
+    .unwrap();
     assert_eq!(
-        call(json!({"spec": {"run": {"max_parallel": 65}, "states": [{"id": "a", "retries": 11}]}}))
-            .await
-            .unwrap_err()
-            .to_string(),
-        "run max_parallel must be an integer between 1 and 64; state a retries must be an integer between 0 and 10"
+        reply["errors"],
+        json!([
+            "state a retries must be an integer between 0 and 10",
+            "factory machine requires at least one entry state",
+            "run max_parallel must be an integer between 1 and 64",
+            "machine name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)",
+            "frontmatter description must be a single line",
+        ])
     );
 }

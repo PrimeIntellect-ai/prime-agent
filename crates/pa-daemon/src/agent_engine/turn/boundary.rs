@@ -135,6 +135,7 @@ impl AgentSessionEngine {
                     eprintln!("pa-daemon: the requested refinement failed: {error:#}");
                     if !emit(EngineEvent::RefineFailed {
                         error: format!("{error:#}"),
+                        source: pa_core::session_engine::refine::RefinementSource::SelfRefine,
                     }) {
                         return BoundaryRun::Cancelled;
                     }
@@ -271,7 +272,7 @@ mod tests {
             .iter()
             .find(|event| matches!(event, EngineEvent::RefineFailed { .. }))
             .expect("the refusal surfaced");
-        let EngineEvent::RefineFailed { error } = failure else {
+        let EngineEvent::RefineFailed { error, .. } = failure else {
             unreachable!("matched above")
         };
         assert!(

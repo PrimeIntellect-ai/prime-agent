@@ -154,3 +154,25 @@ fn a_name_belongs_to_the_first_folder_that_claims_it() {
     );
     assert_eq!(library.warnings.len(), 2, "{:?}", library.warnings);
 }
+
+#[test]
+fn a_structurally_invalid_machine_md_is_a_warning_not_a_machine() {
+    let user = tempfile::tempdir().unwrap();
+    write_md_machine(
+        user.path(),
+        "lost",
+        "lost",
+        r#"{"states": [{"id": "a", "entry": true}]}"#,
+    );
+    let library = scan_library(&[Level {
+        source: "user".to_string(),
+        dir: user.path().to_path_buf(),
+    }]);
+    assert_eq!(library.machines().count(), 0);
+    assert_eq!(library.warnings.len(), 1);
+    assert!(
+        library.warnings[0].contains("state a requires a subagent"),
+        "{:?}",
+        library.warnings
+    );
+}

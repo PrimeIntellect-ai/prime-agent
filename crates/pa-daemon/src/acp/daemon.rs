@@ -45,12 +45,21 @@ use super::wire_events::{self, WireMappingState};
 /// Response timeout for session-scoped commands.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-enum LinkFrame {
-    Event(Value),
+/// One frame the link's reader classified, in wire order.
+enum ReadFrame {
     Response(DaemonResponse),
+    Frame(LinkFrame),
+}
+
+/// A frame for the link's consumer (responses go to their waiters).
+pub(crate) enum LinkFrame {
+    Event(Value),
     /// The daemon-global heartbeat-catalog broadcast the supervisor
     /// re-broadcasts to every client (`heartbeats_changed`).
     HeartbeatsChanged,
+    /// A worker re-host moved an attached session to a new active id
+    /// (`session_binding`).
+    SessionBinding(Value),
 }
 
 /// A client connection to the supervisor socket: JSONL command envelopes
@@ -62,16 +71,18 @@ pub(crate) struct DaemonLink {
     /// frame the reader read is delivered): every new request fails
     /// fast instead of waiting for a response no one will send.
     closed: Arc<std::sync::atomic::AtomicBool>,
-    frames: Mutex<mpsc::UnboundedReceiver<LinkFrame>>,
+    frames: Mutex<mpsc::UnboundedReceiver<ReadFrame>>,
     protocol_version: u64,
     /// The daemon hello's advertised server capabilities: the gate for
     /// capability-scoped worker commands.
     server_capabilities: Vec<String>,
     next_request_id: std::sync::atomic::AtomicU64,
+    /// The mode name that prefixes request and client ids (`acp`, `a2a`).
+    label: &'static str,
 }
 
 impl DaemonLink {
-    async fn connect(socket_path: &Path) -> anyhow::Result<Self> {
+    pub(crate) async fn connect(socket_path: &Path, label: &'static str) -> anyhow::Result<Self> {
         let stream = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             pa_types::platform::transport::connect_transport(socket_path),
@@ -80,7 +91,7 @@ impl DaemonLink {
         .map_err(|_| anyhow::anyhow!("timed out connecting to the daemon socket"))??;
         let (reader_half, writer_half) = stream.split();
         let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
-        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<LinkFrame>();
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<ReadFrame>();
         let (hello_tx, hello_rx) = oneshot::channel::<Value>();
         let pending: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<DaemonResponse>>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -129,13 +140,16 @@ impl DaemonLink {
                         else {
                             continue;
                         };
-                        let _ = frame_tx.send(LinkFrame::Response(response));
+                        let _ = frame_tx.send(ReadFrame::Response(response));
                     }
                     "session_event" => {
-                        let _ = frame_tx.send(LinkFrame::Event(value));
+                        let _ = frame_tx.send(ReadFrame::Frame(LinkFrame::Event(value)));
                     }
                     "heartbeats_changed" => {
-                        let _ = frame_tx.send(LinkFrame::HeartbeatsChanged);
+                        let _ = frame_tx.send(ReadFrame::Frame(LinkFrame::HeartbeatsChanged));
+                    }
+                    "session_binding" => {
+                        let _ = frame_tx.send(ReadFrame::Frame(LinkFrame::SessionBinding(value)));
                     }
                     _ => {}
                 }
@@ -174,7 +188,35 @@ impl DaemonLink {
             protocol_version: version,
             server_capabilities,
             next_request_id: std::sync::atomic::AtomicU64::new(0),
+            label,
         })
+    }
+
+    /// The next event or broadcast frame, in wire order. Responses are
+    /// handed to their waiters on the way, so every event the daemon sent
+    /// before a response is returned before that response resolves. `None`
+    /// once the socket closed: the pending requests fail and later requests
+    /// fail fast. One consumer task calls this.
+    pub(crate) async fn next_frame(&self) -> Option<LinkFrame> {
+        let mut frames = self.frames.lock().await;
+        loop {
+            match frames.recv().await {
+                Some(ReadFrame::Response(response)) => {
+                    let id = response.id.clone().unwrap_or_default();
+                    if let Some(tx) = self.pending.lock().unwrap().remove(&id) {
+                        let _ = tx.send(response);
+                    }
+                }
+                Some(ReadFrame::Frame(frame)) => return Some(frame),
+                None => {
+                    // The flag goes up before the clear; `dispatch` covers
+                    // the race.
+                    self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.pending.lock().unwrap().clear();
+                    return None;
+                }
+            }
+        }
     }
 
     /// Send one command envelope and wait for the matching response
@@ -209,16 +251,35 @@ impl DaemonLink {
         self.exchange(command, None).await
     }
 
-    /// One exchange: register the response slot, send the envelope, and
-    /// wait for the answer.
+    /// One exchange: send the envelope, then wait for the answer.
     async fn exchange(
         &self,
         command: DaemonCommand,
         timeout: Option<std::time::Duration>,
     ) -> anyhow::Result<DaemonResponse> {
+        let (id, rx) = self.dispatch(command)?;
+        match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, rx).await.map_err(|_| {
+                self.pending.lock().unwrap().remove(&id);
+                anyhow::anyhow!("timed out waiting for the daemon response")
+            })?,
+            None => rx.await,
+        }
+        .map_err(|_| anyhow::anyhow!("the daemon connection closed mid-request"))
+    }
+
+    /// Register the response slot and queue the envelope on the writer,
+    /// synchronously: commands dispatched one after another reach the
+    /// socket in that order. The receiver answers once the response
+    /// arrives; it fails when the link closes first.
+    pub(crate) fn dispatch(
+        &self,
+        command: DaemonCommand,
+    ) -> anyhow::Result<(String, oneshot::Receiver<DaemonResponse>)> {
         use std::sync::atomic::Ordering;
         let id = format!(
-            "acp-{}",
+            "{}-{}",
+            self.label,
             self.next_request_id.fetch_add(1, Ordering::SeqCst) + 1
         );
         let envelope = DaemonCommandEnvelope {
@@ -228,7 +289,7 @@ impl DaemonLink {
                 name: DAEMON_PROTOCOL_NAME.to_string(),
                 version: self.protocol_version,
             },
-            client_id: Some(format!("acp:{}", std::process::id())),
+            client_id: Some(format!("{}:{}", self.label, std::process::id())),
             command,
         };
         let line = serde_json::to_string(&envelope)?;
@@ -249,14 +310,7 @@ impl DaemonLink {
             self.pending.lock().unwrap().remove(&id);
             anyhow::bail!("the daemon connection is closed");
         }
-        match timeout {
-            Some(timeout) => tokio::time::timeout(timeout, rx).await.map_err(|_| {
-                self.pending.lock().unwrap().remove(&id);
-                anyhow::anyhow!("timed out waiting for the daemon response")
-            })?,
-            None => rx.await,
-        }
-        .map_err(|_| anyhow::anyhow!("the daemon connection closed mid-request"))
+        Ok((id, rx))
     }
 }
 
@@ -367,15 +421,14 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
         }
     });
 
-    let link = Arc::new(DaemonLink::connect(&options.socket_path).await?);
+    let link = Arc::new(DaemonLink::connect(&options.socket_path, "acp").await?);
     let state = Arc::new(Mutex::new(DaemonAcpState::default()));
 
     {
         let link = Arc::clone(&link);
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            let mut frames = link.frames.lock().await;
-            while let Some(frame) = frames.recv().await {
+            while let Some(frame) = link.next_frame().await {
                 match frame {
                     LinkFrame::Event(frame) => {
                         let event = frame.get("event").cloned().unwrap_or(Value::Null);
@@ -436,12 +489,8 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                             });
                         }
                     }
-                    LinkFrame::Response(response) => {
-                        let id = response.id.clone().unwrap_or_default();
-                        if let Some(tx) = link.pending.lock().unwrap().remove(&id) {
-                            let _ = tx.send(response);
-                        }
-                    }
+                    // The ACP mode keeps its startup binding.
+                    LinkFrame::SessionBinding(_) => {}
                     // Heartbeats are connection-scoped, not session events,
                     // so the consumer maps the broadcast directly instead of
                     // `wire_updates`: TS publishes the change at origin turn 0
@@ -467,13 +516,6 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                     }
                 }
             }
-            // The reader hit the socket close and every frame it read
-            // has been delivered: fail the still-pending requests
-            // (dropping a sender answers with the mid-request error)
-            // and fail every later request fast. The flag goes up
-            // before the clear; `request` covers the race.
-            link.closed.store(true, std::sync::atomic::Ordering::SeqCst);
-            link.pending.lock().unwrap().clear();
         });
     }
     bind_daemon_session(&link, &state, &options).await?;
@@ -956,7 +998,7 @@ async fn run_cancel_stop(
 /// TS `stopSessionWork`: abort the worker's running and queued work, stop
 /// the owned admission (a prompt sent before the stop but committed after
 /// the abort), wait the idle, then cancel the RLM children.
-async fn stop_session_work(
+pub(crate) async fn stop_session_work(
     link: &Arc<DaemonLink>,
     daemon_session_id: &str,
     admission_id: Option<&str>,
@@ -1057,26 +1099,7 @@ async fn acquire_stop_input_pause(
         hosted.input_pause_key = Some(lease_key.clone());
         (hosted.daemon_active_session_id.clone(), lease_key)
     };
-    let response = link
-        .request(DaemonCommand::AcquireSessionInputPause {
-            id: None,
-            active_session_id: daemon_session_id.clone(),
-            lease_key: lease_key.clone(),
-            rest: Map::default(),
-        })
-        .await?;
-    if !response.success {
-        anyhow::bail!(response
-            .error
-            .unwrap_or_else(|| "unknown error".to_string()));
-    }
-    let pause_id = response
-        .data
-        .unwrap_or(Value::Null)
-        .get("pauseId")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("the daemon returned no session input pause id"))?;
+    let pause_id = acquire_session_input_pause(link, &daemon_session_id, &lease_key).await?;
     {
         let mut guard = state.lock().await;
         if let Some(hosted) = guard
@@ -1093,7 +1116,36 @@ async fn acquire_stop_input_pause(
     })
 }
 
-async fn release_session_input_pause(
+/// Take a session input pause (queued input does not start turns while it
+/// is held) and answer its pause id.
+pub(crate) async fn acquire_session_input_pause(
+    link: &Arc<DaemonLink>,
+    daemon_session_id: &str,
+    lease_key: &str,
+) -> anyhow::Result<String> {
+    let response = link
+        .request(DaemonCommand::AcquireSessionInputPause {
+            id: None,
+            active_session_id: daemon_session_id.to_string(),
+            lease_key: lease_key.to_string(),
+            rest: Map::default(),
+        })
+        .await?;
+    if !response.success {
+        anyhow::bail!(response
+            .error
+            .unwrap_or_else(|| "unknown error".to_string()));
+    }
+    response
+        .data
+        .unwrap_or(Value::Null)
+        .get("pauseId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("the daemon returned no session input pause id"))
+}
+
+pub(crate) async fn release_session_input_pause(
     link: &Arc<DaemonLink>,
     daemon_session_id: &str,
     pause_id: &str,
@@ -2443,6 +2495,7 @@ mod tests {
             protocol_version: DAEMON_PROTOCOL_VERSION,
             server_capabilities: Vec::new(),
             next_request_id: std::sync::atomic::AtomicU64::new(0),
+            label: "acp",
         });
         let worker = tokio::spawn(async move {
             let mut replacements = Vec::new();
@@ -2591,6 +2644,7 @@ mod tests {
             protocol_version: DAEMON_PROTOCOL_VERSION,
             server_capabilities: Vec::new(),
             next_request_id: std::sync::atomic::AtomicU64::new(0),
+            label: "acp",
         });
         let worker = tokio::spawn(async move {
             let mut steers = Vec::new();
@@ -2744,6 +2798,7 @@ mod tests {
             protocol_version: DAEMON_PROTOCOL_VERSION,
             server_capabilities: Vec::new(),
             next_request_id: std::sync::atomic::AtomicU64::new(0),
+            label: "acp",
         });
         // The admission owns the turn slot (prompt_turn treats a missing or
         // mismatched slot as cancelled and never reaches the link).
@@ -2806,6 +2861,7 @@ mod tests {
             protocol_version: DAEMON_PROTOCOL_VERSION,
             server_capabilities: vec!["background_cell_abort".to_string()],
             next_request_id: std::sync::atomic::AtomicU64::new(0),
+            label: "acp",
         });
         let abort = tokio::spawn({
             let link = Arc::clone(&link);
@@ -2866,6 +2922,7 @@ mod tests {
             protocol_version: DAEMON_PROTOCOL_VERSION,
             server_capabilities: Vec::new(),
             next_request_id: std::sync::atomic::AtomicU64::new(0),
+            label: "acp",
         });
         run_background_cell_abort("daemon-1".to_string(), &link).await;
         assert!(

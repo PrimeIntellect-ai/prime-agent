@@ -7,11 +7,9 @@ use pa_types::ai::UserContent;
 use pa_types::session::CustomMessage;
 use serde_json::json;
 
-/// A child run that failed (TS `rlm_child_failure`).
-pub const RLM_CHILD_FAILURE_CUSTOM_TYPE: &str = "rlm_child_failure";
-/// A child run that ended without an explicit reply or was cancelled
-/// (TS `rlm_child_terminal_notice`).
-pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_notice";
+pub use pa_types::inbox_notice::{
+    RLM_CHILD_FAILURE_CUSTOM_TYPE, RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+};
 
 /// How a child run ended without an explicit reply (TS
 /// `RlmChildTerminalNoticeDetails`).

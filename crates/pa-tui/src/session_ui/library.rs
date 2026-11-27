@@ -467,6 +467,10 @@ impl super::SessionUi {
                 }
                 if let Some(library_view) = view.machines_page_mut() {
                     library_view.set_row_notice(None);
+                }
+                // A run page opened since covers the machines page: the reply
+                // drops, so Esc returns to the list as it was left.
+                if let Some(Overlay::Library(library_view)) = view.overlay.as_mut() {
                     match result {
                         Ok(data) => library_view.apply_detail(&name, &data),
                         Err(error) => library_view.set_error(Some(error)),
