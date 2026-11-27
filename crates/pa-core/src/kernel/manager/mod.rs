@@ -516,9 +516,12 @@ impl Guarded {
 }
 
 impl Inner {
-    /// Fire the stop of every running execution `filter` selects; `false`
-    /// when it selects none.
-    fn stop_active_executions(&self, filter: impl Fn(&ActiveExecution) -> bool) -> bool {
+    /// Fire the stop of every running execution `filter` selects, returning
+    /// the executions it stopped.
+    fn stop_active_executions(
+        &self,
+        filter: impl Fn(&ActiveExecution) -> bool,
+    ) -> Vec<Arc<ActiveExecution>> {
         let executions: Vec<_> = lock(&self.guarded)
             .active_executions
             .iter()
@@ -528,7 +531,7 @@ impl Inner {
         for execution in &executions {
             execution.stop_signal.abort();
         }
-        !executions.is_empty()
+        executions
     }
 
     /// Whether a detached (backgrounded) execution is physically active:
@@ -676,8 +679,10 @@ impl ReplKernelManager {
     /// internal ops (bootstrap, restore, snapshot) are never targeted.
     #[must_use]
     pub fn abort_user_execution(&self) -> bool {
-        self.inner
+        !self
+            .inner
             .stop_active_executions(|execution| !execution.opts.internal)
+            .is_empty()
     }
 
     /// Stop only detached (backgrounded) executions — the scoped idle
@@ -685,8 +690,28 @@ impl ReplKernelManager {
     /// detached execution is running.
     #[must_use]
     pub fn abort_detached_execution(&self) -> bool {
-        self.inner
+        !self
+            .inner
             .stop_active_executions(|execution| execution.detached.load(Ordering::SeqCst))
+            .is_empty()
+    }
+
+    /// Stop the detached (backgrounded) execution `request_id` and wait
+    /// until it settled or its kernel was retired for ignoring the
+    /// interrupt. `false` when no detached execution with that id is running.
+    pub async fn stop_detached_execution(&self, request_id: &str) -> bool {
+        let stopped = self.inner.stop_active_executions(|execution| {
+            execution.request_id == request_id && execution.detached.load(Ordering::SeqCst)
+        });
+        for execution in &stopped {
+            // The execution holds the sender, so the wait cannot fail.
+            let _ = execution
+                .settled_tx
+                .subscribe()
+                .wait_for(|settled| *settled)
+                .await;
+        }
+        !stopped.is_empty()
     }
 
     /// The number of live background `bash()` handles (the count behind
