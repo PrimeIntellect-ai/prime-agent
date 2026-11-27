@@ -227,6 +227,16 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
     return _parse_host_reply(request_type, reply)
 
 
+def host_request_sync(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """``host_request`` for synchronous callers (harness writes): blocks the
+    calling thread until the host replies. Raises RuntimeError when the host
+    reports an error or no host is serving."""
+    from . import repl
+
+    reply = repl.host_request_sync({**(payload or {}), "type": request_type})
+    return _parse_host_reply(request_type, reply)
+
+
 def emit(data: dict[str, Any]) -> None:
     """Ship one display event (dict of MIME type -> JSON payload) to the host."""
     from . import repl

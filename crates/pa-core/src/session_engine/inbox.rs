@@ -20,10 +20,6 @@ use serde_json::{json, Map, Value};
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 
 use super::bash_notices::KernelNotice;
-use super::messages::{
-    ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
-    FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE,
-};
 use pa_types::ai::UserContent;
 use pa_types::session::CustomMessage;
 
@@ -46,9 +42,9 @@ pub const INBOX_PERSISTENCE_ERROR_CLAUSE: &str =
 const JOURNAL_COMPACT_MIN_BYTES: u64 = 1024 * 1024;
 
 use pa_types::inbox_notice::{
-    INBOX_CLASS_AGENT_MESSAGE, INBOX_CLASS_BASH_DONE, INBOX_CLASS_CELL_DONE,
-    INBOX_CLASS_CHILD_EXITED, INBOX_CLASS_CHILD_FAILED, INBOX_CLASS_FACTORY_PROGRESS,
-    INBOX_CLASS_HEARTBEAT,
+    inbox_class_for_custom_type, INBOX_CLASS_AGENT_MESSAGE, INBOX_CLASS_BASH_DONE,
+    INBOX_CLASS_CELL_DONE, INBOX_CLASS_CHILD_EXITED, INBOX_CLASS_CHILD_FAILED,
+    INBOX_CLASS_FACTORY_PROGRESS, INBOX_CLASS_HEARTBEAT,
 };
 
 /// The coalescing batch state the daemon's notice sink owns: the
@@ -172,17 +168,6 @@ impl InboxReadFilter {
     }
 }
 
-/// Which inbox class a kernel notice's custom type routes to, if any.
-#[must_use]
-pub fn inbox_class_for_custom_type(custom_type: &str) -> Option<&'static str> {
-    match custom_type {
-        ASYNC_BASH_COMPLETION_CUSTOM_TYPE => Some(INBOX_CLASS_BASH_DONE),
-        FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE => Some(INBOX_CLASS_FACTORY_PROGRESS),
-        ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE => Some(INBOX_CLASS_CELL_DONE),
-        _ => None,
-    }
-}
-
 /// A notice row's details as message metadata (rows without object
 /// details carry none).
 fn details_meta(details: Option<&Value>) -> Map<String, Value> {
@@ -225,11 +210,11 @@ pub fn inbox_notice_fields(notice: &KernelNotice) -> Option<InboxNotice> {
 /// child-status kind or that carries no text content.
 #[must_use]
 pub fn child_status_notice_fields(custom: &Value) -> Option<InboxNotice> {
-    let class = match custom.get("customType").and_then(Value::as_str)? {
-        super::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE => INBOX_CLASS_CHILD_EXITED,
-        super::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE => INBOX_CLASS_CHILD_FAILED,
-        _ => return None,
-    };
+    let class = custom
+        .get("customType")
+        .and_then(Value::as_str)
+        .and_then(inbox_class_for_custom_type)
+        .filter(|class| matches!(*class, INBOX_CLASS_CHILD_EXITED | INBOX_CLASS_CHILD_FAILED))?;
     let text = match custom.get("content") {
         Some(Value::String(text)) => text.clone(),
         _ => return None,

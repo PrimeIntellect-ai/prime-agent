@@ -618,3 +618,41 @@ fn a_goal_capped_during_the_run_exits_one_with_the_reason() {
         "stderr: {stderr}"
     );
 }
+
+/// A failed `/refine` fails the run with its reason, like the daemonless
+/// run. A plain `/refine` waits for the refinement child, whose reply (the
+/// mock's plain text, not a proposal) fails to parse; a rollback of an
+/// unknown refinement fails inside the command's turn.
+#[test]
+fn a_failed_refine_exits_one_with_the_reason() {
+    let fixture = Fixture::start();
+    let mut client = Client::connect(&fixture.socket);
+    let session_id = fixture.saved_session(&mut client);
+    let session_file = fixture
+        .sessions
+        .join(format!("{session_id}.jsonl"))
+        .canonicalize()
+        .expect("saved session file");
+
+    for (prompt, reason) in [
+        ("/refine", "Refiner did not return a JSON object"),
+        (
+            "/refine rollback ref_missing",
+            "Refinement ref_missing not found",
+        ),
+    ] {
+        wait_until_unhosted(&mut client, &session_file, Duration::from_secs(30));
+        let output = print_command(&fixture, &session_id, prompt)
+            .output()
+            .expect("print output");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{prompt}: {stderr}");
+        assert!(
+            stderr
+                .lines()
+                .filter_map(|line| line.strip_prefix("pa-cli: refinement failed: "))
+                .any(|reported| reported.contains(reason)),
+            "{prompt}: {stderr}"
+        );
+    }
+}

@@ -129,6 +129,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "abort_compaction",
     "abort_branch_summary",
     "abort_retry",
+    "retire_continuations",
     "reload",
     "new_session",
     "switch_session",
@@ -828,6 +829,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::AbortRetry {
             active_session_id, ..
         }
+        | DaemonCommand::RetireContinuations {
+            active_session_id, ..
+        }
         | DaemonCommand::ExecuteBashAndWait {
             active_session_id, ..
         }
@@ -1047,6 +1051,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::AbortCompaction { .. } => "abort_compaction",
         DaemonCommand::AbortBranchSummary { .. } => "abort_branch_summary",
         DaemonCommand::AbortRetry { .. } => "abort_retry",
+        DaemonCommand::RetireContinuations { .. } => "retire_continuations",
         DaemonCommand::ExecuteBashAndWait { .. } => "execute_bash_and_wait",
         DaemonCommand::Reload { .. } => "reload",
         DaemonCommand::NewSession { .. } => "new_session",

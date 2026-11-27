@@ -12,10 +12,10 @@ states are specified for the communication series but gated here:
 the watch host handlers (``rlm.watch.*``) do not exist yet, so a state
 carrying a ``wait`` block is rejected at write time.
 
-This module implements the write-time dry run for both forms -- the machine
-validator, the dag-to-machine compiler, the unified entry point
-(``validate_factory_spec`` detects the form), and a canonicalizer that
-applies defaults and returns the canonical MACHINE form -- plus the
+This module asks the host's Rust validator for the write-time dry run of
+both forms (``check_factory_spec``), compiles dag sugar to machine form,
+and canonicalizes a valid spec (defaults applied, the canonical MACHINE
+form) -- plus the
 executor (``FactoryExecutor`` and the ``rlm.factory`` namespace:
 run/status/stop/resume) that runs canonicalized machines through the
 existing RLM supervisor: states are admitted with ``rlm.spawn``, settled
@@ -59,18 +59,12 @@ from pathlib import Path
 from typing import IO, Any, Callable
 from uuid import uuid4
 
-FAILURE_POLICIES: tuple[str, ...] = ("fail_fast", "continue", "escalate")
 PORT_TYPES: tuple[str, ...] = ("text", "json")
-LIFECYCLES: tuple[str, ...] = ("task", "resident")
 TRANSITION_ON_KINDS: tuple[str, ...] = ("settled",)
-GUARD_OPS: tuple[str, ...] = ("eq", "ne", "gt", "gte", "lt", "lte", "exists", "contains")
-# The numeric limits (states, retries, max_parallel, foreach.max,
-# max_entries, max_transitions, max_children) live only in the Rust
-# ``pa_factory::limits``; a run asks for them through the
-# ``factory.limits`` host request before it starts (``_check_limits``).
-#: Write-time copy of ``pa_factory::limits::MAX_RETRIES``: the harness write
-#: path validates synchronously and must report the same bound message.
-MAX_RETRIES = 10
+# The spec rules and numeric limits live only in the Rust validator
+# (``pa_factory::check_spec``), reached through the ``factory.validate``
+# host request: synchronously from harness writes (``check_factory_spec``),
+# asynchronously at run start (``_validate_for_run``).
 TRANSITIONS_PER_STATE_DEFAULT = 10
 RUN_FAILURE_POLICY_DEFAULT = "escalate"
 RUN_MAX_PARALLEL_DEFAULT = 8
@@ -85,9 +79,6 @@ STATE_MAX_ENTRIES_DEFAULT = 1
 #: time instead of failing every spawn admission.
 SUBAGENT_NAME_MAX_LENGTH = 64
 
-_NODE_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
-_PARAM_NAME_PATTERN = re.compile(r"[a-z_][a-z0-9_]*")
-
 
 def _is_int(value: Any) -> bool:
     """True for real integers; booleans are not accepted as ints."""
@@ -99,85 +90,8 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _is_scalar(value: Any) -> bool:
-    """True for JSON scalars (str, int, float, bool, None); lists and objects are not."""
-    return value is None or isinstance(value, (str, int, float, bool))
-
-
-def _is_positive_int(value: Any) -> bool:
-    return _is_int(value) and value > 0
-
-
-MAX_GUARD_VALUE_DEPTH = 256
-"""Nesting bound on one guard comparison value (``when.value``). Every
-seam the value rides recurses per level — the traversal itself, the
-snapshot's ``deepcopy``, the wire conversion, the reply frames' JSON
-encoder — so a value deeper than this bound cannot ride any of them and
-would exhaust the interpreter's stack on the way to finding out. A
-container nested beyond the bound rejects as part of the same
-finite-JSON-data rule, with the validation answer instead of the crash."""
-
-
-def _value_is_finite(
-    value: Any, _seen: "frozenset[int] | None" = None, _depth: int = 0
-) -> bool:
-    """True when a guard comparison value is JSON clean: every nested
-    float finite, every object key a string, every leaf a JSON scalar,
-    and no cycle.
-    JSON carries no NaN/Infinity tokens, so a non-finite float would
-    serialize as the non-JSON ``NaN``/``Infinity`` tokens and break every
-    strict consumer of the reply frames (the host bridge's parser
-    included) — a machine declaring one is invalid at the source. Object
-    keys must be strings for the same reason at both ends: a non-finite
-    float key carries the token into the frame the same way, and a
-    non-string key (an int, a tuple) is either coerced by the encoder —
-    so the wire object no longer matches the machine's declared one —
-    or rejected by it; either way it is not the declared comparison.
-    Leaves outside JSON's scalar set reject the same way: a tuple (or a
-    set, bytes, any other container the JSON grammar has no spelling
-    for) serializes as something other than the declared shape if the
-    encoder accepts it at all, and the non-finite floats it can carry
-    would ride that path past this check. A self-referential container
-    is rejected too — the encoder refuses circular references outright,
-    so it can never be a valid comparison value — and the traversal
-    stops at the cycle instead of exhausting the interpreter's stack
-    chasing it. ``_seen`` threads the per-branch ancestry (a
-    shared-but-acyclic reference appearing twice stays valid: each
-    branch checks it independently). Depth bounds the nesting the same
-    way: a container nested beyond ``MAX_GUARD_VALUE_DEPTH`` levels
-    cannot ride any of the value's downstream seams (the snapshot's
-    deep copy, the wire conversion, the reply frames' encoder are each
-    recursive per level), so it rejects here with the validation answer
-    instead of exhausting the interpreter's stack further down the
-    write path.
-    """
-    if _depth > MAX_GUARD_VALUE_DEPTH:
-        return False
-    seen = _seen or frozenset()
-    if isinstance(value, (list, dict)):
-        if id(value) in seen:
-            return False
-        seen = seen | {id(value)}
-    if isinstance(value, float):
-        return math.isfinite(value)
-    if isinstance(value, (bool, int, str)) or value is None:
-        return True
-    if isinstance(value, list):
-        return all(_value_is_finite(item, seen, _depth + 1) for item in value)
-    if isinstance(value, dict):
-        return all(
-            isinstance(key, str) and _value_is_finite(item, seen, _depth + 1)
-            for key, item in value.items()
-        )
-    return False
-
-
 def _is_nonempty_str(value: Any) -> bool:
     return isinstance(value, str) and value != ""
-
-
-def _valid_node_id(value: Any) -> bool:
-    return _is_nonempty_str(value) and _NODE_ID_PATTERN.fullmatch(value) is not None
 
 
 def _port_list(node: dict[str, Any], key: str) -> list[Any]:
@@ -197,11 +111,6 @@ def _declared_port_types(node: dict[str, Any], key: str) -> dict[str, str]:
     return ports
 
 
-def _effective_output_types(state: dict[str, Any]) -> dict[str, str]:
-    """Output ports readable from a state: its declared outputs."""
-    return _declared_port_types(state, "outputs")
-
-
 def _input_sources(node: dict[str, Any]) -> list[str]:
     """Source node ids referenced by the node's inputs."""
     sources: list[str] = []
@@ -219,593 +128,68 @@ def _is_machine_form(spec: Any) -> bool:
     return isinstance(spec, dict) and ("states" in spec or "transitions" in spec)
 
 
-# ---------------------------------------------------------------------------
-# Shared field checks (used by both the dag compiler and the machine validator).
-# ---------------------------------------------------------------------------
+FACTORY_SESSION_REQUIRED = "factory entries need a Prime Agent session (the spec validator runs in its host)"
+_UNSET: Any = object()
 
 
-def _validate_run_fields(run: Any, errors: list[str]) -> int | None:
-    """Shared run-block checks. Returns the run budget when valid, else None.
-
-    ``run`` must already be a dict or None; the caller reports "run must be
-    an object" for other shapes.
-    """
-    if not isinstance(run, dict):
-        return None
-    # Typed fields are validated by PRESENCE, not by "is not None": an
-    # explicit JSON null (run.max_parallel: null) must be rejected with the
-    # field's own message, never silently treated as an omitted default
-    # (a null that survived canonicalization reached the executor without a
-    # usable typed limit).
-    if "budget_ms" in run and not _is_positive_int(run.get("budget_ms")):
-        errors.append("run budget_ms must be a positive integer")
-    run_budget = run.get("budget_ms") if _is_positive_int(run.get("budget_ms")) else None
-    if "failure_policy" in run and run.get("failure_policy") not in FAILURE_POLICIES:
-        errors.append(f"run failure_policy must be one of {list(FAILURE_POLICIES)}, got {run.get('failure_policy')!r}")
-    return run_budget
+def _is_json_data(value: Any) -> bool:
+    """True when ``value`` survives a JSON round trip unchanged (no tuples,
+    non-string keys, or non-finite floats), so the spec the host checks is
+    the spec that runs."""
+    try:
+        return json.loads(json.dumps(value, allow_nan=False)) == value
+    except (TypeError, ValueError):
+        return False
 
 
-def _validate_state_fields(
-    state: dict[str, Any],
-    *,
-    run_budget: int | None,
-    states_by_id: dict[str, dict[str, Any]],
-    noun: str,
-    errors: list[str],
-) -> None:
-    """Field rules shared by dag nodes (noun="node") and machine states
-    (noun="state"): subagent forms, lifecycle, budgets, retries, failure
-    policies, port lists, foreach, and the resident exclusions."""
-    ref = state["id"]
-    # Presence-based checks like the run block: an explicit JSON null on a
-    # typed field is rejected with the field's own message instead of
-    # surviving canonicalization as None.
-    lifecycle = state.get("lifecycle", NODE_LIFECYCLE_DEFAULT)
-    if "lifecycle" in state and lifecycle not in LIFECYCLES:
-        errors.append(f"{noun} {ref} lifecycle must be 'task' or 'resident', got {lifecycle!r}")
-    is_resident = lifecycle == "resident"
+def check_factory_spec(
+    spec: Any = _UNSET, *, name: Any = _UNSET, description: Any = _UNSET
+) -> list[str]:
+    """The errors of a factory spec, then of a machine ``name`` and
+    ``description`` when given, from the host's validator
+    (``factory.validate``, the one copy of the rules). Synchronous, for
+    harness writes and exports; raises ``ValueError`` without a host."""
+    from . import host_request_sync
 
-    if state.get("wait") is not None:
-        # Gated: the watch host handlers (rlm.watch.*) arrive with the
-        # communication series; a wait block would silently no-op until then.
-        errors.append(
-            f"{noun} {ref}: wait states require the watch host handlers (rlm.watch.*); "
-            "they arrive with the communication series - remove the wait block until then"
-        )
-
-    subagent = state.get("subagent")
-    if "python" in state:
-        # A pure-Python state runs a callable instead of spawning a child.
-        python = state.get("python")
-        if "subagent" in state:
-            errors.append(f"{noun} {ref} declares both subagent and python; use exactly one")
-        if not (
-            isinstance(python, dict)
-            and _is_nonempty_str(python.get("import"))
-            and _is_nonempty_str(python.get("callable"))
-        ):
-            errors.append(f"{noun} {ref} python requires non-empty 'import' and 'callable' strings")
-        elif "path" in python and not (
-            _is_nonempty_str(python.get("path")) and os.path.isabs(python["path"])
-        ):
-            errors.append(f"{noun} {ref} python path must be an absolute directory when provided")
-        if is_resident:
-            errors.append(f"python {noun} {ref} cannot be resident")
-        if "foreach" in state:
-            errors.append(f"python {noun} {ref} cannot use foreach")
-    elif _is_nonempty_str(subagent):
-        pass  # Harness subagent entry id or title; resolved at run time.
-    elif isinstance(subagent, dict):
-        # Runtime resolution strips these fields (_resolve_subagents /
-        # _validate_spawn_settings), so whitespace-only values are rejected
-        # here too: a persistable factory must be spawnable.
-        if not isinstance(subagent.get("prompt"), str) or not subagent.get("prompt").strip():
-            errors.append(f"{noun} {ref} inline subagent requires a non-empty prompt")
-        for key in ("name", "model", "thinking"):
-            value = subagent.get(key)
-            if value is not None and (not isinstance(value, str) or not value.strip()):
-                errors.append(f"{noun} {ref} inline subagent {key} must be a non-empty string when provided")
-        configured_name = subagent.get("name")
-        if isinstance(configured_name, str) and len(configured_name.strip()) > SUBAGENT_NAME_MAX_LENGTH:
-            errors.append(
-                f"{noun} {ref} inline subagent name must be at most "
-                f"{SUBAGENT_NAME_MAX_LENGTH} characters, got {len(configured_name.strip())}"
-            )
-    else:
-        errors.append(
-            f"{noun} {ref} requires a subagent: a harness subagent id/title string "
-            "or an inline object with a prompt (or a python state: "
-            '{"python": {"import": "<module>", "callable": "<function>"}})'
-        )
-
-    if "emit" in state:
-        # The output contract a machine directory's compiler writes; its
-        # types are checked in Rust (factory.emit / factory.check).
-        emit = state.get("emit")
-        if not (isinstance(emit, dict) and isinstance(emit.get("outputs"), list)):
-            errors.append(f"{noun} {ref} emit must be an object with an outputs list")
-    if "budget_ms" in state:
-        budget = state.get("budget_ms")
-        if not _is_positive_int(budget):
-            errors.append(f"{noun} {ref} budget_ms must be a positive integer")
-        elif run_budget is not None and budget > run_budget:
-            errors.append(f"{noun} {ref} budget_ms {budget} exceeds the run budget_ms {run_budget}")
-
-    if "retries" in state and not (_is_int(state.get("retries")) and 0 <= state.get("retries") <= MAX_RETRIES):
-        errors.append(f"{noun} {ref} retries must be an integer between 0 and {MAX_RETRIES}")
-    elif is_resident and state.get("retries", NODE_RETRIES_DEFAULT) > 0:
-        errors.append(f"resident {noun} {ref} cannot declare retries")
-
-    if "failure_policy" in state and state.get("failure_policy") not in FAILURE_POLICIES:
-        errors.append(
-            f"{noun} {ref} failure_policy must be one of {list(FAILURE_POLICIES)}, got {state.get('failure_policy')!r}"
-        )
-
-    outputs = state.get("outputs")
-    if outputs is not None and not isinstance(outputs, list):
-        errors.append(f"{noun} {ref} outputs must be a list")
-    elif is_resident and isinstance(outputs, list) and outputs:
-        errors.append(f"resident {noun} {ref} cannot declare outputs")
-    # Duplicate ports are tracked with seen sets (one pass over the list):
-    # a rebuild-and-count scan is quadratic in the port count, and a state
-    # with tens of thousands of ports would block write-time validation.
-    seen_output_names: set[Any] = set()
-    reported_duplicate_outputs: set[Any] = set()
-    for index, out in enumerate(_port_list(state, "outputs")):
-        if not isinstance(out, dict):
-            errors.append(f"{noun} {ref} outputs[{index}] must be an object")
-            continue
-        name, port_type = out.get("name"), out.get("type")
-        if not _is_nonempty_str(name):
-            errors.append(f"{noun} {ref} outputs[{index}] requires a non-empty name")
-        elif name in seen_output_names:
-            if name not in reported_duplicate_outputs:
-                reported_duplicate_outputs.add(name)
-                errors.append(f"{noun} {ref} declares duplicate output name {name!r}")
-        else:
-            seen_output_names.add(name)
-        if port_type not in PORT_TYPES:
-            errors.append(f"{noun} {ref} output {name!r} type must be 'text' or 'json'")
-
-    inputs = state.get("inputs")
-    if inputs is not None and not isinstance(inputs, list):
-        errors.append(f"{noun} {ref} inputs must be a list")
-    seen_input_names: set[Any] = set()
-    reported_duplicate_inputs: set[Any] = set()
-    # One output-type map per source state (a rebuild per input line would
-    # make validating many inputs from one source quadratic in the source's
-    # output count).
-    output_types_by_source: dict[str, dict[str, str]] = {}
-    for index, inp in enumerate(_port_list(state, "inputs")):
-        if not isinstance(inp, dict):
-            errors.append(f"{noun} {ref} inputs[{index}] must be an object")
-            continue
-        name, port_type, source = inp.get("name"), inp.get("type"), inp.get("from")
-        optional = inp.get("optional")
-        if optional is not None and not isinstance(optional, bool):
-            errors.append(f"{noun} {ref} input {name!r} optional must be a boolean when provided")
-        if not _is_nonempty_str(name):
-            errors.append(f"{noun} {ref} inputs[{index}] requires a non-empty name")
-        elif name in seen_input_names:
-            if name not in reported_duplicate_inputs:
-                reported_duplicate_inputs.add(name)
-                errors.append(f"{noun} {ref} declares duplicate input name {name!r}")
-        else:
-            seen_input_names.add(name)
-        if port_type not in PORT_TYPES:
-            errors.append(f"{noun} {ref} input {name!r} type must be 'text' or 'json'")
-        if not isinstance(source, str) or "." not in source:
-            errors.append(
-                f"{noun} {ref} input {name!r} requires a 'from' reference of the form '<node_id>.<output_name>'"
-            )
-            continue
-        src_id, _, src_output = source.partition(".")
-        if src_id not in states_by_id:
-            errors.append(f"{noun} {ref} input {name!r} references unknown {noun} {src_id!r}")
-            continue
-        src = states_by_id[src_id]
-        if src.get("lifecycle", NODE_LIFECYCLE_DEFAULT) == "resident":
-            errors.append(f"{noun} {ref} input {name!r} cannot read from resident {noun} {src_id!r}")
-            continue
-        if src_id not in output_types_by_source:
-            output_types_by_source[src_id] = _effective_output_types(src)
-        src_output_types = output_types_by_source[src_id]
-        if src_output not in src_output_types:
-            errors.append(
-                f"{noun} {ref} input {name!r} references output {src_output!r} "
-                f"that {noun} {src_id!r} does not declare"
-            )
-        elif port_type in PORT_TYPES and src_output_types[src_output] != port_type:
-            errors.append(
-                f"{noun} {ref} input {name!r} of type {port_type!r} cannot read from "
-                f"output {src_output!r} of type {src_output_types[src_output]!r}"
-            )
-
-    foreach = state.get("foreach")
-    if foreach is not None:
-        if is_resident:
-            errors.append(f"resident {noun} {ref} cannot use foreach")
-        if not isinstance(foreach, dict):
-            errors.append(f"{noun} {ref} foreach must be an object")
-        else:
-            over = foreach.get("over")
-            if not _is_nonempty_str(over):
-                errors.append(f"{noun} {ref} foreach.over must be a non-empty input name")
-            else:
-                declared_inputs = _declared_port_types(state, "inputs")
-                if over not in declared_inputs:
-                    errors.append(
-                        f"{noun} {ref} foreach.over must name one of this {noun}'s inputs, got {over!r}"
-                    )
-                elif declared_inputs[over] != "json":
-                    errors.append(f"{noun} {ref} foreach.over input {over!r} must have type 'json'")
+    if spec is not _UNSET and not _is_json_data(spec):
+        return ["factory spec must be JSON data: lists, objects with string keys, strings, finite numbers, booleans, null"]
+    payload: dict[str, Any] = {}
+    for key, value in (("spec", spec), ("name", name), ("description", description)):
+        if value is not _UNSET:
+            payload[key] = value
+    try:
+        return host_request_sync("factory.validate", payload)["errors"]
+    except RuntimeError as error:
+        raise ValueError(f"{FACTORY_SESSION_REQUIRED}: {error}") from None
 
 
-# ---------------------------------------------------------------------------
-# Machine-form validation.
-# ---------------------------------------------------------------------------
+async def _validate_for_run(spec: Any) -> int:
+    """Check a spec with the host before a run starts; answers the
+    ``max_transitions`` bound the run caps its default at. Raises
+    ``ValueError`` with every error."""
+    from . import host_request
+
+    reply = await host_request("factory.validate", {"spec": spec})
+    if reply["errors"]:
+        raise ValueError("; ".join(reply["errors"]))
+    return reply["max_transitions"]
 
 
-def _validate_guard(
-    when: Any,
-    index: int,
-    src_state: dict[str, Any],
-    errors: list[str],
-) -> None:
-    if not isinstance(when, dict):
-        errors.append(f"transitions[{index}] when must be an object")
-        return
-    output = when.get("output")
-    src_types = _effective_output_types(src_state)
-    if not _is_nonempty_str(output):
-        errors.append(f"transitions[{index}] when requires a non-empty output")
-    elif output not in src_types:
-        errors.append(
-            f"transitions[{index}] when.output {output!r} is not a declared "
-            f"output of state {src_state.get('id')!r}"
-        )
-    else:
-        path = when.get("path")
-        if path is not None:
-            if not _is_nonempty_str(path):
-                errors.append(f"transitions[{index}] when.path must be a non-empty dotted path")
-            elif src_types[output] != "json":
-                errors.append(
-                    f"transitions[{index}] when.path requires a json output, got text output {output!r}"
-                )
-    op = when.get("op")
-    if op not in GUARD_OPS:
-        errors.append(f"transitions[{index}] when.op must be one of {list(GUARD_OPS)}, got {op!r}")
-        return
-    if op == "exists":
-        return  # existence carries no value
-    value = when.get("value")
-    if op in ("gt", "gte", "lt", "lte"):
-        if not _is_number(value):
-            errors.append(f"transitions[{index}] when.op {op!r} requires a numeric value")
-    elif op == "contains":
-        if not isinstance(value, list) or not value:
-            errors.append(f"transitions[{index}] when.op 'contains' requires a non-empty list value")
-    elif op in ("eq", "ne") and not _is_scalar(value):
-        errors.append(f"transitions[{index}] when.op {op!r} requires a scalar value")
-    if not _value_is_finite(value):
-        errors.append(
-            f"transitions[{index}] when.value must be finite JSON data "
-            "(JSON carries no NaN or Infinity, and only JSON shapes "
-            "serialize: lists, objects, strings, numbers, booleans, null, "
-            f"and no container nests deeper than {MAX_GUARD_VALUE_DEPTH} levels)"
-        )
-
-
-def validate_factory_machine(machine: Any) -> list[str]:
-    """Dry-run validation for a machine-form factory spec.
-
-    Returns a list of human-readable error sentences; an empty list means
-    the machine is valid. Rules: states are 1..1024 with unique slug ids and
-    at least one entry state; every state requires a subagent or a python
-    callable (not both) and entry states declare only optional inputs;
-    resident states declare no outputs, foreach, retries, or outgoing
-    transitions; wait blocks are rejected (the watch host handlers arrive
-    with the communication series); transitions reference
-    existing states (self-loops are legal re-entry) and may carry one guard
-    over the from-state's latest settle output; a transition with a LIST of
-    from-states is a join that fires once every source settled (guards are
-    single-source only). There is no acyclicity requirement: arbitrary
-    state machines, including cycles, validate.
-    """
-    if not isinstance(machine, dict):
-        return ["factory machine must be a JSON object"]
-    errors: list[str] = []
-    run = machine.get("run")
-    if run is not None and not isinstance(run, dict):
-        errors.append("run must be an object")
-        run = None
-    run_budget = _validate_run_fields(run, errors)
-    params = machine.get("params")
-    param_names: set[str] = set()
-    if params is not None:
-        if isinstance(params, dict) and all(
-            isinstance(key, str) and _PARAM_NAME_PATTERN.fullmatch(key) for key in params
-        ):
-            param_names = set(params)
-        else:
-            errors.append("params must be an object keyed by lowercase identifiers")
-
-    states = machine.get("states")
-    if not isinstance(states, list):
-        errors.append("factory machine requires a states list")
-        return errors
-    if not states:
-        errors.append("factory machine must declare at least one state")
-        return errors
-
-    seen_ids: set[str] = set()
-    states_by_id: dict[str, dict[str, Any]] = {}
-    for index, state in enumerate(states):
-        if not isinstance(state, dict):
-            errors.append(f"states[{index}] must be an object")
-            continue
-        state_id = state.get("id")
-        if not _is_nonempty_str(state_id):
-            errors.append(f"states[{index}] requires a non-empty id")
-        elif not _valid_node_id(state_id):
-            errors.append(f"states[{index}] id must match ^[a-z0-9][a-z0-9-]{{0,63}}$, got {state_id!r}")
-        elif state_id in seen_ids:
-            errors.append(f"states[{index}] duplicates state id {state_id!r}")
-        else:
-            seen_ids.add(state_id)
-            states_by_id[state_id] = state
-
-    # Configured inline subagent names label the spawned children
-    # run-scoped (the spawn label prefixes the configured name with the run
-    # id), so two states sharing one name would still collide within a run
-    # on the supervisor's unique sibling-name requirement at spawn time
-    # (one common per-run prefix preserves the relative collision shape);
-    # reject the duplicate at write time instead (the same reason
-    # duplicate state ids are rejected).
-    seen_subagent_names: dict[str, str] = {}
-    for state_id, state in states_by_id.items():
-        _validate_state_fields(
-            state, run_budget=run_budget, states_by_id=states_by_id, noun="state", errors=errors
-        )
-        for inp in _port_list(state, "inputs"):
-            if isinstance(inp, dict) and isinstance(inp.get("name"), str) and inp["name"] in param_names:
-                errors.append(f"state {state_id} input {inp['name']!r} is also a param; rename the input")
-        subagent = state.get("subagent")
-        if isinstance(subagent, dict) and _is_nonempty_str(subagent.get("name")):
-            configured_name = subagent["name"].strip()
-            base_seen = next(
-                (seen for seen in seen_subagent_names if _suffixed_spawn_form(seen, configured_name)),
-                None,
-            )
-            base_current = (
-                None
-                if base_seen is not None
-                else next(
-                    (seen for seen in seen_subagent_names if _suffixed_spawn_form(configured_name, seen)),
-                    None,
-                )
-            )
-            if configured_name in seen_subagent_names:
-                errors.append(
-                    f"state {state_id} subagent name {configured_name!r} is already configured "
-                    f"by state {seen_subagent_names[configured_name]!r}"
-                )
-            elif base_seen is not None:
-                # One state's suffixed labels are another state's verbatim
-                # name (foo vs foo-i1): the supervisor would reject the
-                # duplicate sibling name at spawn time, so reject the
-                # shadowing name at write time. The seen name generates the
-                # labels here.
-                errors.append(
-                    f"state {state_id} subagent name {configured_name!r} collides with the "
-                    f"suffixed spawn labels of state {seen_subagent_names[base_seen]!r} "
-                    f"(configured {base_seen!r}): re-entry, foreach, and retries name children "
-                    f"{base_seen!r}-i<n> and {base_seen!r}-a<n>"
-                )
-            elif base_current is not None:
-                # The reverse direction: THIS state's name generates the
-                # suffixed labels, and an earlier state's name is one of
-                # them.
-                errors.append(
-                    f"state {state_id} subagent name {configured_name!r} suffixed by re-entry, "
-                    f"foreach, and retries ({configured_name!r}-i<n>, {configured_name!r}-a<n>) "
-                    f"collides with state {seen_subagent_names[base_current]!r} "
-                    f"(configured {base_current!r})"
-                )
-            else:
-                seen_subagent_names[configured_name] = state_id
-        if "entry" in state and not isinstance(state.get("entry"), bool):
-            errors.append(f"state {state_id} entry must be a boolean")
-        # A REQUIRED input can never bind on an entry state's first entry
-        # (admission has no upstream settle) nor on a self-input's first
-        # entry (no settle exists before an entry settles). Optional inputs
-        # are the loop form (the first entry binds the null sentinel, a
-        # later entry binds the real settle), so only the required variants
-        # are rejected -- the self-input check is the machine-form mirror of
-        # the dag compiler's "node b cannot depend on itself" rule.
-        for inp in _port_list(state, "inputs"):
-            if not isinstance(inp, dict) or inp.get("optional"):
-                continue
-            if state.get("entry") is True:
-                errors.append(
-                    f"entry state {state_id} input {inp.get('name')!r} must be optional: "
-                    "an entry state's first entry has no upstream settle to bind"
-                )
-                continue
-            source = inp.get("from")
-            if isinstance(source, str) and "." in source and source.partition(".")[0] == state_id:
-                errors.append(
-                    f"state {state_id} input {inp.get('name')!r} cannot require itself: "
-                    "mark the self-input optional - a required one can never bind on the state's first entry"
-                )
-
-    # The entry check needs at least one well-formed state: a machine whose
-    # only state failed its id check reports that problem alone, and a flag
-    # that is not a boolean never counts as declaring an entry.
-    if states_by_id and not any(state.get("entry") is True for state in states_by_id.values()):
-        errors.append("factory machine requires at least one entry state")
-
-    transitions = machine.get("transitions")
-    if transitions is None:
-        transitions = []
-    if not isinstance(transitions, list):
-        errors.append("factory machine transitions must be a list")
-        return errors
-    for index, transition in enumerate(transitions):
-        if not isinstance(transition, dict):
-            errors.append(f"transitions[{index}] must be an object")
-            continue
-        raw_src = transition.get("from")
-        dst = transition.get("to")
-        # ``from`` is one state id, or a list of them: a JOIN transition that
-        # fires only once every source state has settled (the compiled dag
-        # fan-in shape; a join may not carry a guard -- a guard needs exactly
-        # one from-state's latest settle output to compare against).
-        if isinstance(raw_src, list):
-            sources = raw_src
-            if not sources:
-                errors.append(f"transitions[{index}] from must name at least one state")
-            elif not all(_is_nonempty_str(src) for src in sources):
-                # Type-check BEFORE the set() dedupe: a malformed entry (a
-                # dict, a list) is unhashable and would raise a raw TypeError
-                # instead of reporting a validation error.
-                errors.append(f"transitions[{index}] from entries must be non-empty state id strings")
-            elif len(set(sources)) != len(sources):
-                errors.append(f"transitions[{index}] from must not repeat a state")
-            elif not all(src in states_by_id for src in sources):
-                missing = next(src for src in sources if src not in states_by_id)
-                errors.append(f"transitions[{index}] references unknown from-state {missing!r}")
-            if transition.get("when") is not None:
-                errors.append(
-                    f"transitions[{index}] with multiple from-states cannot carry a when guard; "
-                    "use single-state transitions for guards"
-                )
-        elif _is_nonempty_str(raw_src):
-            sources = [raw_src]
-            if raw_src not in states_by_id:
-                errors.append(f"transitions[{index}] references unknown from-state {raw_src!r}")
-        else:
-            sources = []
-            errors.append(f"transitions[{index}] requires a non-empty from")
-        if not _is_nonempty_str(dst):
-            errors.append(f"transitions[{index}] requires a non-empty to")
-        elif dst not in states_by_id:
-            errors.append(f"transitions[{index}] references unknown to-state {dst!r}")
-        on = transition.get("on", TRANSITION_ON_KINDS[0])
-        if on not in TRANSITION_ON_KINDS:
-            errors.append(f"transitions[{index}] on must be one of {list(TRANSITION_ON_KINDS)}, got {on!r}")
-        for src in sources:
-            # Malformed sources already reported their own error above; a
-            # non-string entry is unhashable and must never reach the dict
-            # lookup (validation reports errors; it never raises).
-            if _is_nonempty_str(src) and src in states_by_id:
-                src_state = states_by_id[src]
-                if src_state.get("lifecycle", NODE_LIFECYCLE_DEFAULT) == "resident":
-                    errors.append(f"transitions[{index}] cannot leave resident state {src!r}")
-                if len(sources) == 1:
-                    when = transition.get("when")
-                    if when is not None:
-                        _validate_guard(when, index, src_state, errors)
-    return errors
-
-
-# ---------------------------------------------------------------------------
-# Dag compatibility: compile the V1 dag form to machine form.
-# ---------------------------------------------------------------------------
-
-
-def _effective_dag_edges(node: dict[str, Any]) -> list[str]:
-    """Effective dependency edges: depends_on plus every inputs[].from source,
-    deduplicated in first-seen order."""
-    edges: list[str] = []
-    for dep in _port_list(node, "depends_on"):
-        if isinstance(dep, str) and dep and dep not in edges:
-            edges.append(dep)
-    for source in _input_sources(node):
-        if source not in edges:
-            edges.append(source)
-    return edges
-
-
-def compile_factory_dag(dag: Any) -> "tuple[dict[str, Any] | None, list[str]]":
-    """Compile a dag-form spec into machine form.
-
-    Returns ``(machine, errors)``: on success the machine is a spec-shaped
-    dict (defaults are applied later by ``canonicalize_factory_spec``) and the
-    error list is empty; on any dag-level error the machine is ``None`` and
-    the errors carry the V1 dag wording. Each node becomes a state with
-    ``entry`` set when it has no effective dependencies and ``max_entries``
-    1; the node's full effective dependency set becomes ONE guard-less join
-    transition (a single dependency stays a plain ``from`` string; several
-    become a ``from`` list). Wait blocks are rejected by the shared field
-    check (they are gated until the communication series); the compiler
-    itself has no wait support.
-    """
-    if not isinstance(dag, dict):
-        return None, ["factory dag must be a JSON object"]
-    errors: list[str] = []
-    run = dag.get("run")
-    if run is not None and not isinstance(run, dict):
-        errors.append("run must be an object")
-        run = None
-    run_budget = _validate_run_fields(run, errors)
-
-    nodes = dag.get("nodes")
-    if not isinstance(nodes, list):
-        return None, errors + ["factory dag requires a nodes list"]
-    if not nodes:
-        return None, errors + ["factory dag must declare at least one node"]
-
-    seen_ids: set[str] = set()
-    nodes_by_id: dict[str, dict[str, Any]] = {}
-    for index, node in enumerate(nodes):
-        if not isinstance(node, dict):
-            errors.append(f"nodes[{index}] must be an object")
-            continue
-        node_id = node.get("id")
-        if not _is_nonempty_str(node_id):
-            errors.append(f"nodes[{index}] requires a non-empty id")
-        elif not _valid_node_id(node_id):
-            errors.append(f"nodes[{index}] id must match ^[a-z0-9][a-z0-9-]{{0,63}}$, got {node_id!r}")
-        elif node_id in seen_ids:
-            errors.append(f"nodes[{index}] duplicates node id {node_id!r}")
-        else:
-            seen_ids.add(node_id)
-            nodes_by_id[node_id] = node
-
-    for node_id, node in nodes_by_id.items():
-        _validate_state_fields(
-            node, run_budget=run_budget, states_by_id=nodes_by_id, noun="node", errors=errors
-        )
-        # The self-dependency rule covers the EFFECTIVE edge set, not only
-        # depends_on: a node that reads its own output would compile to a
-        # never-reachable self-loop state, so reject it here like
-        # depends_on: [self].
-        if node_id in _input_sources(node):
-            errors.append(f"node {node_id} cannot depend on itself")
-        depends_on = node.get("depends_on")
-        if depends_on is not None:
-            if not isinstance(depends_on, list):
-                errors.append(f"node {node_id} depends_on must be a list of node ids")
-            else:
-                for dep in depends_on:
-                    if not _is_nonempty_str(dep):
-                        errors.append(f"node {node_id} depends_on entries must be non-empty node id strings")
-                    elif dep == node_id:
-                        errors.append(f"node {node_id} cannot depend on itself")
-                    elif dep not in nodes_by_id:
-                        errors.append(f"node {node_id} depends on unknown node {dep!r}")
-                    elif nodes_by_id[dep].get("lifecycle", NODE_LIFECYCLE_DEFAULT) == "resident":
-                        errors.append(f"node {node_id} cannot depend on resident node {dep!r}")
-    if errors:
-        return None, errors
-
+def _compile_dag(dag: dict[str, Any]) -> dict[str, Any]:
+    """Compile a validated dag-form spec into machine form: each node
+    becomes a state (an entry state when it has no dependency,
+    ``max_entries`` 1), and its whole dependency set (``depends_on`` plus
+    every input source) becomes ONE guard-less join transition, so a fan-in
+    node waits for all its predecessors; a single dependency stays a plain
+    ``from``."""
     machine: dict[str, Any] = {"states": [], "transitions": []}
-    if run is not None:
-        machine["run"] = copy.deepcopy(run)
-    for node in nodes:
-        edges = _effective_dag_edges(node)
+    if dag.get("run") is not None:
+        machine["run"] = copy.deepcopy(dag["run"])
+    for node in dag["nodes"]:
+        edges: list[str] = []
+        for dep in [*_port_list(node, "depends_on"), *_input_sources(node)]:
+            if dep not in edges:
+                edges.append(dep)
         state: dict[str, Any] = {"id": node["id"], "entry": not edges, "max_entries": STATE_MAX_ENTRIES_DEFAULT}
         for key in (
             "subagent", "python", "lifecycle", "budget_ms", "retries", "failure_policy", "inputs", "outputs", "foreach"
@@ -813,44 +197,9 @@ def compile_factory_dag(dag: Any) -> "tuple[dict[str, Any] | None, list[str]]":
             if key in node:
                 state[key] = copy.deepcopy(node[key])
         machine["states"].append(state)
-        # ONE join transition per node with dependencies (not one per
-        # edge): a fan-in node waits for ALL its effective predecessors
-        # before entering, so it can never start after just one parent
-        # settles and then block the other parent's transition at
-        # max_entries with a missing input. A single dependency stays a
-        # plain ``from`` string; dependency-free nodes are entry states and
-        # emit no transition at all.
         if edges:
             machine["transitions"].append({"from": edges[0] if len(edges) == 1 else edges, "to": node["id"]})
-    return machine, []
-
-
-# ---------------------------------------------------------------------------
-# Unified entry points.
-# ---------------------------------------------------------------------------
-
-
-def validate_factory_spec(spec: Any) -> list[str]:
-    """Dry-run validation for a factory spec in either form.
-
-    Detects the form first: a spec carrying "states" or "transitions" is
-    machine form; anything else is dag form and compiles to machine form
-    first. A spec carrying both dag and machine keys is rejected outright.
-    Returns a list of human-readable error sentences; an empty list means
-    the specification is valid. Every rule is enforced before a factory entry
-    is stored, so an invalid spec never reaches the store.
-    """
-    if not isinstance(spec, dict):
-        return ["factory dag must be a JSON object"]
-    if _is_machine_form(spec) and "nodes" in spec:
-        return ["pass either dag or machine form, not both"]
-    if _is_machine_form(spec):
-        return validate_factory_machine(spec)
-    machine, errors = compile_factory_dag(spec)
-    if errors:
-        return errors
-    # Defense in depth: a compiled dag must produce a valid machine.
-    return validate_factory_machine(machine)
+    return machine
 
 
 def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
@@ -908,38 +257,12 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
     return canonical
 
 
-async def _check_limits(spec: dict[str, Any], canonical: dict[str, Any]) -> None:
-    """Check a valid spec's declared numeric limits with the host (the
-    Rust ``pa_factory::limits``, the one copy of those numbers), then cap
-    the canonical ``max_transitions`` (10 per state by default) at the
-    host's bound; raises ``ValueError`` with every bound the spec breaks."""
-    from . import host_request
-
-    try:
-        bounds = await host_request("factory.limits", {"spec": spec})
-    except RuntimeError as error:
-        raise ValueError(str(error)) from None
-    run = canonical["run"]
-    run["max_transitions"] = min(run["max_transitions"], bounds["max_transitions"])
-
-
-def canonicalize_factory_spec(spec: Any) -> dict[str, Any]:
-    """Validate a spec in either form and return the canonical MACHINE form.
-
-    Raises ``ValueError`` with the joined error list when the spec is
-    invalid (including the both-forms rejection). Dag specs compile to
-    machine form first, so the executor sees one shape:
-    ``{"run": ..., "states": [...], "transitions": [...]}``.
-    """
-    errors = validate_factory_spec(spec)
-    if errors:
-        raise ValueError("; ".join(errors))
-    assert isinstance(spec, dict)  # validated above
-    if _is_machine_form(spec):
-        machine = spec
-    else:
-        machine, compile_errors = compile_factory_dag(spec)
-        assert machine is not None and not compile_errors  # validated above
+def canonicalize_factory_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """Return the canonical MACHINE form of a spec the validator accepted
+    (``check_factory_spec`` at write time, ``_validate_for_run`` at run
+    start): dag specs compile to machine form first, so the executor sees
+    one shape, ``{"run": ..., "states": [...], "transitions": [...]}``."""
+    machine = spec if _is_machine_form(spec) else _compile_dag(spec)
     return _canonicalize_machine(machine)
 
 
@@ -1025,8 +348,7 @@ __all__ = [
     "FactoryRun",
     "MachineFile",
     "canonicalize_factory_spec",
-    "cli_dispatch",
-    "compile_factory_dag",
+    "check_factory_spec",
     "default_factory_executor",
     "export_factory_spec",
     "export_machine",
@@ -1041,8 +363,6 @@ __all__ = [
     "status_factory",
     "stop_factory",
     "topological_order",
-    "validate_factory_machine",
-    "validate_factory_spec",
 ]
 
 
@@ -3158,11 +2478,12 @@ class FactoryExecutor:
         spec = arguments.get("machine")
         if spec is None:
             spec = arguments.get("dag")
+        max_transitions = await _validate_for_run(spec)
         canonical = canonicalize_factory_spec(spec)
+        canonical["run"]["max_transitions"] = min(canonical["run"]["max_transitions"], max_transitions)
         resolved, reference_errors = self._resolve_subagents(harness, canonical)
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
-        await _check_limits(spec, canonical)
         run = self._create_run(entry.id, canonical, resolved, name=name)
         return await self._launch_run(run)
 
@@ -3178,12 +2499,13 @@ class FactoryExecutor:
         machine's name as its spec id, and the result reports the machine
         fields so a caller can trace the run back to the library file.
         """
+        max_transitions = await _validate_for_run(machine.spec)
         canonical = canonicalize_factory_spec(machine.spec)
+        canonical["run"]["max_transitions"] = min(canonical["run"]["max_transitions"], max_transitions)
         harness = self._resolve_harness()
         resolved, reference_errors = self._resolve_subagents(harness, canonical)
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
-        await _check_limits(machine.spec, canonical)
         run = self._create_run(machine.name, canonical, resolved, name=name)
         result = await self._launch_run(run)
         result["machine"] = machine.name
@@ -3829,11 +3151,7 @@ class FactoryExecutor:
         spec = arguments.get("machine")
         if spec is None:
             spec = arguments.get("dag")
-        try:
-            canonical = canonicalize_factory_spec(spec)
-        except ValueError as exc:
-            raise ValueError(f"factory spec {ref!r} does not validate: {exc}") from exc
-        return self._spec_snapshot(entry.id, canonical, compact=compact)
+        return self._spec_snapshot(entry.id, canonicalize_factory_spec(spec), compact=compact)
 
     def _signature(self, run: FactoryRun) -> tuple[Any, ...]:
         """The run's live shape a watch treats as a change: the run state,
@@ -7178,7 +6496,7 @@ def _cap_factory_frame(frame: dict[str, Any]) -> None:
 #
 # A MACHINE.md is a v1 machine file: YAML frontmatter (name, description,
 # version, author) followed by one fenced ``machine-spec`` block whose
-# payload is a JSON factory spec in the schema ``validate_factory_spec``
+# payload is a JSON factory spec in the schema ``check_factory_spec``
 # accepts. The machine library (MACHINE.md files and machine directories)
 # belongs to the Rust ``pa_factory`` scan: ``prime-agent factory list |
 # import | export`` and ``run_factory``'s name lookup (the
@@ -7191,45 +6509,7 @@ MACHINE_DIR_FILE_NAME = "machine.toml"
 ``prime-agent factory validate`` checks; loaded by the session's Rust
 loader through the ``factory.compile`` host request)."""
 MACHINE_SPEC_FENCE = "machine-spec"
-MACHINE_NAME_MAX_LENGTH = 64
-MACHINE_DESCRIPTION_MAX_LENGTH = 1024
-
-_MACHINE_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*")
 _PLAIN_FRONTMATTER_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._/@+~-]*")
-
-
-def machine_name_errors(name: Any) -> list[str]:
-    """Name rules mirrored from the skill library (validate_name)."""
-    if not isinstance(name, str) or not name:
-        return ["machine name must be a non-empty string"]
-    errors: list[str] = []
-    if len(name) > MACHINE_NAME_MAX_LENGTH:
-        errors.append(f"machine name exceeds {MACHINE_NAME_MAX_LENGTH} characters ({len(name)})")
-    if _MACHINE_NAME_PATTERN.fullmatch(name) is None:
-        errors.append(
-            "machine name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"
-        )
-    if name.endswith("-"):
-        errors.append("machine name must not end with a hyphen")
-    return errors
-
-
-def machine_description_errors(description: Any) -> list[str]:
-    """Description rules mirrored from the skill library (validate_description).
-
-    One rule is the library's own: the description is one listing row, so
-    embedded line breaks are a format error.
-    """
-    if not isinstance(description, str) or not description.strip():
-        return ["frontmatter description is required"]
-    if len(description) > MACHINE_DESCRIPTION_MAX_LENGTH:
-        return [
-            "frontmatter description exceeds "
-            f"{MACHINE_DESCRIPTION_MAX_LENGTH} characters ({len(description)})"
-        ]
-    if "\n" in description or "\r" in description:
-        return ["frontmatter description must be a single line"]
-    return []
 
 
 @dataclass(frozen=True)
@@ -7419,9 +6699,7 @@ def export_factory_spec(
     file always re-imports. The out target is never overwritten silently: an
     existing file refuses unless ``overwrite=True`` says otherwise.
     """
-    errors = validate_factory_spec(spec)
-    errors.extend(machine_name_errors(name))
-    errors.extend(machine_description_errors(description))
+    errors = check_factory_spec(spec, name=name, description=description)
     if errors:
         raise ValueError("; ".join(errors))
     machine = MachineFile(
@@ -7453,7 +6731,7 @@ def export_machine(target: str, out_path: "str | Path", *, overwrite: bool = Fal
             spec = arguments.get("dag")
         if spec is None:
             raise ValueError(f"factory entry {target!r} carries no machine or dag spec")
-        errors = machine_name_errors(target)
+        errors = check_factory_spec(name=target)
         if errors:
             raise ValueError(
                 "; ".join(errors + [f"the stored entry id {target!r} cannot become a machine name"])
@@ -7464,7 +6742,7 @@ def export_machine(target: str, out_path: "str | Path", *, overwrite: bool = Fal
         )
     run = executor._runs.get(target)
     if run is not None and run.machine:
-        errors = machine_name_errors(run.spec_id)
+        errors = check_factory_spec(name=run.spec_id)
         if errors:
             raise ValueError(
                 "; ".join(errors + [f"the run's spec id {run.spec_id!r} cannot become a machine name"])
@@ -7477,19 +6755,6 @@ def export_machine(target: str, out_path: "str | Path", *, overwrite: bool = Fal
         f"no stored factory entry or live run {target!r}; export a library machine with "
         "`prime-agent factory export`"
     )
-
-
-def cli_dispatch(payload: Any) -> "dict[str, Any]":
-    """JSON facade for ``prime-agent factory import``: the ``validate`` op
-    checks a spec's structure with the write-time validator and answers
-    ``{"ok": true}`` or ``{"ok": false, "errors": [...]}`` (the exact
-    sentences reach the command's output verbatim). The CLI owns the rest
-    of the library (parsing, limits, listing, files) through ``pa-factory``.
-    """
-    if not isinstance(payload, dict) or payload.get("op") != "validate":
-        return {"ok": False, "errors": ["factory cli payload must be {\"op\": \"validate\", \"spec\": ...}"]}
-    errors = validate_factory_spec(payload.get("spec"))
-    return {"ok": False, "errors": errors} if errors else {"ok": True}
 
 
 FACTORY_HELP: str = r"""# Factory
