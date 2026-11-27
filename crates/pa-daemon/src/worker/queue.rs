@@ -157,11 +157,16 @@ impl QueuePriority {
 /// Priority insertion: walk back only across a lower-priority suffix. Never
 /// re-sort a lane (moves and restored order can cross; equal priorities stay FIFO).
 pub(crate) fn enqueue_priority(lane: &mut VecDeque<QueuedItem>, item: QueuedItem) {
+    lane.insert(priority_index(lane, item.priority), item);
+}
+
+/// Where [`enqueue_priority`] inserts an item of `priority`.
+pub(crate) fn priority_index(lane: &VecDeque<QueuedItem>, priority: QueuePriority) -> usize {
     let mut index = lane.len();
-    while index > 0 && lane[index - 1].priority.rank() < item.priority.rank() {
+    while index > 0 && lane[index - 1].priority.rank() < priority.rank() {
         index -= 1;
     }
-    lane.insert(index, item);
+    index
 }
 
 #[derive(Debug)]

@@ -2,9 +2,10 @@
 //! operations, and agent-message delivery.
 use super::{
     admit_inbox_notice, enqueue_priority, json, oneshot, parse_custom_message, parse_prompt_images,
-    response_success, sender_is_child_of, AgentFamilyRelationship, AgentMessagePromptPayload, Lane,
-    QueueCheckpoint, QueuePriority, QueuedItem, TurnPolicy, TurnWaiter, Worker,
-    AGENT_MESSAGE_SOURCE, DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION, QUEUED_INPUT_SUSPENDED,
+    priority_index, response_success, sender_is_child_of, AgentFamilyRelationship,
+    AgentMessagePromptPayload, Lane, QueueCheckpoint, QueuePriority, QueuedItem, TurnPolicy,
+    TurnWaiter, Worker, AGENT_MESSAGE_SOURCE, DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
+    QUEUED_INPUT_SUSPENDED,
 };
 
 use serde_json::Value;
@@ -121,12 +122,13 @@ impl Worker {
             };
             // This RPC command is human-origin only for a plain user row.
             // Caller-supplied custom rows never gain human priority.
+            let priority = if custom_message.is_some() {
+                QueuePriority::Background
+            } else {
+                QueuePriority::Human
+            };
             let item = QueuedItem {
-                priority: if custom_message.is_some() {
-                    QueuePriority::Background
-                } else {
-                    QueuePriority::Human
-                },
+                priority,
                 preview: None,
                 message: message.to_string(),
                 custom_message,
@@ -141,7 +143,7 @@ impl Worker {
                 done: if wait {
                     Some(TurnWaiter::Settled(done_tx))
                 } else if !queued_behind_work
-                    && core.steering.is_empty()
+                    && priority_index(&core.steering, priority) == 0
                     && !core.queued_input_parked(&self.input_pauses)
                 {
                     let (started_tx, started_rx) = oneshot::channel();
