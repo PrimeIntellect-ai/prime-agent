@@ -582,11 +582,13 @@ mod tests {
             "the failed child's late reply is consumed, not delivered as an agent message"
         );
         assert_eq!(pending_count(&engine), 1, "only the failure is parked");
-        let error = engine
+        // #4271 changed the apply to report its source alongside the outcome,
+        // so the parked failure surfaces as the tuple's error half.
+        let (_source, outcome) = engine
             .runtime
             .block_on(async { engine.apply_pending_refine_reply().await })
-            .expect("the parked failure applies")
-            .expect_err("the refinement fails");
+            .expect("the parked failure applies");
+        let error = outcome.expect_err("the refinement fails");
         assert!(
             error.to_string().contains("Child worker unreachable"),
             "the failure names the child's reason: {error}"
