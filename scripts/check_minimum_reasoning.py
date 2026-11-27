@@ -46,7 +46,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        auxiliary = not body.get('tools')
+        # A tool-less side call, or the refinement child's turn (an agent turn
+        # with the normal tools, recognized by its task's refinement section).
+        auxiliary = not body.get('tools') or any(
+            '<refinement_child>' in text for message in body.get('messages', [])
+            if message.get('role') == 'user' for text in texts(message.get('content')))
         self.server.requests.append({'auxiliary': auxiliary, 'body': body})
         if len(self.server.requests) > 12:
             self.server.error = 'request limit exceeded'

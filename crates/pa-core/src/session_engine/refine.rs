@@ -1168,7 +1168,7 @@ impl AgentSession {
     ) -> anyhow::Result<CommittedRefinement> {
         let plan = RefinementPlan {
             proposal: crate::refinement::planner::parse_proposal(answer)
-                .map_err(|error| anyhow::anyhow!("Refinement failed: {error}"))?,
+                .map_err(anyhow::Error::msg)?,
             id: generate_refinement_id(),
             rollback_of: None,
             rollback_scope: None,
