@@ -101,9 +101,12 @@ impl SessionSelection {
 pub enum SessionPanel {
     /// The Bash panel, on `shell_id`'s row when a persistent shell row opened it.
     Shells { shell_id: Option<String> },
-    /// The factory page, on `row` when a return from a state's session reopened it.
+    /// The factory page, on `row` when a return from a state's session reopened it; `node`
+    /// remounts the node view (a return from a node's child session reopens the node it
+    /// jumped from, on the instance it had selected).
     FactoryRuns {
         row: Option<crate::factory_view::FactoryRow>,
+        node: Option<crate::factory_view::node::NodeTarget>,
     },
 }
 
@@ -124,9 +127,10 @@ pub struct SelectionOrigin {
 /// bound.
 pub const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
 
-/// The kernel activity poll cadence: the session's shells/factory refresh and the agents view's
-/// activity-line counts and persistent shells list.
-pub(crate) const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// The activity poll cadence (`ACTIVITY_POLL_INTERVAL` in pa-types):
+/// the one shared constant every TUI activity poll fires at, which the
+/// daemon's factory live-freshness bound derives from.
+pub(crate) use pa_types::daemon::ACTIVITY_POLL_INTERVAL;
 
 /// Explicit model selection carried into every `create` config: the CLI
 /// `--provider`/`--model`/`--api-key`/`--thinking` flags, authoritative end-to-end — the
@@ -283,9 +287,9 @@ pub trait InteractionTelemetry: Send + Sync {
         action: &'static str,
         scoped: bool,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-    /// An agents-view action ran (`tui agents action`): `action` is `program_shown` (the ctrl+o
-    /// toggle turned a spawn program on), `renamed`, or `content_search` (ctrl+f switched the
-    /// search to message text) — primitives only.
+    /// An agents-view action ran. Actions include `program_shown`, `renamed`, and
+    /// `content_search` (ctrl+g switched the search to message text). Only adoption counts are
+    /// recorded.
     fn agents_view_action(
         &self,
         action: &'static str,
@@ -355,7 +359,7 @@ pub struct InteractiveOptions {
     /// Telemetry opt-out: `Some(true)` only when the invocation disabled telemetry; carried on
     /// create/attach so the daemon worker installs no telemetry subscriber.
     pub telemetry_disabled: Option<bool>,
-    /// `/mcp login` / `/mcp logout`: the client-side auth flows the composition root provides;
+    /// MCP connect flows opened from the `/mcp` view, provided by the composition root;
     /// `None` reports the commands as unavailable.
     pub client_auth: Option<crate::client_auth::ClientAuthCommandsHandle>,
     /// `/traces`: the settings + credential state the composition root owns (the trace upload

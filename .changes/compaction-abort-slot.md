@@ -1,0 +1,1 @@
+- Fixed `abort_compaction` (Esc on the compaction loader) sometimes not cancelling an automatic, overflow-recovery or requested compaction when sent right as it started; the compaction then ran to the end.

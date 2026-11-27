@@ -2,9 +2,8 @@
 //! rows, compaction aborts, and the telemetry seams.
 use super::{
     assistant_message_parts, event_to_update, pop_superseded_attempt_row, AgentView, ChatEntry,
-    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock,
-    Overlay, Result, RetryState, RunEvent, RunState, SessionUi, StatusKind, ToolResultView,
-    TurnUpdate, Value,
+    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock, Result,
+    RetryState, RunEvent, RunState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
 };
 use crate::interactive::reconnect::{ConnectionEffect, ConnectionEvent};
 
@@ -74,6 +73,7 @@ impl SessionUi {
                     .request_ok(DaemonCommand::Abort {
                         id: None,
                         active_session_id: active_session_id.clone(),
+                        scope: None,
                         rest: Map::default(),
                     })
                     .await
@@ -85,6 +85,7 @@ impl SessionUi {
                     .request_ok(DaemonCommand::Abort {
                         id: None,
                         active_session_id,
+                        scope: None,
                         rest: Map::default(),
                     })
                     .await;
@@ -280,11 +281,15 @@ impl SessionUi {
                     self.settled = None;
                     self.bash_list_epoch += 1;
                     self.factory_list_epoch += 1;
+                    self.library_overview_epoch += 1;
                     self.bash_activities = serde_json::json!({"activities": []});
                     self.factory_graph = serde_json::json!({"runs": []});
-                    if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
+                    if let Some(factory_view) = view.run_page_mut() {
                         factory_view.apply_runs(Vec::new());
                     }
+                    // The factory page keeps its all-session rows: its
+                    // cache is not the closed session's scoped graph, so
+                    // only the epoch retires an in-flight reply.
                     self.update_subagent_summary(view);
                     match reason.as_str() {
                         "shutdown" => self.error_row(
@@ -334,18 +339,12 @@ impl SessionUi {
                         .join(", ");
                     view.push_entry(crate::chat::ChatEntry::Status {
                         text: format!(
-                            "Prime Agent is updating — restarting the daemon (about {}s). {} will resume automatically.",
-                            update.est_seconds.max(1),
+                            "Prime Agent is updating — restarting the daemon. {} will resume automatically.",
                             if names.is_empty() { "Your session".to_string() } else { names }
                         ),
                         kind: crate::chat::StatusKind::Info,
                     });
-                    self.connection_event(
-                        ConnectionEvent::UpdateNotice {
-                            est_seconds: update.est_seconds,
-                        },
-                        view,
-                    );
+                    self.connection_event(ConnectionEvent::UpdateNotice, view);
                 } else {
                     self.note(&format!("the daemon is shutting down ({reason})"), view);
                     // The announcement is what arms the shutdown recovery: a bare session stop
@@ -781,8 +780,9 @@ impl SessionUi {
     }
 
     /// The abort ladder shared by the Ctrl+C and Escape interrupts: a compacting session aborts the
-    /// compaction run, a streaming turn aborts through `abort_and_send_queued`, and a running user
-    /// bash aborts alongside. The side-question abort stays at the call sites.
+    /// compaction run, a streaming turn aborts through `abort_and_send_queued`, an idle session
+    /// stops a parked backgrounded cell through the scoped abort, and a running user bash aborts
+    /// alongside. The side-question abort stays at the call sites.
     pub(super) fn interrupt_running_work(&mut self, view: &mut AgentView) {
         // Abort the trace upload sweep first.
         if let Some(run) = &self.trace_upload {
@@ -797,12 +797,62 @@ impl SessionUi {
             // the interrupt, so nothing is noted here.
             self.abort_turn();
             self.apply_run_event(RunEvent::Interrupted, view);
+        } else if self
+            .client
+            .supports_session_server_capability("background_cell_abort")
+        {
+            // The scoped abort touches nothing but a parked backgrounded
+            // cell, so every idle press may send it; a peer without the
+            // capability keeps the old no-op behavior.
+            self.abort_background_cell();
         }
         // A running user-bash command aborts the same way; the settled run
         // reports cancelled through its bash_end.
         if self.user_bash_running {
             self.abort_user_bash();
         }
+    }
+
+    /// The idle scoped abort (`abort` with scope `background_cell`): stop
+    /// only the session's parked backgrounded cell, never the queues, and
+    /// note when one was stopped (an idle press with no such cell stays
+    /// silent).
+    fn abort_background_cell(&self) {
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let notes = self.notes.clone();
+        tokio::spawn(async move {
+            let command = DaemonCommand::Abort {
+                id: None,
+                active_session_id,
+                scope: Some("background_cell".to_string()),
+                rest: Map::default(),
+            };
+            match client.request(command).await {
+                Ok(response) if response.success => {
+                    let stopped = response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("stoppedBackgroundCell"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    if stopped {
+                        let _ = notes.send("the backgrounded cell was stopped".to_string());
+                    }
+                }
+                Ok(response) => {
+                    let _ = notes.send(format!(
+                        "the background-cell cancel failed: {}",
+                        response
+                            .error
+                            .unwrap_or_else(|| "unknown error".to_string())
+                    ));
+                }
+                Err(error) => {
+                    let _ = notes.send(format!("the background-cell cancel failed: {error:#}"));
+                }
+            }
+        });
     }
 
     /// Apply an assistant message frame: an open streaming message is updated in place; otherwise

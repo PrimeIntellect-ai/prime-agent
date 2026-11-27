@@ -6,11 +6,14 @@
 //! `session_closed` frame across many writes).
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -119,11 +122,7 @@ fn the_shutdown_exit_waits_for_a_slow_readers_in_flight_frame() {
     let dir = tempfile::TempDir::new_in("/tmp").expect("temp dir");
     let socket = dir.path().join("worker.sock");
     let mut worker = spawn_worker(dir.path(), &socket);
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "worker socket never appeared");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(15));
     let mut control = connect(&socket);
     let mut slow = connect(&socket);
     let created = request(

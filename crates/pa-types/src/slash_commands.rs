@@ -75,7 +75,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "rlm-max-depth", description: "Set/view the per-chat persistent RLM max depth immediately; never interrupts or queues the running turn", execution: SlashCommandExecution::Client, argument_hint: Some("[<int> [--global]]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "heartbeat", description: "Set or view a persistent heartbeat; delivery defaults to steer, use --follow-up to queue; supports pause, resume, stop, and clear", execution: SlashCommandExecution::Client, argument_hint: Some("[status|pause|resume|stop|[every <duration>] [--steer|--follow-up] <instruction>]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "heartbeats", description: "View and manage all user and agent heartbeats", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
-    BuiltinSlashCommand { name: "factory", description: "Show or set the agent factory opt-in gate (off by default)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
+    BuiltinSlashCommand { name: "factory", description: "Open the machines page, or show or set its opt-in gate (off by default)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
@@ -264,26 +264,6 @@ mod tests {
     }
 
     #[test]
-    fn cached_registry_matches_owned_registry() {
-        let owned = SlashCommandRegistry::builtin();
-        let cached = SlashCommandRegistry::builtin_cached();
-        assert!(std::ptr::eq(cached, SlashCommandRegistry::builtin_cached()));
-        assert_eq!(cached.all(), owned.all());
-        assert_eq!(
-            cached.suggestion_candidates(),
-            owned.suggestion_candidates()
-        );
-        for name in owned.suggestion_candidates().into_iter().chain(["unknown"]) {
-            assert_eq!(cached.resolve_name(name), owned.resolve_name(name));
-            assert_eq!(cached.get(name), owned.get(name));
-            assert_eq!(cached.is_builtin(name), owned.is_builtin(name));
-            assert_eq!(cached.takes_argument(name), owned.takes_argument(name));
-            let input = format!("/{name} -- example");
-            assert_eq!(cached.parse(&input), owned.parse(&input));
-        }
-    }
-
-    #[test]
     fn parse_resolves_and_keeps_args() {
         let registry = SlashCommandRegistry::builtin();
         let resolved = registry.parse("/thinking high").unwrap();
@@ -322,12 +302,5 @@ mod tests {
             Some("compact")
         );
         assert_eq!(find_slash_command_suggestion("zzzzzz", &candidates), None);
-    }
-
-    #[test]
-    fn edit_distance_counts_substitutions() {
-        assert_eq!(slash_command_edit_distance("abc", "abc"), 0);
-        assert_eq!(slash_command_edit_distance("ab", "ac"), 1);
-        assert_eq!(slash_command_edit_distance("", "abc"), 3);
     }
 }

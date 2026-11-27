@@ -15,6 +15,9 @@
 //! PATH and surfaces the share viewer URL.
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -184,20 +187,17 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor { child, socket };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(15));
+    Supervisor { child, socket }
 }
 
 /// A stub `gh` binary: `auth status` succeeds, `gist create` requires the
-/// upload file and prints a gist URL. No upload ever leaves the box.
-fn write_stub_gh(dir: &Path) {
-    let script = r#"#!/bin/bash
+/// upload file, holds until `release` exists, and prints a gist URL. No
+/// upload ever leaves the box.
+fn write_stub_gh(dir: &Path, release: &Path) {
+    let release = release.display();
+    let script = format!(
+        r#"#!/bin/bash
 case "$1" in
   auth) exit 0 ;;
   gist)
@@ -205,11 +205,13 @@ case "$1" in
       echo "gist: upload file missing" >&2
       exit 1
     fi
+    while [ ! -f "{release}" ]; do sleep 0.01; done
     echo "https://gist.github.com/testuser/abc123"
     ;;
   *) echo "unsupported: $1" >&2; exit 1 ;;
 esac
-"#;
+"#
+    );
     std::fs::write(dir.join("gh"), script).expect("write stub gh");
     make_executable(&dir.join("gh"));
 }
@@ -234,7 +236,16 @@ async fn tui_export_and_share_surface() {
     // The stub gh on PATH (isolated bin dir, PATH restored after the run).
     let stub_dir = dir.path().join("bin");
     std::fs::create_dir_all(&stub_dir).expect("bin dir");
-    write_stub_gh(&stub_dir);
+    // The upload holds until the loader frame was captured: a stub that
+    // answers at once can settle before the loader ever paints.
+    let release = dir.path().join("gist-release");
+    write_stub_gh(&stub_dir, &release);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let releaser = std::thread::spawn(move || {
+        if release_rx.recv().is_ok() {
+            std::fs::write(&release, "").expect("release the stub upload");
+        }
+    });
     let previous_path = std::env::var("PATH").unwrap_or_default();
     let previous_viewer_url = std::env::var("PI_SHARE_VIEWER_URL").ok();
     std::env::set_var("PATH", format!("{}:{}", stub_dir.display(), previous_path));
@@ -322,7 +333,15 @@ async fn tui_export_and_share_surface() {
             pa_tui::interactive::HeadlessStep::Submit(format!("/export {}", html_out.display())),
             pa_tui::interactive::HeadlessStep::Submit(format!("/export {}", jsonl_out.display())),
             pa_tui::interactive::HeadlessStep::Submit("/share".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 5_000 },
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Creating gist...".to_string(),
+                timeout_ms: 10_000,
+            },
+            pa_tui::interactive::HeadlessStep::Timestamp(release_tx),
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "Creating gist...".to_string(),
+                timeout_ms: 10_000,
+            },
             pa_tui::interactive::HeadlessStep::Submit("/share now".to_string()),
         ],
         width: 100,
@@ -332,6 +351,7 @@ async fn tui_export_and_share_surface() {
         pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
             .await
             .expect("interactive run");
+    releaser.join().expect("releaser thread");
 
     std::env::set_var("PATH", previous_path);
     match previous_viewer_url {

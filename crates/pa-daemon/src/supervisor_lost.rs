@@ -62,26 +62,32 @@ async fn monitor(worker: Arc<Worker>) {
     loop {
         tokio::time::sleep(delay).await;
         delay = CHECK_INTERVAL;
-        if worker.core.lock().unwrap().shutdown_requested
-            || worker.supervisor_claims.load(Ordering::SeqCst) > 0
-        {
+        let present = worker.core.lock().unwrap().shutdown_requested
+            || worker.supervisor_claims.load(Ordering::SeqCst) > 0;
+        if present || supervisor_reachable(&worker.config.supervisor_socket_path).await {
             absent_since = None;
-            continue;
-        }
-        if supervisor_reachable(&worker.config.supervisor_socket_path).await {
-            absent_since = None;
+            // A supervisor back while a stop settles: notices wake again.
+            worker.core.lock().unwrap().supervisor_lost = false;
             continue;
         }
         let since = *absent_since.get_or_insert_with(tokio::time::Instant::now);
         if since.elapsed() < window {
             continue;
         }
-        let ongoing =
-            worker.core.lock().unwrap().has_ongoing_work() || worker.user_bash.is_running();
-        if ongoing {
+        if worker.core.lock().unwrap().has_ongoing_work() || worker.user_bash.is_running() {
             // TS `hasOngoingSessionWork` (`isSessionActive`, which counts
             // `isBashRunning`): an active run or a running user bash owns the
             // worker a little longer; its end lets the next check reconsider.
+            continue;
+        }
+        if worker.pending_detached_completions() > 0 {
+            // A backgrounded cell must not outlive the supervisor: no client
+            // is left to see or stop it. The scoped idle cancel stops it, and
+            // the exit waits until its notice is stored in the inbox (no
+            // turn starts for it); the stop's grace and kernel retirement
+            // bound the wait.
+            worker.core.lock().unwrap().supervisor_lost = true;
+            worker.engine.abort_background_cell();
             continue;
         }
         exit_orphaned(&worker, since).await;

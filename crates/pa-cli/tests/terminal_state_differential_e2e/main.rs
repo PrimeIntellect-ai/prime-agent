@@ -385,7 +385,7 @@ fn program_status_stays_working_during_provider_retry() {
 /// the `compaction_start`): the re-issued turn ends done, a recovery that
 /// gives up ends error — never an error while the recovery runs. A
 /// threshold compaction after a settled run reports working, then the
-/// run's done again. Each /copy delivers the mock's next compaction frames.
+/// run's done again. Each /copy delivers the mock's next frames.
 #[test]
 fn program_status_compaction_works_and_overflow_recovery_settles_by_outcome() {
     let _lock = harness_lock();
@@ -394,7 +394,7 @@ fn program_status_compaction_works_and_overflow_recovery_settles_by_outcome() {
         ("overflow-fail", [STATUS_WORKING, STATUS_ERROR].as_slice()),
         (
             "threshold",
-            [STATUS_DONE, STATUS_WORKING, STATUS_DONE].as_slice(),
+            [STATUS_WORKING, STATUS_DONE, STATUS_WORKING, STATUS_DONE].as_slice(),
         ),
     ] {
         let mut harness = program_status_harness(&ChildSpec::new("chat"));

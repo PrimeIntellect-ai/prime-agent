@@ -14,13 +14,15 @@
 #![allow(clippy::large_futures, clippy::too_many_lines)]
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -29,6 +31,7 @@ use pa_tui::interactive::{
     run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
     SessionSelection, UiMode,
 };
+use pa_types::inbox_notice::{INBOX_NOTICE_CLASS_ARRIVAL, INBOX_NOTICE_CLASS_REMINDER};
 
 struct Supervisor {
     child: Child,
@@ -104,18 +107,12 @@ fn spawn_supervisor(dir: &Path, kernel_venv: &Path) -> Supervisor {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor { child, socket };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(15));
+    Supervisor { child, socket }
 }
 
-/// The scripted mock provider: one response per provider request, in order.
-fn spawn_mock(next: &'static AtomicUsize) -> PathBuf {
+/// The scripted mock provider: one response per provider request.
+fn spawn_mock() -> PathBuf {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let url = format!(
         "http://127.0.0.1:{}/v1",
@@ -125,7 +122,7 @@ fn spawn_mock(next: &'static AtomicUsize) -> PathBuf {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             std::thread::spawn(move || {
-                let _ = serve(stream, next);
+                let _ = serve(stream);
             });
         }
     });
@@ -150,7 +147,7 @@ fn python_cell(code: &str) -> Value {
     })
 }
 
-fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
+fn serve(mut stream: TcpStream) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut content_length = 0usize;
     loop {
@@ -170,12 +167,20 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
     if content_length > 0 {
         reader.read_exact(&mut body)?;
     }
-    // The scripted sequence: the detached-handle turn, the arrival
-    // notice's wake, the reminder notice's wake (its turn reads and
-    // drains the store), and any unexpected extra wake.
-    let request = next.fetch_add(1, Ordering::SeqCst);
-    let data = match request {
-        0 => [
+    // The scripted replies follow the request's last message, never the
+    // request's position: the detached-handle turn, the arrival notice,
+    // the reminder that counts all three (its turn reads and drains the
+    // store), and an earlier reminder that a cycle sampled before the
+    // last completion.
+    let request: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let last = request["messages"]
+        .as_array()
+        .and_then(|messages| messages.last())
+        .cloned()
+        .unwrap_or_default();
+    let content = last["content"].to_string();
+    let data = match last["tool_call_id"].as_str() {
+        None if !content.contains("[inbox ") => [
             chunk(
                 &json!({
                     "role": "assistant",
@@ -185,7 +190,7 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
                         "id": "call-inbox-admission-1",
                         "type": "function",
                         "function": python_cell(
-                            "from rlm import bash\nh = bash('sleep 1; echo INBOX_ADMISSION_E2E')\nprint('handle started')"
+                            "import asyncio\nfrom rlm import bash\nhs = [bash(f'echo INBOX_ADMISSION_E2E_{n}; exit 1') for n in range(3)]\nwhile any(h.running for h in hs):\n    await asyncio.sleep(0.05)\nprint('handles finished')"
                         )
                     }]
                 }),
@@ -193,21 +198,21 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
             ),
             chunk(&json!({}), Some("tool_calls")),
         ],
-        1 => [
+        Some("call-inbox-admission-1") => [
             chunk(
                 &json!({"role": "assistant", "content": "handle started; the command runs detached"}),
                 None,
             ),
             chunk(&json!({}), Some("stop")),
         ],
-        2 => [
+        None if !content.contains("[inbox reminder]") => [
             chunk(
                 &json!({"role": "assistant", "content": "woken by the arrival notice"}),
                 None,
             ),
             chunk(&json!({}), Some("stop")),
         ],
-        3 => [
+        None if content.contains("[inbox reminder] 3 messages") => [
             chunk(
                 &json!({
                     "role": "assistant",
@@ -225,7 +230,7 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
             ),
             chunk(&json!({}), Some("tool_calls")),
         ],
-        4 => [
+        Some("call-inbox-admission-2") => [
             chunk(
                 &json!({"role": "assistant", "content": "read and settled"}),
                 None,
@@ -234,7 +239,7 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
         ],
         _ => [
             chunk(
-                &json!({"role": "assistant", "content": "unexpected extra wake"}),
+                &json!({"role": "assistant", "content": "woken by an early reminder"}),
                 None,
             ),
             chunk(&json!({}), Some("stop")),
@@ -364,12 +369,14 @@ fn delivered_rows(messages: &Value) -> Vec<(String, Value)> {
         .collect()
 }
 
-/// The delivered notice row whose text starts with `prefix`.
-fn notice_row<'a>(delivered: &'a [(String, Value)], prefix: &str) -> (&'a str, &'a Value) {
+/// The last delivered notice row of `class`: an early reminder can
+/// precede the arrival, so rows are addressed by class, never by order.
+fn notice_row<'a>(delivered: &'a [(String, Value)], class: &str) -> (&'a str, &'a Value) {
     let (text, row) = delivered
         .iter()
-        .find(|(text, _)| text.starts_with(prefix))
-        .unwrap_or_else(|| panic!("the {prefix} notice row never delivered: {delivered:?}"));
+        .rev()
+        .find(|(_, row)| row["details"]["class"] == class)
+        .unwrap_or_else(|| panic!("the {class} notice row never delivered: {delivered:?}"));
     (text.as_str(), row)
 }
 
@@ -431,7 +438,6 @@ fn guttered_head(text: &str) -> String {
 
 #[tokio::test]
 async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let root = tempfile::TempDir::new().expect("temp dir");
     let dir = root.path().to_path_buf();
     let agent_dir = dir.join("agent");
@@ -446,7 +452,7 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
         json!({ "agentInbox": { "enabled": true, "reminderIntervalMs": 300 } }).to_string(),
     )
     .expect("write settings.json");
-    let url = spawn_mock(&NEXT);
+    let url = spawn_mock();
     std::fs::write(
         agent_dir.join("models.json"),
         json!({
@@ -494,10 +500,13 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
         .expect("active session id")
         .to_string();
 
-    // THE REAL ADMISSION: the turn starts a detached handle and ends;
-    // the handle completes while the session idles, so the arrival
-    // notice admits and wakes a turn, and the reminder cycle admits its
-    // notice and wakes the turn that reads and drains the store.
+    // THE REAL ADMISSION: the turn starts three detached handles that fail
+    // and holds its cell until all three exit. Their completion notices
+    // leave the kernel together when the cell ends, so they coalesce into
+    // one arrival notice (a batch split across two wakes would show, and
+    // so consume, every message). The row only counts three failures, so
+    // they stay unread, and the reminder that counts all three wakes the
+    // turn that reads and drains the store.
     let turn = client.request(
         "p1",
         &json!({
@@ -520,9 +529,20 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
     // system's attribution — never the user role.
     let rows = client.messages(&active_id);
     let delivered = delivered_rows(&rows);
-    let (arrival_text, arrival_row) = notice_row(&delivered, "[inbox ");
-    let (reminder_text, reminder_row) = notice_row(&delivered, "[inbox reminder]");
-    for (row, class) in [(arrival_row, "arrival"), (reminder_row, "reminder")] {
+    let (arrival_text, arrival_row) = notice_row(&delivered, INBOX_NOTICE_CLASS_ARRIVAL);
+    let (reminder_text, reminder_row) = notice_row(&delivered, INBOX_NOTICE_CLASS_REMINDER);
+    assert!(
+        arrival_text.starts_with("[inbox ") && !arrival_text.starts_with("[inbox reminder]"),
+        "the arrival notice row's text: {arrival_text}"
+    );
+    assert!(
+        reminder_text.starts_with("[inbox reminder] 3 messages"),
+        "the reminder notice row's text: {reminder_text}"
+    );
+    for (row, class) in [
+        (arrival_row, INBOX_NOTICE_CLASS_ARRIVAL),
+        (reminder_row, INBOX_NOTICE_CLASS_REMINDER),
+    ] {
         assert_eq!(
             row["role"], "custom",
             "the {class} notice row's role: {row}"
@@ -542,7 +562,14 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
     }
 
     // THE HEADLESS RENDER: the TUI attaches to the live session and
-    // paints the transcript the real daemon delivered.
+    // paints the transcript the real daemon delivered. Each inbox run
+    // starts collapsed to its one dim counter line; Ctrl+O steps the chat
+    // detail to details, then to all, which expands the runs back into
+    // the per-notice rows.
+    let ctrl_o = HeadlessStep::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('o'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
     let mut options = chat_options(supervisor.socket.clone(), dir.clone());
     options.session = SessionSelection::Attach(active_id.clone());
     let outcome = run_interactive(
@@ -551,12 +578,23 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
             steps: vec![
                 HeadlessStep::WaitIdle { timeout_ms: 30_000 },
                 HeadlessStep::WaitRender {
-                    needle: "Agent inbox".to_string(),
+                    needle: "\u{2709} Agent inbox \u{b7} 3 waiting".to_string(),
+                    timeout_ms: 15_000,
+                },
+                ctrl_o.clone(),
+                HeadlessStep::WaitRender {
+                    needle: "Details mode".to_string(),
+                    timeout_ms: 15_000,
+                },
+                ctrl_o,
+                HeadlessStep::WaitRender {
+                    needle: "\u{2709} Agent inbox \u{b7} 3 unread messages".to_string(),
                     timeout_ms: 15_000,
                 },
             ],
             width: 100,
-            height: 34,
+            // Tall enough to hold the expanded transcript in one frame.
+            height: 90,
         }),
     )
     .await
@@ -565,19 +603,31 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
         outcome.active_session_id, active_id,
         "the attach held the live session"
     );
-    let last = outcome.frames.last().expect("a settled frame");
-    // The envelope summary lines: the inbox system's own row class, both
-    // notice classes delivered by the real admission, each with its count.
+    // The collapsed runs: one counter line per run, the arrival's new
+    // messages by class and the reminder's waiting count.
+    let collapsed = outcome
+        .frames
+        .iter()
+        .find(|frame| frame.contains("\u{2709} Agent inbox \u{b7} 3 waiting"))
+        .expect("a collapsed frame");
     assert!(
-        last.contains("\u{2709} Agent inbox \u{b7} 1 new message"),
+        collapsed.contains("\u{2709} Agent inbox \u{b7} 3 new (3 bash-done)"),
+        "the arrival run's counter line renders: {collapsed}"
+    );
+    let last = outcome.frames.last().expect("a settled frame");
+    // The expanded envelope summary lines: the inbox system's own row
+    // class, both notice classes delivered by the real admission, each
+    // with its count.
+    assert!(
+        last.contains("\u{2709} Agent inbox \u{b7} 3 new messages"),
         "the arrival summary line renders: {last}"
     );
     assert!(
-        last.contains("\u{2709} Agent inbox \u{b7} 1 unread message"),
+        last.contains("\u{2709} Agent inbox \u{b7} 3 unread messages"),
         "the reminder summary line renders: {last}"
     );
-    // The bodies stay visible under the gutter: the counts and the read
-    // call-to-action never hide behind a collapsed-only shape.
+    // The expanded bodies render under the gutter: the counts and the
+    // read call-to-action.
     assert!(
         last.contains(&guttered_head(arrival_text)),
         "the arrival body renders guttered: {last}"

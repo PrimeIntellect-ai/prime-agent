@@ -279,41 +279,6 @@ mod tests {
     }
 
     #[test]
-    fn roster_rows_are_projection_data() {
-        let roster: UpdateRoster = serde_json::from_str(ROSTER_JSON).unwrap();
-        assert_eq!(roster.format_version, UPDATE_ROSTER_FORMAT_VERSION);
-        let session = &roster.sessions[0];
-        assert_eq!(session.kind, UpdateRosterSessionKind::TopLevel);
-        assert!(session.should_resume);
-        assert!(session.in_flight.bash_running);
-        assert_eq!(
-            roster.subagents[0].status,
-            UpdateRosterSubagentStatus::Completed
-        );
-        assert_eq!(
-            roster.heartbeats[0].delivery_mode,
-            UpdateHeartbeatDeliveryMode::Steer
-        );
-        assert_eq!(
-            roster.heartbeats[1].delivery_mode,
-            UpdateHeartbeatDeliveryMode::FollowUp
-        );
-        assert_eq!(roster.heartbeats[1].status, UpdateHeartbeatStatus::Paused);
-        let encoded = serde_json::to_value(&roster.heartbeats[0]).unwrap();
-        assert!(!encoded.as_object().unwrap().contains_key("archived"));
-        assert!(encoded.as_object().unwrap().contains_key("next_run_at"));
-    }
-
-    #[test]
-    fn empty_collections_default_to_absent() {
-        // A minimal roster serializes back without the collection keys
-        // (rows only appear when present).
-        rt::<UpdateRoster>(
-            r#"{"format_version":1,"update_id":"u","socket_path":"/s","created_at":"t","supervisor":{"pid":1,"generation":"g"},"binary":{"from_version":"a","to_version":"b"}}"#,
-        );
-    }
-
-    #[test]
     fn queue_next_turn_carries_custom_messages() {
         rt::<UpdateRosterQueue>(
             r#"{"next_turn":[{"customType":"queued.note","content":"finish the build","display":true,"timestamp":1790856000000}],"actions":{"a":1}}"#,

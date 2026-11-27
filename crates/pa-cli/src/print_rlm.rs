@@ -165,6 +165,8 @@ struct InlineChildState {
     answer_text: Option<String>,
     error: Option<String>,
     started_at_ms: u64,
+    /// When the run settled: a settled child's duration stops here.
+    settled_at_ms: Option<u64>,
     /// An agent message to the parent arrived since the task was
     /// admitted; the no-reply terminal notice is withheld once set.
     replied_since_task: bool,
@@ -451,6 +453,7 @@ async fn drive_child(child: Arc<InlineChild>) {
         }
         let mut state = child.state.lock().await;
         state.settled = false;
+        state.settled_at_ms = None;
         state.status = "running";
         state.started_at_ms = crate::util_time::now_ms();
         state.error = None;
@@ -503,6 +506,7 @@ async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
             return;
         }
         state.settled = true;
+        state.settled_at_ms = Some(crate::util_time::now_ms());
         state.answer_text = answer.map(|text| cap_text(&text, ANSWER_TEXT_MAX_CHARS));
         let notice = if let Some(error) = run_error.or(terminal_error) {
             state.status = "error";
@@ -810,6 +814,10 @@ impl RlmSubagentHost for InlineHost {
                 semantic_parent_session_id: Some(node.session_id.clone()),
                 spawned_by_request_id: request.spawned_by_request_id.clone(),
                 factory_child: request.factory.is_some(),
+                factory_contract: request
+                    .factory
+                    .as_ref()
+                    .and_then(|factory| factory.contract.clone()),
             };
             let headless = crate::print_runtime::build_engine(
                 &recipe.options,
@@ -836,6 +844,7 @@ impl RlmSubagentHost for InlineHost {
                     answer_text: None,
                     error: None,
                     started_at_ms: crate::util_time::now_ms(),
+                    settled_at_ms: None,
                     replied_since_task: false,
                 }),
             });
@@ -855,7 +864,10 @@ impl RlmSubagentHost for InlineHost {
             // (TS `spawnMessage`), delivered through the one steer path.
             let kickoff_content = format!("[task from parent]\n\n{}", request.prompt);
             let kickoff_row = create_agent_session_message_row(&AgentSessionMessageRowPayload {
-                id: &format!("spawn:{child_id}"),
+                id: &format!(
+                    "{}{child_id}",
+                    pa_core::session_engine::agent_messaging::SPAWN_KICKOFF_ID_PREFIX
+                ),
                 prompt: &kickoff_content,
                 message: &request.prompt,
                 from: &node.endpoint(),
@@ -909,6 +921,7 @@ impl RlmSubagentHost for InlineHost {
                 let mut state = child.state.lock().await;
                 state.settled = true;
                 if was_running {
+                    state.settled_at_ms = Some(crate::util_time::now_ms());
                     state.status = "cancelled";
                     state.error = Some("Deleted by parent orchestrator".to_string());
                 }
@@ -963,11 +976,20 @@ impl RlmSubagentHost for InlineHost {
                         session_dir: Some(child.node.session_dir.clone()),
                         status: if unsettled { "running" } else { state.status },
                         settled: !unsettled,
+                        // The inline settle already waits out background bash
+                        // (a child never settles with a live background
+                        // command), so a factory child's task work is busy
+                        // exactly while the child is unsettled.
+                        factory_task_busy: child.factory.then_some(unsettled),
                         answer_preview: state.answer_text.as_deref().map(compact_rlm_text),
                         answer_text: state.answer_text.clone(),
                         error: state.error.clone(),
                         duration_ms: Some(
-                            crate::util_time::now_ms().saturating_sub(state.started_at_ms),
+                            state
+                                .settled_at_ms
+                                .filter(|_| !unsettled)
+                                .unwrap_or_else(crate::util_time::now_ms)
+                                .saturating_sub(state.started_at_ms),
                         ),
                         tool_use_count: None,
                         replied_since_task: Some(state.replied_since_task),
@@ -1247,6 +1269,7 @@ impl AgentMessageController for InlineMessages {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pa_core::session_engine::rlm_host::RlmSpawnKind;
 
     fn run_options(directory: &std::path::Path) -> crate::mode::RunOptions {
         crate::mode::RunOptions {
@@ -1291,6 +1314,7 @@ mod tests {
             name: Some("late".to_string()),
             model: None,
             thinking: None,
+            kind: RlmSpawnKind::Subagent,
             cwd: None,
             spawned_by_request_id: None,
             factory: None,

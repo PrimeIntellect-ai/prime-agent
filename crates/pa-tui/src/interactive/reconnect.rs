@@ -145,7 +145,7 @@ pub(crate) enum Connection {
 /// One input to [`Connection::on`].
 pub(crate) enum ConnectionEvent {
     /// A `daemon_closing` update frame (§10.2).
-    UpdateNotice { est_seconds: u64 },
+    UpdateNotice,
     /// A `daemon_closing` frame announcing the daemon's own shutdown (TS #2458).
     ShutdownNotice,
     /// The event stream closed without a notice: a daemon hiccup.
@@ -209,12 +209,11 @@ impl Connection {
         match (event, &mut *self) {
             // An update closing outranks a shutdown or hiccup recovery in flight (TS #2458): the
             // §10.2 resume contract replaces it.
-            (Event::UpdateNotice { est_seconds }, _) => {
+            (Event::UpdateNotice, _) => {
                 *self = Connection::Recovering(ReconnectLoop::start_update());
-                ConnectionEffect::Note(format!(
-                    "the daemon is restarting for an update (about {}s) — reconnecting…",
-                    est_seconds.max(1)
-                ))
+                ConnectionEffect::Note(
+                    "the daemon is restarting for an update — reconnecting…".to_string(),
+                )
             }
             // TS #2458 `reconnectAfterShutdown`: the announced closing keeps the pane mounted and
             // waits bounded (the recovery never relaunches the daemon — an explicit stop stays
@@ -231,9 +230,10 @@ impl Connection {
                 *self = Connection::Recovering(ReconnectLoop::start_lost());
                 ConnectionEffect::Warning(LOST_NOTE.to_string())
             }
-            (Event::SupervisorDied { .. }, Connection::Recovering(_) | Connection::SupervisorLost) => {
-                ConnectionEffect::None
-            }
+            (
+                Event::SupervisorDied { .. },
+                Connection::Recovering(_) | Connection::SupervisorLost,
+            ) => ConnectionEffect::None,
             // A supervisor socket loss while a live direct link still serves the session is not a
             // pane-level loss: retain it until the direct link dies.
             (
@@ -308,20 +308,19 @@ impl Connection {
                 self.back_off();
                 ConnectionEffect::Note("the daemon is still restoring — retrying…".to_string())
             }
-            // An update's reattach failure detaches the window; a lost or shutdown recovery keeps
-            // retrying through its window (the worker may still be respawning).
-            (Event::ReattachFailed(error), Connection::Recovering(driver)) => match driver.kind {
-                RecoveryKind::Update => ConnectionEffect::Exit {
-                    note: format!(
-                        "reattach after the update failed: {error} — run `prime-agent attach` to resume"
-                    ),
-                    reason: "update_reattach_failed",
-                },
-                RecoveryKind::Lost | RecoveryKind::Shutdown => {
-                    self.back_off();
-                    ConnectionEffect::Warning(format!("reattach failed: {error} — retrying…"))
+            // A failed reattach retries through the recovery window: the worker may still be
+            // respawning (after an abandoned update, the old supervisor relaunches it). The
+            // update recovery retries quietly - its expiry row carries the attach hint.
+            (Event::ReattachFailed(error), Connection::Recovering(driver)) => {
+                let kind = driver.kind;
+                self.back_off();
+                match kind {
+                    RecoveryKind::Update => ConnectionEffect::None,
+                    RecoveryKind::Lost | RecoveryKind::Shutdown => {
+                        ConnectionEffect::Warning(format!("reattach failed: {error} — retrying…"))
+                    }
                 }
-            },
+            }
             // An expired re-attach window is per-connection: a recovered connection must not keep
             // refusing submits.
             (Event::Reattached, _) | (Event::Attached, Connection::SessionPlaneFailed(_)) => {

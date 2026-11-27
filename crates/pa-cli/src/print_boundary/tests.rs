@@ -100,6 +100,8 @@ async fn faux_engine_with_telemetry(
         })
         .expect("a session manager");
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -123,12 +125,13 @@ async fn faux_engine_with_telemetry(
         additional_prompt_paths: Vec::new(),
         extra_builtin_skill_overrides: Vec::new(),
         rlm_subagent_host: None,
-        rlm_usage_store: None,
+        usage_store: None,
 
         inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
         factory_child: false,
+        factory_contract: None,
         daemonless: true,
         model_info: Some(model.clone()),
         kernel_ready_gate: None,

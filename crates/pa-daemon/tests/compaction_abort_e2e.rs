@@ -21,6 +21,9 @@
 )]
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -238,23 +241,139 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
         .env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000")
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_mins(1);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor {
-                child,
-                socket: socket.to_path_buf(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    daemon_socket::wait_until_listening(socket, Duration::from_mins(1));
+    Supervisor {
+        child,
+        socket: socket.to_path_buf(),
     }
-    panic!("supervisor socket never appeared");
 }
 
 struct Client {
     reader: BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
     events: Vec<Value>,
+}
+
+/// A `/compact` submitted through `prompt_and_wait` honors `abort_compaction` from another
+/// client like the wire `compact` command: the settled `compaction_end` is aborted and the
+/// session file gains no compaction entry.
+#[test]
+fn abort_compaction_cancels_a_prompt_route_compact() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let mock = CompactionMock::start();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({"providers": {"prime-inference": {
+            "api": "openai-completions", "baseUrl": mock.url(), "apiKey": "sk-battery",
+            "models": [{"id": "mock-1", "name": "Mock 1", "api": "openai-completions",
+                "contextWindow": 128_000, "maxTokens": 4096}]
+        }}})
+        .to_string(),
+    )
+    .expect("write models.json");
+    // Automatic compaction stays off: only the manual `/compact` summarizes.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({"compaction": {"enabled": false, "reserveTokens": 1024, "keepRecentTokens": 128}})
+            .to_string(),
+    )
+    .expect("write settings.json");
+    let socket = dir.path().join("daemon.sock");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir);
+    let mut client = Client::connect(&socket);
+    client.send_command(
+        "c1",
+        &json!({"type": "create", "config": {
+            "cwd": dir.path().to_string_lossy(), "sessionDir": session_dir.to_string_lossy(),
+            "provider": "prime-inference", "model": "mock-1"
+        }}),
+    );
+    let created = client.read_response("c1");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+    client.send_command(
+        "a1",
+        &json!({"type": "attach", "activeSessionId": session_id}),
+    );
+    assert_eq!(client.read_response("a1")["success"], true);
+    for turn in 0..3 {
+        let id = format!("seed-{turn}");
+        client.send_command(
+            &id,
+            &json!({"type": "prompt_and_wait", "activeSessionId": session_id,
+                "message": format!("seed {turn} {}", "example ".repeat(1000))}),
+        );
+        let seeded = client.read_response(&id);
+        assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
+    }
+    let mut second = Client::connect(&socket);
+    second.send_command(
+        "a2",
+        &json!({"type": "attach", "activeSessionId": session_id}),
+    );
+    assert_eq!(second.read_response("a2")["success"], true);
+
+    mock.hold_summarizer.store(true, Ordering::SeqCst);
+    client.events.clear();
+    client.send_command(
+        "compact",
+        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "/compact"}),
+    );
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while !mock
+        .requests
+        .lock()
+        .expect("mock lock")
+        .iter()
+        .any(is_summarizer_request)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the summarizer request never arrived"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    second.send_command(
+        "ab1",
+        &json!({"type": "abort_compaction", "activeSessionId": session_id}),
+    );
+    assert_eq!(second.read_response("ab1")["success"], true);
+
+    client.read_response("compact");
+    let end = client
+        .events
+        .iter()
+        .find(|event| event["type"] == "compaction_end")
+        .expect("compaction_end")
+        .clone();
+    assert_eq!(
+        end,
+        json!({"type": "compaction_end", "reason": "manual", "aborted": true,
+            "willRetry": false, "errorSeverity": "error"})
+    );
+    let session_file = std::fs::read_dir(&session_dir)
+        .expect("session dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .map(|path| std::fs::read_to_string(path).expect("session file"))
+        .find(|content| content.contains("seed 0 example"))
+        .expect("the seeded session file");
+    assert!(
+        !session_file.lines().any(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|row| row["type"] == "compaction")
+        }),
+        "the aborted compaction was committed"
+    );
 }
 
 impl Client {

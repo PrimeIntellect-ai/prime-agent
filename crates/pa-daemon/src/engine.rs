@@ -5,6 +5,25 @@
 
 use std::sync::Arc;
 
+/// The refine child's reply park: `Some(())` when the message came from
+/// one of the session's in-flight refine children and is parked for the
+/// idle-boundary apply; `None` otherwise.
+pub type RefineChildReplyPark<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send + 'a>>;
+
+/// One parked refine reply's idle-boundary apply outcome (`None` when the
+/// engine has nothing parked).
+pub type PendingRefineApply<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Option<
+                    anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
 use anyhow::Result;
 use pa_agent::abort::AbortSignal;
 use pa_core::session_engine::provider_adapter::json_round_trip;
@@ -113,6 +132,14 @@ pub trait SessionEngine: Send + Sync {
     /// a real agent loop no-op.
     fn abort_in_flight_turn(&self) {}
 
+    /// Stop only the session's detached (backgrounded) kernel cell — the
+    /// scoped idle cancel's target: no queue is touched, no turn is
+    /// aborted, and `false` answers when no detached execution runs.
+    /// Engines without a kernel no-op.
+    fn abort_background_cell(&self) -> bool {
+        false
+    }
+
     /// Switch the queue delivery modes live: apply the persisted mode to
     /// the engine's agent-level queues too.
     fn set_queue_modes(&self, steering: Option<&str>, follow_up: Option<&str>) {
@@ -142,17 +169,40 @@ pub trait SessionEngine: Send + Sync {
     /// reads the persisted setting at its build. Blocking: call off the runtime.
     fn set_auto_compaction_enabled(&self, _enabled: bool) {}
 
-    /// Consume a pending compact-trigger auto-refine review: the engine
-    /// resolves the model and runs the gated round. `Ok(None)` is every
-    /// silent outcome — no trigger armed, a gate drop, cooldown, or decline.
+    /// Consume a pending compact-trigger auto-refine round: the engine
+    /// reads the gates and, when one is due, spawns the refinement child
+    /// (fire-and-wake; its reply applies on arrival). `Ok` is every silent
+    /// outcome — no trigger armed, a gate drop, cooldown, an in-flight
+    /// round, or a spawned child.
     ///
     /// # Errors
     ///
-    /// Errors when the armed round itself fails (its model call).
-    fn consume_compact_auto_refine(
+    /// Errors when the armed round's spawn itself fails.
+    fn consume_compact_auto_refine(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Park a refine child's reply at the child-reply wake: an in-flight
+    /// refinement child's reply (or its failure envelope) is stored for the
+    /// idle-boundary apply — the fire-and-wake contract's
+    /// delivery is answered at once, and the apply never runs inside the
+    /// child's send. The late reply of a refine child that a branch move or
+    /// a replacement abandoned is consumed and dropped. `None` for any
+    /// other sender.
+    fn park_refine_child_reply(
         &self,
-    ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
-        Ok(None)
+        sender_active_session_id: &str,
+        message: &str,
+    ) -> RefineChildReplyPark<'_> {
+        let _ = (sender_active_session_id, message);
+        Box::pin(async { None })
+    }
+
+    /// Apply the oldest parked refine reply at the session's idle boundary:
+    /// the worker's runner owns turn admission, so this never interleaves
+    /// with a running turn's rows. `None` when the engine has nothing parked.
+    fn apply_pending_refine_reply(&self) -> PendingRefineApply<'_> {
+        Box::pin(async { None })
     }
 
     /// Run one branch summary (`navigate_tree` with `summarize`): summarize
@@ -198,11 +248,11 @@ pub trait SessionEngine: Send + Sync {
         None
     }
     /// The worker's turn loop started: engines hosting RLM children hold
-    /// the task prompts of children spawned from here until `on_turn_done`.
+    /// task prompts until `on_turn_done`, unless a positive collect releases one.
     fn on_turn_start(&self) {}
     /// The worker's turn loop completed: engines hosting RLM children
-    /// release prompt tasks spawned mid-turn, so the parent's continuation
-    /// request always reaches the provider before a child's first turn.
+    /// release prompt tasks still held from this turn. A positive collect can
+    /// start its selected child before the parent continues.
     fn on_turn_done(&self) {}
 
     /// Finalize session telemetry at session close: emit `agent session
@@ -285,14 +335,15 @@ pub trait SessionEngine: Send + Sync {
         None
     }
 
-    /// The session's assembled system prompt, when the engine can produce
-    /// it synchronously (the HTML export embeds it).
-    fn export_system_prompt(&self) -> Option<String> {
-        None
+    /// The session's assembled system prompt (the HTML export embeds it).
+    fn export_system_prompt(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+        Box::pin(async { None })
     }
 
     /// The session's registered tools for the export's tools section: built
-    /// now when not yet built; `None` mid-turn.
+    /// now when not yet built.
     fn export_tools(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<Value>>> + Send + '_>> {
@@ -454,18 +505,36 @@ pub trait SessionEngine: Send + Sync {
         Box::pin(async { None })
     }
 
-    /// Run one refinement (the daemon `refine` command): plan, apply, and
-    /// persist the harness state.
+    /// Run the mechanical refinement rollback (the daemon `refine` command
+    /// with a `rollbackId`): invert the target refinement's applied edits
+    /// inline — no model pass, no child.
     ///
     /// # Errors
     ///
     /// Errors when the engine does not support refinement, or model
-    /// resolution, the session build, or the round fails.
-    fn run_refinement(
+    /// resolution, the session build, or the rollback fails.
+    fn run_rollback_refinement(
         &self,
         options: pa_core::session_engine::refine::RefineOptions,
     ) -> Result<Value> {
         let _ = options;
+        anyhow::bail!("This session does not support refinement")
+    }
+
+    /// Spawn the refinement child (the daemon `refine` command without a
+    /// `rollbackId`): fire-and-wake — the child plans and its proposal
+    /// applies on its reply's arrival. Answers the child's id.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the engine does not support refinement, the session
+    /// build, or the spawn admission fails.
+    fn spawn_refinement_child(
+        &self,
+        options: pa_core::session_engine::refine::RefineOptions,
+        source: pa_core::session_engine::refine::RefinementSource,
+    ) -> Result<String> {
+        let _ = (options, source);
         anyhow::bail!("This session does not support refinement")
     }
 

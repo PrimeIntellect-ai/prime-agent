@@ -21,7 +21,11 @@
           },
           "timeout": {
             "type": "integer",
-            "description": "Seconds before this cell is interrupted (default 60 unless the user configured otherwise, max 180)."
+            "description": "Seconds this call waits before auto-backgrounding a still-running cell (default 60 unless the user configured otherwise, max 180). The cell keeps running and its completion notice arrives in the inbox, or as a full session row when it carries rich output."
+          },
+          "stop_cell": {
+            "type": "string",
+            "description": "Id of a backgrounded cell to stop before this code runs, as named in a KernelBusy refusal or in the cell's auto-background notice. The cell is interrupted; if it ignores the interrupt, the kernel restarts and unsnapshotted state is lost."
           }
         }
       }

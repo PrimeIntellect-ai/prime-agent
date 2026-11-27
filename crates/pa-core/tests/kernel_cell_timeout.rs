@@ -8,9 +8,10 @@
     clippy::cast_precision_loss
 )]
 
-//! The cell time limit interrupts a cell that runs past it: the tool result is an
-//! error naming the limit, the turn continues, and the namespace survives. A cell
-//! that ignores the interrupt gets the kernel restarted.
+//! The cell wait budget backgrounds, never interrupts: a cell that outlives
+//! its budget returns early with the partial output and a detach marker, the
+//! cell keeps running, and its completion arrives through the background
+//! sink. The namespace survives and the turn continues.
 #![cfg(unix)]
 
 use std::path::PathBuf;
@@ -112,11 +113,21 @@ fn tool_result(entries: &Value, call_id: &str) -> (String, String) {
     (status, text)
 }
 
-#[tokio::test]
-async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
-    let Some(kernel_python) = kernel_python() else {
-        return;
-    };
+type Outcomes =
+    std::sync::Arc<std::sync::Mutex<Vec<pa_core::kernel::shared::BackgroundCellOutcome>>>;
+
+/// One live-kernel session that ran `calls` (one `python_repl` call per
+/// scripted turn) in a single prompt. The engine stays alive so backgrounded
+/// cells keep running; their outcomes land in `outcomes`.
+struct CellRun {
+    _dir: tempfile::TempDir,
+    _env: EnvOverride,
+    _engine: pa_core::session_engine::engine::SessionEngine,
+    entries: Value,
+    outcomes: Outcomes,
+}
+
+async fn run_cells(kernel_python: &std::path::Path, calls: Vec<(&str, Value)>) -> CellRun {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
@@ -124,7 +135,7 @@ async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
     let cwd = dir.path().join("project");
     std::fs::create_dir_all(&cwd).expect("project dir");
 
-    let _env = EnvOverride::apply(&[
+    let env = EnvOverride::apply(&[
         (
             "PRIME_AGENT_KERNEL_PYTHON",
             Some(kernel_python.display().to_string()),
@@ -138,17 +149,7 @@ async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
 
     let model = scripted_model();
     let provider = std::sync::Arc::new(ScriptedProvider::new(model.clone()));
-    let swallow_interrupt =
-        "import time\nwhile True:\n    try:\n        time.sleep(30)\n    except KeyboardInterrupt:\n        pass";
-    for (call_id, args) in [
-        ("call-1", json!({ "code": "x = 41" })),
-        (
-            "call-2",
-            json!({ "code": "import time\nprint('before')\ntime.sleep(30)", "timeout": 2 }),
-        ),
-        ("call-3", json!({ "code": "print(x + 1)" })),
-        ("call-4", json!({ "code": swallow_interrupt, "timeout": 2 })),
-    ] {
+    for (call_id, args) in calls {
         provider.push_turn(ScriptedTurn::Events(tool_call_turn_steps(
             &model,
             None,
@@ -157,6 +158,9 @@ async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
     }
     provider.push_text_turn("done");
 
+    let outcomes: Outcomes = std::sync::Arc::default();
+    let sink = std::sync::Arc::clone(&outcomes);
+
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
         semantic_edges: None,
@@ -164,6 +168,7 @@ async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
         steering_mode: None,
         follow_up_mode: None,
         factory_child: false,
+        factory_contract: None,
         cwd: cwd.clone(),
         agent_dir,
         model: Some(model),
@@ -179,7 +184,8 @@ async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
         additional_prompt_paths: Vec::new(),
         extra_builtin_skill_overrides: Vec::new(),
         rlm_subagent_host: None,
-        rlm_usage_store: None,
+        usage_store: None,
+
         inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
@@ -190,6 +196,10 @@ async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
         kernel_ready_gate: None,
         prewarm_ipython_kernel: None,
         on_background_work_settled: None,
+        cell_wake: None,
+        on_background_cell: Some(std::sync::Arc::new(move |outcome| {
+            sink.lock().unwrap().push(outcome);
+        })),
         bash_notice_wake: None,
         queued_goal_context_purge: None,
         queued_steering_probe: None,
@@ -207,26 +217,273 @@ async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
         ),
     )
     .await
-    .expect("the turn must not wait out the 30s sleeps")
+    .expect("the turn must not wait out the whole sleep")
     .expect("prompt");
 
     let entries = serde_json::to_value(engine.session.entries().await).expect("entries json");
+    CellRun {
+        _dir: dir,
+        _env: env,
+        _engine: engine,
+        entries,
+        outcomes,
+    }
+}
 
-    // The over-limit cell is an error naming the limit; its output so far survives.
-    let (status, text) = tool_result(&entries, "call-2");
-    assert_eq!(status, "error", "{text}");
+/// Wait (bounded) for the one background-cell outcome.
+async fn background_outcome(outcomes: &Outcomes) -> pa_core::kernel::shared::BackgroundCellOutcome {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(outcome) = outcomes.lock().unwrap().pop() {
+            return outcome;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the background completion never fired"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_cell_past_its_wait_budget_auto_backgrounds_and_the_turn_continues() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let run = run_cells(
+        &kernel_python,
+        vec![
+            ("call-1", json!({ "code": "x = 41" })),
+            (
+                "call-2",
+                json!({ "code": "import time\nprint('before')\ntime.sleep(3)\nprint('after')", "timeout": 1 }),
+            ),
+            ("call-3", json!({ "code": "print(x + 1)" })),
+        ],
+    )
+    .await;
+
+    // The over-budget cell returns early: ok, with the partial output and the
+    // backgrounded note naming the cell; it is never an interrupt error.
+    let (status, text) = tool_result(&run.entries, "call-2");
+    assert_eq!(status, "ok", "{text}");
     assert!(text.contains("before"), "{text}");
-    assert!(text.contains("interrupted after 2s"), "{text}");
+    assert!(text.contains("auto-backgrounded"), "{text}");
+    assert!(!text.contains("interrupted after"), "{text}");
     assert!(!text.contains("<ipython_kernel_reset>"), "{text}");
 
     // The turn continued and the namespace is intact.
-    let (status, text) = tool_result(&entries, "call-3");
+    let (status, text) = tool_result(&run.entries, "call-3");
     assert_eq!(status, "ok", "{text}");
     assert!(text.contains("42"), "{text}");
 
-    // A cell that swallows the interrupt gets the kernel restarted.
-    let (status, text) = tool_result(&entries, "call-4");
-    assert_eq!(status, "error", "{text}");
-    assert!(text.starts_with("<ipython_kernel_reset>"), "{text}");
-    assert!(text.contains("interrupted after 2s"), "{text}");
+    // The cell kept running to completion in the background: the sink sees
+    // its full output and an ok status.
+    let outcome = background_outcome(&run.outcomes).await;
+    assert_eq!(
+        outcome.reason,
+        pa_core::kernel::shared::DetachReason::WaitBudget(1_000)
+    );
+    assert_eq!(
+        outcome.result.status,
+        pa_core::kernel::shared::ExecuteStatus::Ok
+    );
+    assert!(outcome.result.stdout.contains("after"), "{outcome:?}");
+}
+
+/// A backgrounded cell waiting at an await point no longer locks the kernel:
+/// the next cell runs at once beside it, and the backgrounded cell's
+/// `[cell-done]` notice still carries its output tail.
+#[tokio::test]
+async fn a_new_cell_runs_beside_a_backgrounded_cell_that_awaits() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let run = run_cells(
+        &kernel_python,
+        vec![
+            ("call-1", json!({ "code": "x = 41" })),
+            (
+                "call-2",
+                json!({ "code": "import asyncio\nprint('before')\nawait asyncio.sleep(4)\nprint('after')", "timeout": 1 }),
+            ),
+            ("call-3", json!({ "code": "print(x + 1)" })),
+        ],
+    )
+    .await;
+
+    let (status, text) = tool_result(&run.entries, "call-2");
+    assert_eq!(status, "ok", "{text}");
+    assert!(text.contains("auto-backgrounded"), "{text}");
+    let (status, text) = tool_result(&run.entries, "call-3");
+    assert_eq!(status, "ok", "{text}");
+    assert!(text.contains("42"), "{text}");
+    // The turn ended while the backgrounded cell still awaited: call-3 never
+    // waited for it to settle.
+    assert!(
+        run.outcomes.lock().unwrap().is_empty(),
+        "the backgrounded cell settled before the next cell ran"
+    );
+
+    let outcome = background_outcome(&run.outcomes).await;
+    let notice =
+        pa_core::session_engine::bash_notices::KernelNotice::background_cell_completion(&outcome);
+    let text = serde_json::to_value(&notice.row.content).expect("notice content");
+    let text = text.as_str().expect("a text-only notice");
+    assert!(text.starts_with("[cell-done id:"), "{text}");
+    assert!(text.contains("status:ok"), "{text}");
+    assert!(text.ends_with("before\nafter"), "{text}");
+}
+
+/// The text blocks of one `python_repl` call, joined.
+async fn repl_call(tool: &pa_core::ToolDefinition, args: Value) -> anyhow::Result<String> {
+    let result = (tool.execute)("call", args, None, None).await?;
+    Ok(result
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            pa_core::ToolContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// The next background-cell completion, bounded.
+async fn next_outcome(
+    outcomes: &mut tokio::sync::mpsc::UnboundedReceiver<
+        pa_core::kernel::shared::BackgroundCellOutcome,
+    >,
+) -> pa_core::kernel::shared::BackgroundCellOutcome {
+    tokio::time::timeout(std::time::Duration::from_secs(10), outcomes.recv())
+        .await
+        .expect("a background completion")
+        .expect("the provisioner is alive")
+}
+
+/// The cell id an auto-background note names.
+fn backgrounded_cell(text: &str) -> String {
+    text.split("auto-backgrounded (cell ")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .unwrap_or_else(|| panic!("no auto-background note: {text}"))
+        .to_string()
+}
+
+/// `stop_cell` stops only the named backgrounded cell and runs the call's
+/// code once the stop settled: a blocking cell stops on its interrupt while
+/// an awaiting cell beside it keeps running, and a cell that ignores the
+/// interrupt restarts the kernel before the code runs.
+#[tokio::test]
+async fn stop_cell_stops_only_the_named_backgrounded_cell_then_runs_the_code() {
+    use pa_core::kernel::provisioner::{
+        IpythonKernelProvisioner as KernelProvisioner, IpythonKernelProvisionerOptions,
+    };
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let go = dir.path().join("go");
+    let (outcome_tx, mut outcome_rx) = tokio::sync::mpsc::unbounded_channel();
+    let provisioner = KernelProvisioner::new(
+        dir.path(),
+        IpythonKernelProvisionerOptions {
+            python: Some(kernel_python),
+            cell_timeout_ms: Some(60_000),
+            on_background_cell: Some(std::sync::Arc::new(move |outcome| {
+                let _ = outcome_tx.send(outcome);
+            })),
+            ..Default::default()
+        },
+    );
+    let tool = pa_core::create_ipython_tool_definition(
+        "",
+        pa_core::IpythonToolOptions {
+            provisioner: std::sync::Arc::new(provisioner),
+            on_late_sent_agent_message: None,
+        },
+    );
+
+    repl_call(&tool, json!({ "code": "x = 41" })).await.unwrap();
+    let awaiter = backgrounded_cell(
+        &repl_call(
+            &tool,
+            json!({ "code": format!("import asyncio, os\nwhile not os.path.exists({:?}):\n    await asyncio.sleep(0.05)\nprint('awaiter done')", go.display().to_string()), "timeout": 1 }),
+        )
+        .await
+        .unwrap(),
+    );
+    let blocker = backgrounded_cell(
+        &repl_call(
+            &tool,
+            json!({ "code": "import time\ntime.sleep(120)", "timeout": 1 }),
+        )
+        .await
+        .unwrap(),
+    );
+
+    let text = repl_call(
+        &tool,
+        json!({ "code": "print(x + 1)", "stop_cell": blocker }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text.trim_end(), format!("Stopped cell '{blocker}'.\n42"));
+    // The awaiting cell cannot settle before the release below, so the first
+    // completion is the stopped cell's.
+    let stopped = next_outcome(&mut outcome_rx).await;
+    assert_eq!(stopped.cell_id, blocker);
+    assert_eq!(
+        stopped.result.error.map(|error| error.ename).as_deref(),
+        Some("KeyboardInterrupt")
+    );
+
+    let refusal = repl_call(
+        &tool,
+        json!({ "code": "print('ran')", "stop_cell": blocker }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        refusal.to_string(),
+        format!("No running backgrounded cell '{blocker}', so this cell did not run.")
+    );
+
+    std::fs::write(&go, "").expect("release the awaiting cell");
+    let completion = next_outcome(&mut outcome_rx).await;
+    assert_eq!(completion.cell_id, awaiter);
+    assert_eq!(
+        completion.result.status,
+        pa_core::kernel::shared::ExecuteStatus::Ok
+    );
+    assert!(
+        completion.result.stdout.contains("awaiter done"),
+        "{completion:?}"
+    );
+
+    let stubborn = backgrounded_cell(
+        &repl_call(
+            &tool,
+            json!({ "code": "import time\ntry:\n    time.sleep(120)\nexcept KeyboardInterrupt:\n    while True:\n        time.sleep(0.05)", "timeout": 1 }),
+        )
+        .await
+        .unwrap(),
+    );
+    let text = repl_call(
+        &tool,
+        json!({ "code": "print('fresh')", "stop_cell": stubborn }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        text.starts_with(&format!(
+            "Cell '{stubborn}' ignored the interrupt; the kernel restarted and unsnapshotted state was lost.\n<ipython_kernel_reset>"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.trim_end()
+            .ends_with("</ipython_kernel_reset>\n\nfresh"),
+        "{text}"
+    );
 }

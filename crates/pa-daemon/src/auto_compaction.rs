@@ -72,19 +72,9 @@ impl AgentSessionEngine {
         if !due {
             return AutoCompactionRun::NotDue;
         }
-        // TS `_runAutoCompaction` emits the start event before the
-        // summarizer runs, so attached surfaces see the loader.
-        if !emit(EngineEvent::CompactionStart {
-            event: crate::compaction::compaction_start_event("threshold", None),
-        }) {
-            return AutoCompactionRun::Cancelled;
-        }
-        pa_core::session_engine::compaction_trace::trace(
-            "auto.threshold_start_emitted",
-            &serde_json::Value::Null,
-        );
         // TS assigns `_autoCompactionAbortController` for the run's duration: an
         // `abort_compaction` command lands in the slot and cancels the in-flight summarizer.
+        // The slot is set before the start event, so an abort sent on that event lands.
         let controller = std::sync::Arc::new(AbortController::new());
         let signal = controller.signal();
         {
@@ -93,6 +83,18 @@ impl AgentSessionEngine {
                 .lock()
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
+        // TS `_runAutoCompaction` emits the start event before the
+        // summarizer runs, so attached surfaces see the loader.
+        if !emit(EngineEvent::CompactionStart {
+            event: crate::compaction::compaction_start_event("threshold", None),
+        }) {
+            self.clear_auto_compaction_abort(&controller);
+            return AutoCompactionRun::Cancelled;
+        }
+        pa_core::session_engine::compaction_trace::trace(
+            "auto.threshold_start_emitted",
+            &serde_json::Value::Null,
+        );
         let (model, api_key) = self.resolve_request_target(model);
         // The lock covers the clone only; the summarizer call below must not ride it.
         let engine = self.session.blocking_lock().clone();
@@ -101,41 +103,35 @@ impl AgentSessionEngine {
             return AutoCompactionRun::NotDue;
         };
         let outcome = {
-            // The abort race drops the summarizer request in flight; the
-            // signal also lands the pre-commit check inside the compaction.
-            let compact = async {
-                engine
-                    .session
-                    .compact(None, &model, api_key, Some(&signal))
-                    .await
-            };
-            let outcome = self
-                .runtime
-                .block_on(pa_agent::abort::race_with_abort(compact, &signal));
+            // The signal drops the summarizer request in flight and lands the
+            // pre-commit check; a committed compaction finishes.
+            let outcome =
+                self.runtime
+                    .block_on(engine.session.compact(None, &model, api_key, Some(&signal)));
             self.clear_auto_compaction_abort(&controller);
             outcome
         };
         pa_core::session_engine::compaction_trace::trace(
             "auto.compact_returned",
             &(match &outcome {
-                Ok(Ok(CompactOutcome::Ran(_))) => {
+                Ok(CompactOutcome::Ran(_)) => {
                     serde_json::json!({ "outcome": "ran" })
                 }
-                Ok(Ok(CompactOutcome::Skipped(_))) => {
+                Ok(CompactOutcome::Skipped(_)) => {
                     serde_json::json!({ "outcome": "skipped" })
                 }
-                // The abort marker (from either layer) is checked before the
-                // generic failure, so a cancelled run traces "cancelled".
-                Ok(Err(error)) | Err(error) if pa_agent::abort::is_abort_error(error) => {
+                // The abort marker is checked before the generic failure, so a
+                // cancelled run traces "cancelled".
+                Err(error) if pa_agent::abort::is_abort_error(error) => {
                     serde_json::json!({ "outcome": "cancelled" })
                 }
-                Ok(Err(_)) | Err(_) => {
+                Err(_) => {
                     serde_json::json!({ "outcome": "failed" })
                 }
             }),
         );
         match &outcome {
-            Ok(Ok(CompactOutcome::Ran(run))) => {
+            Ok(CompactOutcome::Ran(run)) => {
                 // The post-compaction kernel notice goes out before the settled end (TS
                 // `_syncKernelStateAfterCompaction`): its `message_start`/`message_end` pair
                 // precedes `compaction_end`.
@@ -179,7 +175,7 @@ impl AgentSessionEngine {
             }
             // A skip consumed the check (TS `CompactionSkippedError`): the disclosure row
             // goes out with its message pair, then the end event carries the warning.
-            Ok(Ok(CompactOutcome::Skipped(message))) => {
+            Ok(CompactOutcome::Skipped(message)) => {
                 if !self.emit_unsuccessful_compaction(
                     CompactionOutcomeReason::Threshold,
                     CompactionOutcomeKind::Skipped,
@@ -190,10 +186,10 @@ impl AgentSessionEngine {
                     return AutoCompactionRun::Cancelled;
                 }
             }
-            // An abort from either layer — the race dropped the in-flight summarizer request,
-            // or the pre-commit signal check fired (TS `_runAutoCompaction`'s aborted arm,
-            // checked before the skip and failure arms).
-            Ok(Err(error)) | Err(error) if pa_agent::abort::is_abort_error(error) => {
+            // An abort before the commit — the dropped summarizer request or the pre-commit
+            // signal check (TS `_runAutoCompaction`'s aborted arm, checked before the skip
+            // and failure arms).
+            Err(error) if pa_agent::abort::is_abort_error(error) => {
                 if !self.emit_unsuccessful_compaction(
                     CompactionOutcomeReason::Threshold,
                     CompactionOutcomeKind::Cancelled,
@@ -206,7 +202,7 @@ impl AgentSessionEngine {
             }
             // A failed run persists the disclosure row and emits the `compaction_end` failure
             // (TS `_endCompactionUnsuccessfully`: automatic failures carry no `errorSeverity`).
-            Ok(Err(error)) | Err(error) => {
+            Err(error) => {
                 if !self.emit_unsuccessful_compaction(
                     CompactionOutcomeReason::Threshold,
                     CompactionOutcomeKind::Failed,
@@ -218,7 +214,7 @@ impl AgentSessionEngine {
                 }
             }
         }
-        if matches!(outcome, Ok(Ok(CompactOutcome::Ran(_)))) {
+        if matches!(outcome, Ok(CompactOutcome::Ran(_))) {
             AutoCompactionRun::Compacted
         } else {
             AutoCompactionRun::Ran

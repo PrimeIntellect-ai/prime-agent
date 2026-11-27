@@ -15,6 +15,9 @@
 //! `script` seam is the faux provider contract; the product never sets it.
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
@@ -434,14 +437,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         });
     }
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_mins(1);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor { child, socket };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(&socket, Duration::from_mins(1));
+    Supervisor { child, socket }
 }
 
 /// Create a live session through the daemon protocol, writing the scripted engine config first.
@@ -2407,6 +2404,53 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
     assert!(
         wall < Duration::from_secs(100),
         "the whole run took {wall:?}; the turn render must keep up with the producer"
+    );
+    drop(supervisor);
+}
+
+/// A `WaitIdle` barrier held by a running turn parks the loop. The plan's input sender closes
+/// once its last step is queued; a loop that kept polling the closed channel never parked,
+/// starving the daemon reader on this current-thread runtime, so under CPU load the turn end
+/// reached the barrier minutes late. The spin shows as the loop thread's CPU time.
+#[tokio::test]
+async fn tui_wait_idle_barrier_parks_while_the_turn_runs() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let session_dir = dir.path().join("agent").join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let script = serde_json::json!({ "responses": [{ "text": "held reply", "delayMs": 4_000 }] });
+    std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
+    let options = base_options(&supervisor, dir.path(), &session_dir);
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("hold".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 45_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let thread_cpu = || {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut now) },
+            0
+        );
+        Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+    };
+    let cpu_before = thread_cpu();
+    let started = Instant::now();
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    let cpu = thread_cpu().saturating_sub(cpu_before);
+    let wall = started.elapsed();
+    assert_eq!(outcome.last_assistant_text.as_deref(), Some("held reply"));
+    assert!(
+        cpu < wall / 5,
+        "the loop thread burned {cpu:?} of CPU over a {wall:?} run: the barrier spun instead of parking"
     );
     drop(supervisor);
 }

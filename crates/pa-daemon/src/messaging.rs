@@ -72,6 +72,7 @@ impl Supervisor {
                         wake_source
                             .as_ref()
                             .map(|(resident, summary)| (resident, summary)),
+                        None,
                     )
                     .await
                 {
@@ -179,6 +180,7 @@ impl Supervisor {
         resolve_error: &anyhow::Error,
         selector: &str,
         source: Option<(&Arc<ResidentWorker>, &Value)>,
+        telemetry_disabled: Option<bool>,
     ) -> WakeOutcome {
         let rendered = resolve_error.to_string();
         if !rendered.starts_with("Unknown active session:") {
@@ -234,7 +236,7 @@ impl Supervisor {
             // the parent's session-artifacts tree); the spawn ledger still
             // tracks them, so a child selector falls back to its live edges.
             Ok(Ok(None)) => {
-                return match self.wake_ledger_child(selector).await {
+                return match self.wake_ledger_child(selector, telemetry_disabled).await {
                     Some(outcome) => outcome,
                     None => WakeOutcome::Unknown,
                 }
@@ -260,9 +262,9 @@ impl Supervisor {
             no_session: None,
             name: None,
             config: Some(json!({ "cwd": info.cwd, "rlmDepth": info.rlm_depth })),
-            // Telemetry opt-out only ever rides an explicit user create;
-            // the wake create inherits the daemon default (absent).
-            telemetry_disabled: None,
+            // The opt-out rides only from a user's own request (an attaching
+            // client's); an agent-origin wake inherits the daemon default.
+            telemetry_disabled,
             runtime_metadata: None,
             lifecycle: None,
             env: None,
@@ -323,7 +325,11 @@ impl Supervisor {
     /// caller's unknown-session error; `Some(Failed)` carries the wake's
     /// own error (an ambiguous selector outranks the miss, like the
     /// catalog's).
-    async fn wake_ledger_child(self: &Arc<Self>, selector: &str) -> Option<WakeOutcome> {
+    async fn wake_ledger_child(
+        self: &Arc<Self>,
+        selector: &str,
+        telemetry_disabled: Option<bool>,
+    ) -> Option<WakeOutcome> {
         let ledger = match self.rlm_spawn_ledger_for(None).await {
             Ok(ledger) => ledger,
             Err(error) => return Some(WakeOutcome::Failed(error.to_string())),
@@ -340,15 +346,8 @@ impl Supervisor {
             0 => None,
             1 => {
                 let edge = matches.pop().expect("one match");
-                let session_file = edge.child.clone();
-                let (cwd, depth) =
-                    crate::session_store::read_session_info(std::path::Path::new(&session_file))
-                        .map_or_else(
-                            || ("/".to_string(), edge.depth),
-                            |info| (info.cwd, info.rlm_depth),
-                        );
                 Some(
-                    self.launch_ledger_child_wake(&session_file, cwd, &edge.child_id, depth)
+                    self.launch_ledger_child_wake(edge, telemetry_disabled)
                         .await,
                 )
             }
@@ -360,16 +359,50 @@ impl Supervisor {
 
     /// Spawn one worker over a ledger child's session file, with the same
     /// concurrent-wake protections as the saved-session wake.
+    ///
+    /// The fresh create replays the child's durable identity: the ledger
+    /// edge's `decisionChild` flag (a dropped flag revives a decision
+    /// child as an agent session) and its parent session id
+    /// (the parent edge a revived decision child's replies route by — the
+    /// live parent id is not durable, so the child targets the parent's
+    /// durable session id, which resolves a live parent directly and a
+    /// passivated one through its wake).
     async fn launch_ledger_child_wake(
         self: &Arc<Self>,
-        session_file: &str,
-        cwd: String,
-        child_id: &str,
-        depth: u32,
+        edge: &crate::rlm_ledger::RlmLedgerEdge,
+        telemetry_disabled: Option<bool>,
     ) -> WakeOutcome {
+        let session_file = edge.child.as_str();
+        let parent_file = edge.parent.as_str();
+        let child_id = edge.child_id.as_str();
+        let decision_child = edge.decision_child;
+        let (cwd, depth) =
+            crate::session_store::read_session_info(std::path::Path::new(session_file))
+                .map_or_else(
+                    || ("/".to_string(), edge.depth),
+                    |info| (info.cwd, info.rlm_depth),
+                );
         // Reuse before spawning: a concurrent revival may already host the file.
         if let Some(resident) = self.registry.find_by_session_file(session_file).await {
             return WakeOutcome::Woken(resident);
+        }
+        let parent_session_id = std::path::Path::new(parent_file)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut config = json!({ "cwd": cwd, "rlmDepth": depth });
+        if decision_child {
+            config["decisionChild"] = json!(true);
+        }
+        if !parent_file.is_empty() {
+            // The spawn's config carries the parent path into the durable
+            // create command's rest (the replay-key list reads it there);
+            // the wake keeps that shape so a respawn replays it too.
+            config["parentSessionPath"] = json!(parent_file);
+        }
+        let mut runtime_metadata = json!({ "kind": "subagent", "rlmChildId": child_id });
+        if !parent_session_id.is_empty() {
+            runtime_metadata["parentSessionId"] = json!(parent_session_id);
         }
         let create = DaemonCommand::Create {
             id: None,
@@ -382,9 +415,9 @@ impl Supervisor {
             // into the DURABLE create command's rest, which the passivation
             // fence reads; without them the revived child's fence sees a
             // root and never re-passivates.
-            config: Some(json!({ "cwd": cwd, "rlmDepth": depth })),
-            telemetry_disabled: None,
-            runtime_metadata: Some(json!({ "kind": "subagent", "rlmChildId": child_id })),
+            config: Some(config),
+            telemetry_disabled,
+            runtime_metadata: Some(runtime_metadata),
             lifecycle: None,
             env: None,
             launch_env: None,
@@ -672,8 +705,9 @@ mod tests {
             name: "kid".to_string(),
             deleted: None,
             deleted_usage: None,
-            deleted_usage_by_model: None,
             factory: None,
+            decision_child: false,
+            refine_child: false,
         };
         for selector in ["kid", "sub-kid1", "sess-kid"] {
             assert!(ledger_edge_matches(&edge, selector), "{selector}");

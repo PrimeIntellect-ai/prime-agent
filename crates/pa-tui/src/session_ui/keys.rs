@@ -318,7 +318,9 @@ impl SessionUi {
                 view.overlay = None;
                 self.dirty = true;
                 match purpose {
-                    ChoicePurpose::Effort => self.apply_thinking_level(&key, view).await,
+                    ChoicePurpose::Effort => {
+                        self.apply_thinking_level(&key, view).await;
+                    }
                 }
             }
         }
@@ -350,7 +352,11 @@ impl SessionUi {
                 return self.handle_choice_picker_key(key, view).await
             }
             Some(Overlay::Mcp(_)) => return self.handle_mcp_view_key(key, view),
-            Some(Overlay::Factory(_)) => return self.handle_factory_view_key(key, view).await,
+            Some(Overlay::Factory { .. }) => return self.handle_factory_view_key(key, view).await,
+            Some(Overlay::Library(_)) => {
+                self.handle_library_view_key(key, view);
+                return Ok(());
+            }
             Some(Overlay::Heartbeats(_)) => {
                 return self.handle_heartbeats_picker_key(key, view).await;
             }

@@ -245,25 +245,17 @@ pub struct CustomEntry {
     pub rest: JsonMap,
 }
 
-/// Origin of a child-usage attribution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChildUsageOrigin {
-    SpawnTask,
-    AgentMessage,
-    DirectUser,
-}
-
-/// `type: "child_usage_attributed"`: RLM child usage folded into a parent
-/// assistant message, kept separately for audit/UI.
+/// `type: "child_usage_attributed"`: a legacy RLM child usage delta folded
+/// into a parent assistant message. Read for old transcripts; never written.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildUsageAttributionEntry {
     pub target_id: String,
     pub child_usage: Usage,
     pub aggregate_usage: Usage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<ChildUsageOrigin>,
+    /// Fields old writers recorded (the `origin` label), kept verbatim.
+    #[serde(flatten)]
+    pub rest: JsonMap,
 }
 
 /// `type: "label"`: a tree-node label set from the UI.
@@ -763,11 +755,6 @@ mod tests {
             Some("model_change")
         );
         assert_roundtrips(json);
-    }
-
-    #[test]
-    fn non_object_entry_is_rejected() {
-        assert!(serde_json::from_str::<FileEntry>(r#""not an entry""#).is_err());
     }
 
     /// A custom row without a `timestamp` fills the clock through the

@@ -16,12 +16,15 @@
 //! file paths — and hits render as one flat, relevance-ranked list.
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
 use pa_tui::interactive::SessionSelection;
@@ -106,14 +109,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor { child, socket };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(15));
+    Supervisor { child, socket }
 }
 
 /// One saved-session fixture: header, display name, and a user/assistant
@@ -415,10 +412,10 @@ async fn ranked_hits_sort_by_relevance_then_recency() {
     drop(supervisor);
 }
 
-/// Ctrl+F switches the search to message text: a transcript-only word matches nothing by title,
-/// then finds the session whose user or assistant text holds it, and Ctrl+F switches back.
+/// Ctrl+G switches the search to message text: a transcript-only word matches nothing by title,
+/// then finds the session whose user or assistant text holds it, and Ctrl+G switches back.
 #[tokio::test]
-async fn ctrl_f_searches_message_text() {
+async fn ctrl_g_searches_message_text() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -470,17 +467,17 @@ async fn ctrl_f_searches_message_text() {
                 needle: "No sessions match".to_string(),
                 timeout_ms: 5_000,
             },
-            AgentsStep::Key("ctrl+f".to_string()),
+            AgentsStep::Key("ctrl+g".to_string()),
             AgentsStep::WaitRender {
                 needle: "gateway worker".to_string(),
                 timeout_ms: 10_000,
             },
-            AgentsStep::Key("ctrl+f".to_string()),
+            AgentsStep::Key("ctrl+g".to_string()),
             AgentsStep::WaitRender {
                 needle: "No sessions match".to_string(),
                 timeout_ms: 5_000,
             },
-            AgentsStep::Key("ctrl+f".to_string()),
+            AgentsStep::Key("ctrl+g".to_string()),
             AgentsStep::WaitRender {
                 needle: "gateway worker".to_string(),
                 timeout_ms: 10_000,
@@ -499,7 +496,7 @@ async fn ctrl_f_searches_message_text() {
 
     let hit = frame_of(&outcome.frames, "gateway worker");
     assert!(
-        hit.contains("Ctrl+F search titles"),
+        hit.contains("Ctrl+G search titles"),
         "the hint offers the way back to title search:\n{hit}"
     );
     assert!(

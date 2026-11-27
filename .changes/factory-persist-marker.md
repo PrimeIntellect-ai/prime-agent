@@ -1,0 +1,1 @@
+- A failed factory registry snapshot leaves a trace across a kernel restart: the first failure writes a durable per-run marker, the next boot surfaces it loudly on stderr (a corrupt or unreadable marker still names the loss), and a corrupt marker never blocks the registry load.

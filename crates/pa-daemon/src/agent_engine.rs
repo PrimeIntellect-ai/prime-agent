@@ -50,6 +50,8 @@ mod goalcore;
 mod lifecycle;
 mod turn_types;
 
+pub(crate) use goalcore::GoalWakeKind;
+
 use turn_types::{
     aborted_message, drop_trailing_assistant, retry_event_to_engine_event, BoundaryRun,
     TurnAdmission, TurnOnce, TurnPrompt, TurnResult,
@@ -64,16 +66,13 @@ mod core_state;
 
 mod artifacts;
 
-pub(crate) use artifacts::{artifact_reference, now_millis};
+pub(crate) use artifacts::artifact_reference;
 
 pub use config::AgentEngineConfig;
 pub(crate) use config::AutonomousAdmission;
 pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
-use config::{
-    GoalRuntimeHandles, ModelResolutionWarning, ProducerUsageSink, RestoredSessionModel,
-    StartupScope,
-};
+use config::{GoalRuntimeHandles, ModelResolutionWarning, RestoredSessionModel, StartupScope};
 
 mod reload;
 mod session_engine_impl;
@@ -143,9 +142,11 @@ pub struct AgentSessionEngine {
     /// The queued-goal-context purge (TS `_clearQueuedGoalContexts`):
     /// invoked by pause/clear/start and `goal.complete`.
     pub(crate) goal_queue_purge: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
-    /// The armed backoff wake's cron job id: `Some` while a one-shot
-    /// `goal-backoff-wake` is pending (cancelled by a successful mint).
-    pub(crate) goal_backoff_wake_job_id: std::sync::Mutex<Option<String>>,
+    /// `true` once the current goal deferral armed its one background-skip
+    /// fallback wake (the wake may have fired since); retiring the goal wakes
+    /// (`cancel_goal_wake`: the mint, the goal's transitions, a new arming)
+    /// clears it.
+    pub(crate) background_skip_wake_armed: std::sync::atomic::AtomicBool,
     /// The stale-row guard's DURABLE terminal row, deferred until after the
     /// context adoption; `Some` between the seed and the flush.
     pub(crate) stale_goal_terminal_pending: std::sync::Mutex<Option<pa_core::goals::GoalState>>,
@@ -153,6 +154,10 @@ pub struct AgentSessionEngine {
     /// admit through the steering lane, `bash.consumed` withdraws a completion
     /// row. `None` outside a daemon worker.
     pub(crate) kernel_notice_sink: std::sync::Mutex<Option<crate::engine::KernelNoticeSink>>,
+    /// The session's shared cell wake (stable across session rebuilds): a user
+    /// message or inbox arrival fires it so a running cell's wait ends early
+    /// and the work auto-backgrounds.
+    pub(crate) cell_wake: std::sync::Arc<pa_core::kernel::cell_wake::CellWake>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
     /// The current session's agent inbox store (the notice sink routes
     /// `bash.completed`/`factory.progress` messages into it); set at
@@ -230,11 +235,35 @@ pub struct AgentSessionEngine {
     /// failed `reload()` keeps the last read's data — a transiently-held
     /// document lock or a corrupt auth.json is not a logout.
     pub(crate) request_auth_registry: std::sync::Mutex<Option<pa_core::models::ModelRegistry>>,
+    /// The provider the selection's explicit key was configured for: the
+    /// key serves that provider only (see
+    /// [`Self::selection_api_key_for`]).
+    pub(crate) selection_api_key_provider: std::sync::RwLock<Option<String>>,
     /// One shared supervisor-link client: agent messaging and RLM children
     /// multiplex the same connection.
     link: Arc<crate::supervisor_link::SupervisorLink>,
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
+    /// The in-flight refinement children, keyed by the child's active
+    /// session id for the child-reply wake.
+    pub(crate) refine_flights: std::sync::Mutex<
+        std::collections::HashMap<String, crate::refine_children::RefineChildFlight>,
+    >,
+    /// The parked refinement replies, oldest first: each waits for the
+    /// session's idle boundary, where it applies — the wake answers the
+    /// delivery at once, and the apply never interleaves with a running
+    /// turn's rows.
+    pub(crate) pending_refine_replies:
+        std::sync::Mutex<Vec<crate::refine_children::PendingRefineReply>>,
+    /// The active session ids of the refinement children that a branch
+    /// move or a replacement abandoned. The cancel cannot recall a reply
+    /// that is already in delivery, so the park drops that late reply and
+    /// removes its id. An id whose child never replied stays, as the child
+    /// registry also keeps its own record of that child.
+    pub(crate) abandoned_refine_children: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Orders refinement-child admissions (prepare, spawn, flight record,
+    /// prompt release) against an abandon.
+    pub(crate) refine_spawn_lock: tokio::sync::Mutex<()>,
     /// The worker-installed summary-delta sink, adopted onto every built
     /// session. `None` without a worker pump.
     compaction_summary_sink:
@@ -243,14 +272,8 @@ pub struct AgentSessionEngine {
     /// build; `None` without a worker pump.
     progress_note_emit:
         std::sync::Mutex<Option<pa_core::session_engine::rlm_host::RlmProgressNoteEmit>>,
-    /// The attribution producer the children registry's sink last got:
-    /// children outlive a rebuild, so their spawn registrations are adopted
-    /// forward.
-    usage_producer: std::sync::Mutex<
-        Option<std::sync::Arc<pa_core::session_engine::rlm_usage::RlmChildUsageAttributions>>,
-    >,
-    rlm_usage_store: std::sync::Mutex<
-        Option<std::sync::Arc<dyn pa_core::session_engine::rlm_usage::RlmChildUsageStore>>,
+    usage_store: std::sync::Mutex<
+        Option<std::sync::Arc<dyn pa_core::session_engine::usage_store::UsageStore>>,
     >,
     own_summary: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
     pub(crate) create_resources: std::sync::RwLock<CreateSessionResources>,
@@ -286,6 +309,9 @@ pub struct AgentSessionEngine {
     /// Whether this session runs a factory state (its create carried a
     /// factory run tag): selects the child prompt's factory line.
     factory_child: std::sync::atomic::AtomicBool,
+    /// The factory state's output contract from the create, which the
+    /// engine registers as the child's `factory.emit` and `factory.inputs`.
+    factory_contract: std::sync::Mutex<Option<serde_json::Value>>,
     /// The depth bound's source stamp (`default` | `env` | `global` |
     /// `inherited` | `chat`).
     rlm_max_depth_source: std::sync::Mutex<&'static str>,
@@ -306,7 +332,7 @@ pub struct AgentSessionEngine {
     /// last writer leaves the newest target standing.
     pub(crate) reload_lock: std::sync::Mutex<()>,
 
-    /// Turn-boundary runs register their controller here;
+    /// Turn-boundary runs and the prompt-route `/compact` register their controller here;
     /// [`SessionEngine::abort_auto_compaction`] aborts whatever holds it.
     pub(crate) auto_compaction_abort: std::sync::Mutex<Option<std::sync::Arc<AbortController>>>,
     /// The model-allowlist refusal telemetry, shared with the RLM children

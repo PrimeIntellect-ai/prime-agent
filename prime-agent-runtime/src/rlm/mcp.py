@@ -100,8 +100,8 @@ class McpDiscoveryError(RuntimeError):
 class McpCredentialsUnavailable(RuntimeError):
     """Raised when a configured connection has no usable credentials.
 
-    The user must connect the service first (`/plugins` or
-    `/mcp login <service>`)."""
+    The user must connect the service first (`/plugins` or `/mcp`, then select
+    the service)."""
 
 
 class _StderrTail(io.TextIOBase):
@@ -912,7 +912,7 @@ def _bound_auth(provider: str, config: dict[str, Any]) -> dict[str, Any] | None:
 def _credentials_unavailable(server: str) -> McpCredentialsUnavailable:
     return McpCredentialsUnavailable(
         f"MCP credentials for '{server}' are not available. Ask the user to connect it "
-        f"(/plugins or /mcp login {server}); do not ask them to set environment variables."
+        f"(/plugins or /mcp, then select {server}); do not ask them to set environment variables."
     )
 
 

@@ -180,8 +180,9 @@ def observe(binary, root, observed):
             raise AssertionError('factory did not leave running after parent turn completed')
         def parent_notice(kind):
             # The agent inbox routes factory milestones: the parent is woken
-            # by the short steering notice, and the full text waits in the
-            # durable inbox until the session reads it.
+            # by a wake row. A row of one or two items shows their full text
+            # and marks them read; otherwise the text waits in the durable
+            # inbox until the session reads it.
             notice = f'[factory-progress run:{run_id}] {kind}:'
             deadline = time.monotonic() + 120
             last_probe = 0.0
@@ -194,7 +195,7 @@ def observe(binary, root, observed):
                         for m in body.get('messages', []) if m.get('role') == 'tool'
                         for content in texts(m.get('content'))
                         for line in content.splitlines() if line.startswith(NOTICES_MARKER)]
-                found = [text for payload in read for text in json.loads(payload)]
+                found = wake + [text for payload in read for text in json.loads(payload)]
                 for text in found:
                     if notice in text:
                         return {'wake': wake[0] if wake else None, 'read': text}

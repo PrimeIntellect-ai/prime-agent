@@ -12,7 +12,9 @@ use crate::agents_view_state::{
     UnifiedRecord,
 };
 use crate::bash_view::ShellCounts;
-use crate::subagents::{is_subagent_summary, summary_identity_keys, summary_parent_keys};
+use crate::subagents::{
+    is_decision_child_summary, is_subagent_summary, summary_identity_keys, summary_parent_keys,
+};
 
 struct BaseRow {
     kind: RowKind,
@@ -22,9 +24,9 @@ struct BaseRow {
     title: String,
     model: String,
     age: String,
-    own_cost: f64,
-    recursive_cost: f64,
-    /// Every descendant's spend: the rollup's descendant total, status-independent.
+    /// The session's published total (own plus every descendant's).
+    total_cost: f64,
+    /// Every descendant's spend: the total minus the own spend.
     descendant_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
@@ -70,6 +72,12 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
     let mut base: Vec<BaseRow> = Vec::with_capacity(records.len());
     for (position, record) in records.iter().enumerate() {
         let summary = summary_for_record(record);
+        // The Decision API child (`decisionChild`): a System 1 server the
+        // user never interacts with — no row renders, while its record
+        // stays in the rollups so the parent's spend still covers it.
+        if is_decision_child_summary(&summary) {
+            continue;
+        }
         let kind = if !is_direct_scope_child(&summary)
             && (is_subagent_summary(&summary)
                 || records
@@ -135,13 +143,10 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
             title: session_title(&summary),
             model,
             age,
-            own_cost: summary
-                .get("usage")
-                .and_then(|usage| usage.get("cost"))
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0),
-            recursive_cost: rollup.cost,
-            descendant_cost: rollup.descendants,
+            total_cost: summary_cost(&summary, "totalUsage"),
+            descendant_cost: (summary_cost(&summary, "totalUsage")
+                - summary_cost(&summary, "usage"))
+            .max(0.0),
             descendant_count: rollup.descendant_count,
             running_subagent_count: 0,
             activity,
@@ -205,22 +210,11 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
     }
     for index in tally_order.iter().rev() {
         let mut running = 0;
-        let mut descendants = 0;
-        let mut descendants_cost = 0.0;
         for child in children_by_parent.get(index).into_iter().flatten() {
             running += usize::from(base[*child].section == Section::Running)
                 + base[*child].running_subagent_count;
-            descendants += 1 + base[*child].descendant_count;
-            descendants_cost += base[*child].recursive_cost;
         }
         base[*index].running_subagent_count = running;
-        // Rollups follow the unfiltered hierarchy; the per-pass walk is the fallback when the
-        // caller passed none.
-        if !rollups.contains_key(&base[*index].identity) {
-            base[*index].descendant_count = descendants;
-            base[*index].descendant_cost = descendants_cost;
-            base[*index].recursive_cost = base[*index].own_cost + descendants_cost;
-        }
     }
     // An active query renders the picker as one flat, globally ranked run: every hit and every
     // retained ancestor gets one row (no nesting, no `N subagents` summaries), hits rank by
@@ -350,6 +344,16 @@ impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
     }
 }
 
+/// One spend field's cost on a session summary (`usage` own, `totalUsage`
+/// own plus descendants); a session without billable work omits it.
+fn summary_cost(summary: &Value, field: &str) -> f64 {
+    summary
+        .get(field)
+        .and_then(|usage| usage.get("cost"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
 /// One session row's rendered fields (the display-side slice the layout
 /// and the open action read).
 fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> AgentsViewRow {
@@ -361,7 +365,7 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
         summary: row.summary.clone(),
         title: row.title.clone(),
         model: row.model.clone(),
-        cost: row.recursive_cost,
+        cost: row.total_cost,
         age: row.age.clone(),
         depth,
         descendant_count: row.descendant_count,
@@ -401,7 +405,7 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
     }
 }
 
-/// The node's own `$ N shells[ · M persistent]` and `⚙ N factories · M running[ · K paused]` lines,
+/// The node's own `$ N shells[ · M persistent]` and `⚙ N machines · M running[ · K paused]` lines,
 /// each only when one of its counts is nonzero.
 /// Like the summary line they reuse the parent's summary, so the open action resolves the parent.
 fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {

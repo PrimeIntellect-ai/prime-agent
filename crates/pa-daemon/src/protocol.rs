@@ -158,6 +158,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "kill_kernel_bash",
     "worker_register",
     "worker_roster_delta",
+    "worker_usage",
     "get_worker_peer_transport",
     "commit_update_restart",
     "update_restore_status",
@@ -354,6 +355,7 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "session_input_pause",
                 "acp_mcp_servers",
                 "abort_and_send_queued",
+                "background_cell_abort",
                 "agent_roster",
                 "direct_peer_transport",
             ]
@@ -929,6 +931,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::RosterSubscribe { .. }
         | DaemonCommand::WorkerIdlePassivation { .. }
         | DaemonCommand::WorkerRosterDelta { .. }
+        | DaemonCommand::WorkerUsage { .. }
         | DaemonCommand::RosterUnsubscribe { .. }
         | DaemonCommand::Create { .. }
         | DaemonCommand::SendMessage { .. }
@@ -956,6 +959,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::RosterSubscribe { .. } => "roster_subscribe",
         DaemonCommand::WorkerIdlePassivation { .. } => "worker_idle_passivation",
         DaemonCommand::WorkerRosterDelta { .. } => "worker_roster_delta",
+        DaemonCommand::WorkerUsage { .. } => "worker_usage",
         DaemonCommand::RosterUnsubscribe { .. } => "roster_unsubscribe",
         DaemonCommand::Create { .. } => "create",
         DaemonCommand::Attach { .. } => "attach",

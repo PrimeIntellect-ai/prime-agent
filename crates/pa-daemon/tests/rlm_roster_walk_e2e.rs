@@ -23,6 +23,9 @@
 )]
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -68,17 +71,11 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         )
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Daemon {
-                child,
-                socket: socket.to_path_buf(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(10));
+    Daemon {
+        child,
+        socket: socket.to_path_buf(),
     }
-    panic!("supervisor socket never appeared");
 }
 
 fn drain_boot_seed(socket: &Path) {
@@ -428,7 +425,7 @@ fn list_all_returns_the_full_synthetic_thousand_child_roster() {
 /// existing subscriber's push and in a fresh subscriber's snapshot.
 #[tokio::test]
 async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
-    use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+    use pa_core::session_engine::rlm_host::{RlmSpawnKind, RlmSpawnRequest, RlmSubagentHost};
     use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -501,6 +498,7 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
             model: None,
             thinking: None,
             cwd: None,
+            kind: RlmSpawnKind::Subagent,
             spawned_by_request_id: None,
             factory: None,
         })

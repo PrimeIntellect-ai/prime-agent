@@ -24,6 +24,13 @@ fn write_credential_backed_faux_provider(agent_dir: &std::path::Path) {
                         "id": "mock-1", "name": "Mock 1",
                         "contextWindow": 128_000, "maxTokens": 16384,
                     }],
+                },
+                "primary": {
+                    "api": "faux", "baseUrl": "http://localhost:0", "apiKey": "sk-primary-config",
+                    "models": [{
+                        "id": "mock-1", "name": "Mock 1",
+                        "contextWindow": 128_000, "maxTokens": 16384,
+                    }],
                 }
             }
         })
@@ -234,6 +241,126 @@ fn a_cleared_selection_key_stops_serving() {
     assert_eq!(
         engine.resolve_request_auth(&model).api_key.as_deref(),
         Some("stored-access")
+    );
+}
+
+/// The explicit key serves only the provider it was configured for: a
+/// failover backup and a `/model` switch to another provider resolve that
+/// provider's own credential.
+#[test]
+fn an_explicit_key_serves_only_the_provider_it_was_configured_for() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "battery-access");
+    let engine = live_auth_engine(dir.path(), Some("sk-primary"), "primary", "mock-1");
+    let primary = engine.resolve_model().expect("the primary model resolves");
+    assert_eq!(primary.provider, "primary");
+    let mut backup = primary.clone();
+    backup.provider = "battery".to_string();
+    assert_eq!(
+        engine.resolve_request_auth(&primary).api_key.as_deref(),
+        Some("sk-primary")
+    );
+    assert_eq!(
+        engine.resolve_request_auth(&backup).api_key.as_deref(),
+        Some("battery-access"),
+        "a backup provider never receives the primary's explicit key"
+    );
+    engine.configure_model(EngineModelSelection {
+        provider: Some("battery".to_string()),
+        model: Some("mock-1".to_string()),
+        ..Default::default()
+    });
+    let switched = engine.resolve_model().expect("the switched model resolves");
+    assert_eq!(switched.provider, "battery");
+    assert_eq!(
+        engine.resolve_request_auth(&switched).api_key.as_deref(),
+        Some("battery-access"),
+        "a `/model` switch to another provider never carries the key along"
+    );
+}
+
+/// An explicit key without a provider binds to the model the create's
+/// selection settles on: the startup scope picks the provider.
+#[test]
+fn an_explicit_key_without_a_provider_binds_after_the_startup_scope() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir,
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .expect("engine");
+    engine.configure_create_model(EngineModelSelection {
+        api_key: Some("sk-scoped".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(engine.resolve_model().unwrap().provider, "battery");
+    let mut primary = engine.resolve_model().unwrap();
+    primary.provider = "primary".to_string();
+    engine.configure_startup_scope(
+        vec![pa_core::models::ScopedModel {
+            model: primary.clone(),
+            thinking_level: None,
+        }],
+        vec!["primary/mock-1".to_string()],
+        false,
+    );
+    assert_eq!(engine.resolve_model().unwrap().provider, "primary");
+    assert_eq!(
+        engine.resolve_request_auth(&primary).api_key.as_deref(),
+        Some("sk-scoped")
+    );
+}
+
+/// A 401 on the explicit key never switches to the stored subscription: the
+/// key keeps serving, and the turn ends on the 401 with a hint only when a
+/// subscription for the provider is stored.
+#[test]
+fn a_rejected_explicit_key_hints_at_a_stored_subscription_without_switching() {
+    use pa_core::session_engine::auto_retry::AuthRecovery;
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let engine = live_auth_engine(dir.path(), Some("sk-rejected"), "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("sk-rejected")
+    );
+    assert_eq!(
+        engine.recover_rejected_request_auth("battery", "401 Unauthorized"),
+        AuthRecovery::Retry,
+        "no stored subscription: no hint"
+    );
+    write_oauth_credential(&agent_dir, "stored-access");
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("sk-rejected")
+    );
+    let verdict = engine.recover_rejected_request_auth("battery", "401 Unauthorized");
+    assert!(
+        matches!(&verdict, AuthRecovery::EndTurn(error)
+            if error.starts_with("401 Unauthorized") && error.contains("subscription for battery")),
+        "{verdict:?}"
+    );
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("sk-rejected"),
+        "the explicit key keeps serving"
     );
 }
 

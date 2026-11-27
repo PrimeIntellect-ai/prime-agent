@@ -55,12 +55,7 @@ impl AgentView {
                     spacing,
                 )
             }
-            ChatEntry::InboxNotice(row) => crate::custom_message::geometry::inbox_notice_row_count(
-                row,
-                &self.theme,
-                width,
-                spacing,
-            ),
+            ChatEntry::InboxNotice(row) => self.count_inbox_notice_entry(index, row, width),
             ChatEntry::ShellCompletion(row) => {
                 crate::custom_message::geometry::shell_completion_row_count(
                     row, detail, width, spacing,
@@ -112,6 +107,7 @@ impl AgentView {
                     detail,
                     &self.theme,
                     width,
+                    true,
                 )
             }
             ChatEntry::RefinementOutcome(row) => {

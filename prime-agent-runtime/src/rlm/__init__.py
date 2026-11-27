@@ -12,6 +12,9 @@ from typing import Any
 from .bash import BashHandle, BashResult, BashSnapshot, bash, persistent_shells, _set_completion_notices_wired
 from .factory import (
     FACTORY_HELP,
+    FactoryEmitError,
+    emit_factory_outputs,
+    factory_inputs,
     graph_factory,
     resume_factory,
     run_factory,
@@ -107,6 +110,8 @@ class RLMChildResult:
 
     `answer_text` is the child's full final answer (the settle-binding
     lane, host-bounded); `answer_preview` is the compact roster preview.
+    `factory_task_busy` reports factory-only background work separately from
+    turn settlement: `None` means the activity was not observed.
     """
 
     rlm_child_id: str
@@ -120,6 +125,7 @@ class RLMChildResult:
     duration_ms: int | None = None
     tool_use_count: int | None = None
     replied_since_task: bool | None = None
+    factory_task_busy: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -229,17 +235,20 @@ def emit(data: dict[str, Any]) -> None:
 async def end_turn() -> dict[str, Any]:
     """End the turn: the sanctioned terminal programmatic call.
 
-    The host marks the cell executing when the request arrives (a detached
-    task's call attributes to that cell, not the task), the cell's tool
-    result confirms the turn ended, and no further assistant response is
-    streamed for the run. Other tool calls in the same message still
-    execute first; the turn ends when the batch's end-turn call finishes
-    Ok (one is enough). The turn returns to the user while background work
-    keeps running: the remaining jobs keep running and their completion
-    notices collect the results. Raises where the host does not support
-    the call (a foreign harness): it never silently no-ops.
+    The host marks the calling cell (a task the cell started counts as that
+    cell, also when another cell runs beside it), the cell's tool result
+    confirms the turn ended, and no further assistant response is streamed
+    for the run. A call from a backgrounded cell, or after the calling cell
+    finished, raises: its turn already returned. Other tool calls in the
+    same message still execute first; the turn ends when the batch's
+    end-turn call finishes Ok (one is enough). The turn returns to the user
+    while background work keeps running: the remaining jobs keep running
+    and their completion notices collect the results. Raises where the host
+    does not support the call (a foreign harness): it never silently no-ops.
     """
-    return await host_request("rlm.end_turn", {})
+    from . import repl
+
+    return await host_request("rlm.end_turn", {"cell": repl.current_cell_id()})
 
 
 async def spawn(
@@ -249,6 +258,7 @@ async def spawn(
     model: str | None = None,
     thinking: str | None = None,
     cwd: str | None = None,
+    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -258,8 +268,10 @@ async def spawn(
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
     ``cwd`` starts the child in that directory (relative to the session cwd); defaults
     to the session cwd.
+    ``kind`` selects a dedicated child kind; ``"decision"`` spawns the Decision API
+    child (the model comes from the ``decisionModel`` setting).
     """
-    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
 
 async def _spawn(
@@ -270,9 +282,13 @@ async def _spawn(
     thinking: str | None = None,
     cwd: str | None = None,
     factory: dict[str, str] | None = None,
+    factory_contract: dict[str, Any] | None = None,
+    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """``spawn`` plus the factory executor's run tag (``{runId, specId,
-    stateId}``), which the host records on the child's ledger spawn edge."""
+    stateId}``), which the host records on the child's ledger spawn edge,
+    and the state's output contract, which the child's ``factory.emit``
+    checks against."""
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
     kwargs: dict[str, Any] = {"name": name}
@@ -284,6 +300,10 @@ async def _spawn(
         kwargs["cwd"] = cwd
     if factory is not None:
         kwargs["factory"] = factory
+    if factory_contract is not None:
+        kwargs["factoryContract"] = factory_contract
+    if kind is not None:
+        kwargs["kind"] = kind
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
@@ -478,6 +498,9 @@ def _child_result_from_payload(payload: Any) -> RLMChildResult:
     replied = payload.get("replied_since_task")
     if replied is not None and not isinstance(replied, bool):
         raise RuntimeError("rlm.collect entry has invalid replied_since_task")
+    factory_task_busy = payload.get("factory_task_busy")
+    if factory_task_busy is not None and not isinstance(factory_task_busy, bool):
+        raise RuntimeError("rlm.collect entry has invalid factory_task_busy")
     return RLMChildResult(
         rlm_child_id=child_id,
         session_name=_optional_str("session_name"),
@@ -490,6 +513,7 @@ def _child_result_from_payload(payload: Any) -> RLMChildResult:
         duration_ms=_optional_int("duration_ms"),
         tool_use_count=_optional_int("tool_use_count"),
         replied_since_task=replied,
+        factory_task_busy=factory_task_busy,
     )
 
 
@@ -833,8 +857,10 @@ class _RLMFactoryNamespace:
     and the API with worked examples): ``rlm.factory.help()``.
     """
 
-    async def run(self, spec_id: str, *, name: str | None = None) -> dict[str, Any]:
-        return await run_factory(spec_id, name=name)
+    async def run(
+        self, spec_id: str, *, name: str | None = None, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return await run_factory(spec_id, name=name, params=params)
 
     async def status(self, run_id: str) -> dict[str, Any]:
         return await status_factory(run_id)
@@ -850,6 +876,16 @@ class _RLMFactoryNamespace:
 
     async def watch(self, run_id: str, timeout: float = 0.0) -> dict[str, Any]:
         return await watch_factory(run_id, timeout)
+
+    async def emit(self, /, **outputs: Any) -> dict[str, Any]:
+        """Hand this factory child's outputs back: ``await
+        rlm.factory.emit(verdict={...})``. A wrong value raises
+        ``FactoryEmitError`` naming the field; fix it and call again."""
+        return await emit_factory_outputs(outputs)
+
+    async def inputs(self) -> dict[str, Any]:
+        """This factory child's bound inputs (and the machine's params) as values."""
+        return await factory_inputs()
 
     def help(self) -> str:
         """Return the embedded factory authoring reference and API guide."""
@@ -961,8 +997,9 @@ class _RLMNamespace:
         model: str | None = None,
         thinking: str | None = None,
         cwd: str | None = None,
+        kind: str | None = None,
     ) -> RLMSpawnHandle:
-        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
     async def create_session(
         self,

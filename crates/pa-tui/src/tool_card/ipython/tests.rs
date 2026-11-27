@@ -209,7 +209,6 @@ fn inbox_read_messages_render_with_their_transcript_rows() {
             " \u{2709} Agent message \u{b7} \u{2193} worker",
             " \u{2709} Agent message \u{b7} \u{2193} probe",
             " \u{2713} Background shell command finished",
-            "",
             " \u{25f7} Heartbeat prompt \u{b7} every 5m",
         ],
         "summary rows only when collapsed: {collapsed:?}"

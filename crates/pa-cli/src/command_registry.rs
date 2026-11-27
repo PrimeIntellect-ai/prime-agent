@@ -239,13 +239,13 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec::new(&["config"], "config", "Configure package resources"),
     CommandSpec::new(
         &["factory"],
-        "factory <list|import|export>",
+        "factory <list|validate|compile|convert|import|export>",
         "Share and run factory machines from the machine library",
     )
     .description(
-        "Machines are MACHINE.md templates (frontmatter plus a fenced machine-spec block) \
-resolved from the bundled library shipped inside the runtime, then from the personal \
-library under the agent dir. Run one with `await rlm.factory.run(\"<name>\")` from a session.",
+        "Machine directories use machine.toml, Markdown prompts, and Python states; \
+MACHINE.md templates remain supported. Use validate and compile to check a directory \
+before converting or running a machine.",
     ),
     CommandSpec::new(
         &["factory", "list"],
@@ -257,6 +257,12 @@ library under the agent dir. Run one with `await rlm.factory.run(\"<name>\")` fr
 files that fail the parser skip with a warning.",
     )
     .options(&["--json  Print JSON"]),
+    CommandSpec::new(&["factory", "validate"], "factory validate <dir> [--json]", "Check a machine directory")
+        .description("Loads machine.toml and every file it names, then checks types, ports, routes, joins, reachability, and prompt placeholders.")
+        .options(&["--json  Print JSON"]),
+    CommandSpec::new(&["factory", "compile"], "factory compile <dir> [--param name=value]...", "Print the canonical spec for a machine directory")
+        .options(&["--param <name=value>  A start parameter; repeat for each"]),
+    CommandSpec::new(&["factory", "convert"], "factory convert <MACHINE.md|name> --out <dir> [--json]", "Convert a MACHINE.md machine into a directory"),
     CommandSpec::new(
         &["factory", "import"],
         "factory import <path> [--json]",
@@ -313,9 +319,17 @@ without its project Python code.",
     ]),
 ];
 
-/// Command names that once existed and now print removal guidance.
-pub const REMOVED_COMMAND_NAMES: &[&str] =
-    &["app", "daemon", "install", "manage", "remove", "uninstall"];
+/// Command names that print guidance to the replacement command instead of
+/// starting a session.
+pub const REMOVED_COMMAND_NAMES: &[&str] = &[
+    "app",
+    "daemon",
+    "install",
+    "machine",
+    "manage",
+    "remove",
+    "uninstall",
+];
 
 pub fn public_command_names() -> Vec<&'static str> {
     COMMAND_SPECS

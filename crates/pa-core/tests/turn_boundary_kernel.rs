@@ -175,6 +175,8 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
     provider.push_text_turn("boundary reached");
 
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -198,12 +200,13 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         additional_prompt_paths: Vec::new(),
         extra_builtin_skill_overrides: Vec::new(),
         rlm_subagent_host: None,
-        rlm_usage_store: None,
+        usage_store: None,
 
         inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
         factory_child: false,
+        factory_contract: None,
         daemonless: true,
         telemetry: None,
         model_info: Some(registry_model()),

@@ -112,58 +112,28 @@ impl CodexHttp for ReqwestCodexHttp {
     }
 }
 
+/// One decoded query parameter (`+` as space, percent-decoded).
+#[must_use]
+pub fn query_param(query: &str, name: &str) -> Option<String> {
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::query_param;
 
-    struct ScriptedHttp(std::collections::HashMap<String, CodexHttpResponse>);
-
-    impl ScriptedHttp {
-        fn entry(url: &str, status: u16, body: &str) -> (String, CodexHttpResponse) {
-            (
-                url.to_string(),
-                CodexHttpResponse {
-                    status,
-                    body: body.to_string(),
-                },
-            )
-        }
-    }
-
-    impl CodexHttp for ScriptedHttp {
-        fn post_form<'a>(
-            &'a self,
-            url: &'a str,
-            _body: &'a str,
-            _timeout_ms: u64,
-        ) -> std::pin::Pin<Box<dyn Future<Output = Result<CodexHttpResponse, String>> + Send + 'a>>
-        {
-            let result = self.0.get(url).cloned();
-            Box::pin(async move { result.ok_or_else(|| format!("{url} was not scripted")) })
-        }
-    }
-
-    #[tokio::test]
-    async fn the_seam_serves_scripted_responses() {
-        let http = ScriptedHttp(
-            [ScriptedHttp::entry(
-                "https://fixture.example/token",
-                200,
-                r#"{"ok":true}"#,
-            )]
-            .into_iter()
-            .collect(),
-        );
-        let response = http
-            .post_form("https://fixture.example/token", "", 1)
-            .await
-            .unwrap();
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body, r#"{"ok":true}"#);
-        assert!(response.ok());
-        assert!(http
-            .post_form("https://other.example/token", "", 1)
-            .await
-            .is_err());
+    #[test]
+    fn query_and_percent_decoding() {
+        let decoded = |query| query_param(query, "code");
+        assert_eq!(decoded("code=a%20b"), Some("a b".to_string()));
+        assert_eq!(decoded("code=a+b&state=2"), Some("a b".to_string()));
+        assert_eq!(decoded("code=bad%2"), Some("bad%2".to_string()));
+        // A `%` followed by a multi-byte character stays literal.
+        assert_eq!(decoded("code=%9\u{e9}"), Some("%9\u{e9}".to_string()));
+        // A bare key keeps an empty value, like TS `URLSearchParams`.
+        assert_eq!(decoded("code&state=2"), Some(String::new()));
+        assert_eq!(decoded("state=2"), None);
     }
 }

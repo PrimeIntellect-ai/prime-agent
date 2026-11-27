@@ -50,6 +50,11 @@ pub const FACTORY_PROGRESS_PREVIEW_LABEL: &str = "Factory progress";
 /// The queue-strip preview label for a parked heartbeat fire; the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
 pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
+/// The durable row an auto-backgrounded cell's completion admits as the
+/// woken turn's injected prompt (`[cell-done ...]`).
+pub const ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE: &str = "async_background_cell";
+/// The queue-strip label the completion notice's queued row carries.
+pub const BACKGROUND_CELL_PREVIEW_LABEL: &str = "Background cell finished";
 
 /// Why an unsuccessful compaction ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +237,80 @@ pub fn create_async_bash_completion_message(
             "command": command,
             "exitCode": exit_code,
         })),
+        timestamp,
+        rest: serde_json::Map::default(),
+    }
+}
+
+/// The auto-backgrounded cell's completion notice:
+/// `[cell-done id:<id> status:<status> duration:<d>]` plus a bounded tail of
+/// the cell's output (the one settled-output composition the foreground
+/// tool result shares, so a host stop's cause rides the model-visible
+/// text). Rich completions (image attachments) ride content blocks beside
+/// the text header — the inbox's text-only route declines block content,
+/// so those rows deliver through the full-row lane while text-only
+/// completions stay in the inbox. The details keep the row's identity
+/// only (the inbox class maps on the custom type).
+#[must_use]
+pub fn create_background_cell_completion_message(
+    cell_id: &str,
+    status: &str,
+    duration_ms: u64,
+    reason: &str,
+    output: &str,
+    images: &[crate::kernel::shared::KernelAttachment],
+    timestamp: u64,
+) -> pa_types::session::CustomMessage {
+    const OUTPUT_TAIL_CAP: usize = 2_000;
+    let header_id = sanitize_message_header_value(cell_id);
+    let seconds = duration_ms / 1000;
+    let tenths = (duration_ms % 1000) / 100;
+    let mut text =
+        format!("[cell-done id:{header_id} status:{status} duration:{seconds}.{tenths}s]");
+    let output = output.trim_end();
+    if !output.is_empty() {
+        let tail = if output.len() > OUTPUT_TAIL_CAP {
+            let cut = output.len() - OUTPUT_TAIL_CAP;
+            let cut = output
+                .char_indices()
+                .map(|(i, _)| i)
+                .find(|i| *i >= cut)
+                .unwrap_or(cut);
+            &output[cut..]
+        } else {
+            output
+        };
+        text.push_str("\n\n");
+        text.push_str(tail);
+    }
+    let content = if images.is_empty() {
+        UserContent::Text(text)
+    } else {
+        let mut blocks = vec![UserContentBlock::Text(pa_types::ai::TextContent {
+            text,
+            text_signature: None,
+            rest: serde_json::Map::default(),
+        })];
+        blocks.extend(images.iter().map(|image| {
+            UserContentBlock::Image(pa_types::ai::ImageContent {
+                data: image.data.clone(),
+                mime_type: image.mime_type.clone(),
+                rest: serde_json::Map::default(),
+            })
+        }));
+        UserContent::Blocks(blocks)
+    };
+    let details = serde_json::json!({
+        "cellId": cell_id,
+        "status": status,
+        "durationMs": duration_ms,
+        "reason": reason,
+    });
+    pa_types::session::CustomMessage {
+        custom_type: ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE.to_string(),
+        content,
+        display: true,
+        details: Some(details),
         timestamp,
         rest: serde_json::Map::default(),
     }

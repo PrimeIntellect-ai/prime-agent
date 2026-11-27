@@ -279,6 +279,14 @@ impl Supervisor {
             // The scripted-parent verification seam: a dropped key leaves
             // spawned children scriptless.
             "childScript",
+            // The refine-child flag (`refineChild`): a
+            // dropped key respawns the refinement child as a regular agent
+            // session.
+            "refineChild",
+            // The decision-child flag (`rlm.spawn kind="decision"`): a
+            // dropped key respawns the decision child as a regular agent
+            // session.
+            "decisionChild",
             // The semantic-edge spawn anchor rides the durable create so a
             // respawned child keeps its provenance (its ledger
             // re-registers idempotently either way).
@@ -633,13 +641,7 @@ impl Supervisor {
             .get("rlmLedgerDelete")
             .and_then(Value::as_str)
             .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
-            .map(|_| crate::stop_cleanup::DeletedChild {
-                child_id: rest
-                    .get("rlmChildId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            });
+            .map(|_| crate::stop_cleanup::DeletedChild);
         self.finalize_worker_stop(resident, deleted_child.as_ref())
             .await;
     }

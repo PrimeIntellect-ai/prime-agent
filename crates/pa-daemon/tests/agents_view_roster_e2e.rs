@@ -21,6 +21,9 @@
 )]
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -59,17 +62,11 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         )
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Daemon {
-                child,
-                socket: socket.to_path_buf(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(10));
+    Daemon {
+        child,
+        socket: socket.to_path_buf(),
     }
-    panic!("supervisor socket never appeared");
 }
 
 struct Client {
@@ -342,7 +339,7 @@ fn worker_roster_delta_requires_authentication() {
 /// `parentSessionPath#childId` (TS `rosterAgentIdForSummary`).
 #[tokio::test]
 async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
-    use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+    use pa_core::session_engine::rlm_host::{RlmSpawnKind, RlmSpawnRequest, RlmSubagentHost};
     use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -377,13 +374,7 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
             )
             .spawn()
             .expect("spawn pa-daemon supervisor");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if socket.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        daemon_socket::wait_until_listening(&socket, Duration::from_secs(10));
         LoggedDaemon(child)
     };
     let (mut client, _hello) = Client::connect(&socket);
@@ -425,6 +416,7 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
             model: None,
             thinking: None,
             cwd: None,
+            kind: RlmSpawnKind::Subagent,
             spawned_by_request_id: None,
             factory: None,
         })

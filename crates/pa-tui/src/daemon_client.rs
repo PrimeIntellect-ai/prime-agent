@@ -51,7 +51,6 @@ const CONNECT_RETRY_BACKOFF_MS: u64 = 1_000;
 #[derive(Debug, Clone)]
 pub struct DaemonClosingUpdate {
     pub update_id: String,
-    pub est_seconds: u64,
     /// The stopped sessions `[{sessionId, name}]`: reattach targets after the restart.
     pub sessions: Vec<Value>,
 }
@@ -178,10 +177,6 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string(),
-                        est_seconds: payload
-                            .get("estSeconds")
-                            .and_then(Value::as_u64)
-                            .unwrap_or_default(),
                         sessions: payload
                             .get("sessions")
                             .and_then(Value::as_array)
@@ -516,6 +511,22 @@ impl DaemonClient {
     #[must_use]
     pub fn protocol(&self) -> &DaemonProtocolInfo {
         &self.protocol
+    }
+
+    /// Whether the peer serving SESSION commands advertises `capability`:
+    /// the direct worker link's own hello when one is live (the worker is
+    /// the peer a session-plane command reaches), else the supervisor's
+    /// hello. A mixed-version daemon can adopt an older live worker, so a
+    /// session-scoped gate must consult the worker's own advertisement.
+    #[must_use]
+    pub fn supports_session_server_capability(&self, capability: &str) -> bool {
+        if let Some(link) = self.direct.live_link() {
+            return link
+                .server_capabilities
+                .iter()
+                .any(|entry| entry == capability);
+        }
+        self.supports_server_capability(capability)
     }
 
     /// Whether the daemon advertised `capability` (TS

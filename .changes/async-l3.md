@@ -1,0 +1,1 @@
+- The kernel owns its SIGINT mask at startup, so a host-blocked SIGINT no longer silences interrupts.

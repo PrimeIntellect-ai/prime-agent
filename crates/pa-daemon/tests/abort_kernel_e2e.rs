@@ -4,6 +4,9 @@
 //! the cell out or wedging with the loader spinning.
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -98,17 +101,11 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, script: &Path) -> Superviso
         )
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor {
-                child,
-                socket: socket.to_path_buf(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(10));
+    Supervisor {
+        child,
+        socket: socket.to_path_buf(),
     }
-    panic!("supervisor socket never appeared");
 }
 
 struct Client {
@@ -309,10 +306,562 @@ fn abort_during_a_kernel_cell_settles_the_daemon_turn_immediately() {
     drop(supervisor);
 }
 
+fn event_rows(events: &[Value]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("message_end"))
+        .filter_map(|event| {
+            let message = event.get("message")?;
+            let role = message.get("role").and_then(Value::as_str)?;
+            let text = match message.get("content") {
+                Some(Value::String(text)) => text.clone(),
+                Some(Value::Array(blocks)) => blocks
+                    .iter()
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => String::new(),
+            };
+            Some((role.to_string(), text))
+        })
+        .collect()
+}
+
 fn event_types(events: &[Value]) -> Vec<String> {
     events
         .iter()
         .filter_map(|event| event.get("type").and_then(Value::as_str))
         .map(str::to_string)
         .collect()
+}
+
+/// The faux script for the idle-cancel round: turn one calls a kernel cell
+/// that outlives its 2s wait budget (it auto-backgrounds), catches the
+/// interrupt, and keeps running; turn two runs a fresh cell on the revived
+/// kernel.
+fn faux_idle_cancel_script(dir: &Path) -> PathBuf {
+    let path = dir.join("faux-idle-cancel.json");
+    std::fs::write(
+        &path,
+        json!({
+            "engine": "faux",
+            "modelId": "faux-1",
+            "modelName": "Faux Model",
+            "reasoning": false,
+            "contextWindow": 128_000,
+            "tokensPerSecond": 30,
+            "responses": [
+                {"content": [
+                    {"type": "text", "text": "Running the background cell."},
+                    {"type": "toolCall", "name": "python_repl", "id": "toolu_bg01",
+                     "arguments": {"code":
+                        "import time\nopen('bg-started', 'w').write('1')\ntry:\n    time.sleep(120)\nexcept KeyboardInterrupt:\n    open('bg-caught', 'w').write('1')\n    while True:\n        time.sleep(0.05)\nprint('cell completed')",
+                        "timeout": 2}}
+                ]},
+                {"content": [{"type": "text", "text": "The cell backgrounds; ending the turn."}]},
+                {"content": [
+                    {"type": "text", "text": "Running the fresh cell."},
+                    {"type": "toolCall", "name": "python_repl", "id": "toolu_fresh01",
+                     "arguments": {"code": "print('fresh cell ok')"}}
+                ]},
+                {"content": [{"type": "text", "text": "The fresh cell completed."}]}
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write faux script");
+    path
+}
+
+/// The idle cancel reaches a parked backgrounded cell (the runaway-cell
+/// round): after the turn ends, the scoped `abort` interrupts the detached
+/// cell; a cell that catches the interrupt and keeps running has its kernel
+/// retired at the grace, its terminal notice lands, and a fresh cell runs on
+/// the revived kernel — no later call fails busy forever, and no cell is
+/// unstoppable.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn an_idle_scoped_abort_stops_a_parked_backgrounded_cell() {
+    let Some(_) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::create_dir_all(&cwd).expect("project dir");
+    let script = faux_idle_cancel_script(dir.path());
+    let socket = dir.path().join("idle-cancel.sock");
+    let supervisor = spawn_supervisor(&socket, &agent_dir, &script);
+    let mut client = Client::connect(&socket);
+    let created = client.send(
+        "c1",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": cwd.to_string_lossy(),
+                "sessionDir": session_dir.to_string_lossy(),
+                "model": "faux-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    let attached = client.send(
+        "a1",
+        &json!({ "type": "attach", "activeSessionId": session_id }),
+    );
+    assert_eq!(attached["success"], true, "attach failed: {attached}");
+
+    // Turn one: the cell starts, outlives its 2s wait budget, and the
+    // tool result returns early with the auto-background note.
+    let started = client.send(
+        "p1",
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the background cell" }),
+    );
+    assert_eq!(started["success"], true, "prompt failed: {started}");
+    let marker = cwd.join("bg-started");
+    let deadline = Instant::now() + Duration::from_mins(3);
+    while Instant::now() < deadline {
+        if marker.exists() {
+            break;
+        }
+        client.drain_events(Duration::from_millis(300));
+    }
+    assert!(
+        marker.exists(),
+        "the background cell never started; events: {:#?}",
+        client.events
+    );
+
+    // The turn settles while the cell keeps running detached.
+    let settle = Instant::now() + Duration::from_secs(30);
+    loop {
+        client.drain_events(Duration::from_millis(400));
+        let rows = event_rows(&client.events);
+        let backgrounded = rows
+            .iter()
+            .any(|(role, text)| role == "toolResult" && text.contains("auto-backgrounded"));
+        let turn_done = event_types(&client.events).iter().any(|t| t == "agent_end");
+        if backgrounded && turn_done {
+            break;
+        }
+        assert!(
+            Instant::now() < settle,
+            "the backgrounding turn never settled; rows: {rows:?}; events: {:?}",
+            event_types(&client.events)
+        );
+    }
+
+    // The scoped abort while idle: it must reach ONLY the parked cell and
+    // leave the session otherwise untouched.
+    let aborted = client.send(
+        "x1",
+        &json!({
+            "type": "abort",
+            "activeSessionId": session_id,
+            "scope": "background_cell"
+        }),
+    );
+    assert_eq!(aborted["success"], true, "scoped abort failed: {aborted}");
+
+    // The interrupt reached the detached cell: it caught the
+    // KeyboardInterrupt and kept running.
+    let caught = cwd.join("bg-caught");
+    let caught_by = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < caught_by {
+        if caught.exists() {
+            break;
+        }
+        client.drain_events(Duration::from_millis(200));
+    }
+    assert!(
+        caught.exists(),
+        "the idle cancel never reached the parked backgrounded cell"
+    );
+
+    // The ignored interrupt retired the kernel, and the forced-stop
+    // completion published as the cell's terminal notice (the inbox
+    // arrival row; the status rides the inbox message the notice points
+    // at).
+    let noticed = Instant::now() + Duration::from_secs(20);
+    loop {
+        client.drain_events(Duration::from_millis(400));
+        let rows = event_rows(&client.events);
+        if rows
+            .iter()
+            .any(|(_, text)| text.contains("new message (cell-done)"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < noticed,
+            "the retired cell's terminal notice never landed; rows: {rows:?}"
+        );
+    }
+
+    // A fresh cell runs on the revived kernel: the retired manager never
+    // fails later calls busy.
+    let second = client.send(
+        "p2",
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the fresh cell" }),
+    );
+    assert_eq!(second["success"], true, "second prompt failed: {second}");
+    let fresh = Instant::now() + Duration::from_mins(2);
+    loop {
+        client.drain_events(Duration::from_millis(400));
+        let rows = event_rows(&client.events);
+        if rows
+            .iter()
+            .any(|(role, text)| role == "toolResult" && text.contains("fresh cell ok"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < fresh,
+            "the fresh cell never ran on the revived kernel; rows: {rows:?}"
+        );
+    }
+    drop(supervisor);
+}
+
+/// The UNSCOPED abort (the full funnel) also reaches a parked backgrounded
+/// cell through the session abort path's kernel arm: an idle session with no
+/// run left still stops the detached cell (the run signal alone cannot). The
+/// full funnel parks the queue until a resume site, by design — the retired
+/// cell's terminal notice rides the parked queue like every notice row, and
+/// the resume delivers it; the notice turn's fresh cell proves the retired
+/// kernel revived.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_late_unscoped_abort_stops_a_parked_backgrounded_cell() {
+    let Some(_) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::create_dir_all(&cwd).expect("project dir");
+    let script = faux_idle_cancel_script(dir.path());
+    let socket = dir.path().join("late-abort.sock");
+    let supervisor = spawn_supervisor(&socket, &agent_dir, &script);
+    let mut client = Client::connect(&socket);
+    let created = client.send(
+        "c1",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": cwd.to_string_lossy(),
+                "sessionDir": session_dir.to_string_lossy(),
+                "model": "faux-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    let attached = client.send(
+        "a1",
+        &json!({ "type": "attach", "activeSessionId": session_id }),
+    );
+    assert_eq!(attached["success"], true, "attach failed: {attached}");
+
+    // Turn one: the cell detaches at its 2s wait budget and the turn ends.
+    let started = client.send(
+        "p1",
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the background cell" }),
+    );
+    assert_eq!(started["success"], true, "prompt failed: {started}");
+    let marker = cwd.join("bg-started");
+    let deadline = Instant::now() + Duration::from_mins(3);
+    while Instant::now() < deadline {
+        if marker.exists() {
+            break;
+        }
+        client.drain_events(Duration::from_millis(300));
+    }
+    assert!(marker.exists(), "the background cell never started");
+    let settle = Instant::now() + Duration::from_secs(30);
+    loop {
+        client.drain_events(Duration::from_millis(400));
+        let rows = event_rows(&client.events);
+        let backgrounded = rows
+            .iter()
+            .any(|(role, text)| role == "toolResult" && text.contains("auto-backgrounded"));
+        let turn_done = event_types(&client.events).iter().any(|t| t == "agent_end");
+        if backgrounded && turn_done {
+            break;
+        }
+        assert!(
+            Instant::now() < settle,
+            "the backgrounding turn never settled"
+        );
+    }
+
+    // The UNSCOPED abort while idle: the session abort path's kernel arm
+    // must reach the detached cell (no run is left to cancel).
+    let aborted = client.send(
+        "x1",
+        &json!({ "type": "abort", "activeSessionId": session_id }),
+    );
+    assert_eq!(aborted["success"], true, "abort failed: {aborted}");
+
+    // The interrupt reached the detached cell: it caught the
+    // KeyboardInterrupt and kept running.
+    let caught = cwd.join("bg-caught");
+    let caught_by = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < caught_by {
+        if caught.exists() {
+            break;
+        }
+        client.drain_events(Duration::from_millis(200));
+    }
+    assert!(
+        caught.exists(),
+        "the idle unscoped abort never reached the parked backgrounded cell"
+    );
+
+    // The ignored interrupt retired the kernel: the forced-stop completion
+    // parks as the terminal notice (the full funnel suspends the queue, and
+    // the row exists only after the kill — it is also the retirement proof).
+    let parked = Instant::now() + Duration::from_secs(20);
+    loop {
+        client.drain_events(Duration::from_millis(200));
+        let queue = client.send(
+            "q1",
+            &json!({ "type": "get_queue", "activeSessionId": session_id }),
+        );
+        let parked_notice = queue["data"]["steering"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row.as_str().is_some_and(|text| text.contains("cell-done")))
+        });
+        if parked_notice {
+            break;
+        }
+        assert!(
+            Instant::now() < parked,
+            "the retired cell's terminal notice never parked: {queue:#?}"
+        );
+    }
+    // The resume site delivers the parked notice as its own turn, and that
+    // turn's fresh cell runs on the revived kernel — the retired manager
+    // never fails later calls busy forever.
+    let resumed = client.send(
+        "r1",
+        &json!({ "type": "resume_queue", "activeSessionId": session_id }),
+    );
+    assert_eq!(
+        resumed["success"], true,
+        "the queue resume failed: {resumed}"
+    );
+    let settled = Instant::now() + Duration::from_mins(3);
+    loop {
+        client.drain_events(Duration::from_millis(400));
+        let rows = event_rows(&client.events);
+        let noticed = rows
+            .iter()
+            .any(|(_, text)| text.contains("new message (cell-done)"));
+        let fresh = rows
+            .iter()
+            .any(|(role, text)| role == "toolResult" && text.contains("fresh cell ok"));
+        if noticed && fresh {
+            break;
+        }
+        assert!(
+            Instant::now() < settled,
+            "the parked notice or the revived fresh cell never landed: {rows:?}"
+        );
+    }
+    drop(supervisor);
+}
+
+/// The faux script for the lost-supervisor round: turn one calls a kernel
+/// cell that records its kernel and worker pids, outlives its 2s wait
+/// budget (it auto-backgrounds), shows an image (so its notice is a rich
+/// row), and records the stop's interrupt. Any later turn answers with the
+/// woken marker.
+fn faux_lost_supervisor_script(dir: &Path) -> PathBuf {
+    let path = dir.join("faux-lost-supervisor.json");
+    let woken = json!({"content": [{"type": "text", "text": "WOKEN AFTER THE STOP"}]});
+    std::fs::write(
+        &path,
+        json!({
+            "engine": "faux",
+            "modelId": "faux-1",
+            "modelName": "Faux Model",
+            "reasoning": false,
+            "contextWindow": 128_000,
+            "tokensPerSecond": 30,
+            "responses": [
+                {"content": [
+                    {"type": "text", "text": "Running the background cell."},
+                    {"type": "toolCall", "name": "python_repl", "id": "toolu_lost01",
+                     "arguments": {"code":
+                        "import os, time\nfrom rlm import emit\nopen('bg-pids', 'w').write(f'{os.getpid()} {os.getppid()}')\ntime.sleep(3)\nemit({'application/vnd.prime-agent.attachment+json': {'mime_type': 'image/png', 'data': 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='}, 'text/plain': 'an image'})\ntry:\n    time.sleep(600)\nexcept KeyboardInterrupt:\n    open('bg-caught', 'w').write('1')\n    raise",
+                        "timeout": 2}}
+                ]},
+                {"content": [{"type": "text", "text": "The cell runs in the background."}]},
+                woken.clone(), woken
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write faux script");
+    path
+}
+
+/// Liveness that ignores zombies: the orphaned worker is re-parented, and
+/// a reaper that never collects it keeps its /proc entry.
+fn process_alive(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some((_, rest)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    let state = rest.split_whitespace().next().unwrap_or_default();
+    !state.starts_with('Z') && !state.starts_with('X')
+}
+
+/// A lost supervisor stops a parked backgrounded cell: once the worker's
+/// supervisor-lost window elapses, the scoped stop interrupts the cell
+/// (no client is left to see or stop it), and the worker then exits. The
+/// stop lands inside the second window, so the cell never runs a whole
+/// extra window unwatched. The stopped cell's notice, an image row, starts
+/// no model turn: its text waits in the session's durable inbox for the
+/// next open.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_lost_supervisor_stops_a_parked_backgrounded_cell() {
+    let Some(_) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::create_dir_all(&cwd).expect("project dir");
+    let script = faux_lost_supervisor_script(dir.path());
+    let socket = dir.path().join("lost-supervisor.sock");
+    let mut supervisor = spawn_supervisor(&socket, &agent_dir, &script);
+    let mut client = Client::connect(&socket);
+    let created = client.send(
+        "c1",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": cwd.to_string_lossy(),
+                "sessionDir": session_dir.to_string_lossy(),
+                "model": "faux-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    let session_file = PathBuf::from(
+        created["data"]["sessionFile"]
+            .as_str()
+            .expect("the created session file"),
+    );
+    let attached = client.send(
+        "a1",
+        &json!({ "type": "attach", "activeSessionId": session_id }),
+    );
+    assert_eq!(attached["success"], true, "attach failed: {attached}");
+
+    // The cell detaches at its 2s wait budget and the turn ends.
+    let started = client.send(
+        "p1",
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the background cell" }),
+    );
+    assert_eq!(started["success"], true, "prompt failed: {started}");
+    let settle = Instant::now() + Duration::from_mins(3);
+    loop {
+        client.drain_events(Duration::from_millis(400));
+        let rows = event_rows(&client.events);
+        let backgrounded = rows
+            .iter()
+            .any(|(role, text)| role == "toolResult" && text.contains("auto-backgrounded"));
+        let turn_done = event_types(&client.events).iter().any(|t| t == "agent_end");
+        if backgrounded && turn_done {
+            break;
+        }
+        assert!(
+            Instant::now() < settle,
+            "the backgrounding turn never settled; rows: {rows:?}"
+        );
+    }
+    let pids = std::fs::read_to_string(cwd.join("bg-pids")).expect("the cell wrote its pids");
+    let worker_pid: u32 = pids
+        .split_whitespace()
+        .nth(1)
+        .and_then(|pid| pid.parse().ok())
+        .expect("the worker pid");
+
+    // The supervisor dies without a graceful stop.
+    drop(client);
+    supervisor.child.kill().expect("kill the supervisor");
+    supervisor.child.wait().expect("reap the supervisor");
+    let lost_at = Instant::now();
+    let window = Duration::from_secs(15);
+
+    // The stop reaches the cell once the window elapses, and before a
+    // second window could pass.
+    let caught = cwd.join("bg-caught");
+    while !caught.exists() {
+        assert!(
+            lost_at.elapsed() < window * 2,
+            "the lost supervisor never stopped the backgrounded cell"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let stopped_after = lost_at.elapsed();
+    assert!(
+        stopped_after >= window,
+        "the cell stopped before the supervisor-lost window elapsed: {stopped_after:?}"
+    );
+
+    // The stopped cell's notice lands and the orphaned worker exits.
+    let exit_by = Instant::now() + Duration::from_secs(30);
+    while process_alive(worker_pid) {
+        assert!(
+            Instant::now() < exit_by,
+            "the orphaned worker never exited after the stop"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // No model turn ran after the stop: the session holds no woken answer.
+    let transcript = std::fs::read_to_string(&session_file).expect("read the session file");
+    assert!(
+        !transcript.contains("WOKEN AFTER THE STOP"),
+        "the stopped cell's notice started a model turn on the orphaned worker"
+    );
+
+    // The notice waits in the durable inbox a reopened session replays.
+    let inbox_dir =
+        pa_core::session_engine::harness_digest::session_artifact_dir_for_log(&session_file)
+            .expect("the session's artifact dir");
+    let (_, _, classes) =
+        pa_core::session_engine::inbox::SessionInbox::open(Some(&inbox_dir)).count();
+    assert_eq!(
+        classes.get(pa_types::inbox_notice::INBOX_CLASS_CELL_DONE),
+        Some(&1),
+        "the stopped cell's notice waits in the inbox: {classes:?}"
+    );
 }

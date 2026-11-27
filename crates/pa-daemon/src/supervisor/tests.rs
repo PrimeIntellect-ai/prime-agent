@@ -727,8 +727,12 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
         .install_command_channel(stopped.begin_connection(), stopped_tx)
         .await;
     let pump_resident = Arc::clone(&stopped);
+    // What a client has already received when the first worker is told to stop.
+    let mut client_events = supervisor.events.subscribe();
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let request = stopped_rx.recv().await.expect("the stop routes a shutdown");
+        let _ = seen_tx.send(client_events.try_recv().ok().map(|(_, frame)| frame));
         let reply = pump_resident
             .pending
             .lock()
@@ -750,6 +754,19 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
         let _ = refused_rx.recv().await;
     });
     supervisor.registry.insert(Arc::clone(&refused)).await;
+    // A refuser whose process already exited: its late exit was read as the stop's own.
+    let refused_gone = abandon_update_resident(dir.path(), "w-abandon-refused-gone");
+    let mut exited = std::process::Command::new("true").spawn().unwrap();
+    refused_gone.descriptor.lock().await.pid = u64::from(exited.id());
+    exited.wait().unwrap();
+    let (refused_gone_tx, mut refused_gone_rx) = mpsc::channel::<WorkerRequest>(1);
+    refused_gone
+        .install_command_channel(refused_gone.begin_connection(), refused_gone_tx)
+        .await;
+    tokio::spawn(async move {
+        let _ = refused_gone_rx.recv().await;
+    });
+    supervisor.registry.insert(Arc::clone(&refused_gone)).await;
 
     // Reach the committed stop window without the prepare machinery's
     // snapshot phase: the update state machine is driven directly.
@@ -772,17 +789,32 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
         .handle_commit_update_restart("commit-1", "commit_update_restart", &command)
         .await;
     assert!(!ok, "the refusal abandons the update: {lines:?}");
+    let seen = seen_rx
+        .await
+        .unwrap()
+        .expect("a frame before the first stop");
+    assert_eq!(
+        (seen["type"].as_str(), seen["reason"].as_str()),
+        (Some("daemon_closing"), Some("update")),
+        "the update notice reaches clients before any worker stops"
+    );
 
     // The stopped worker's failed relaunch re-arms supervision: the give-up
     // (the resident's budget was at the cap) removes the resident instead
     // of leaving the dead channel in the registry.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while supervisor.registry.get("w-abandon-stopped").await.is_some() {
+        while supervisor.registry.get("w-abandon-stopped").await.is_some()
+            || supervisor
+                .registry
+                .get("w-abandon-refused-gone")
+                .await
+                .is_some()
+        {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("the abandoned relaunch's failure reaches the give-up");
+    .expect("the abandoned relaunches (the stopped worker and the gone refuser) reach the give-up");
     assert_eq!(
         stopped.descriptor.lock().await.lifecycle,
         DaemonWorkerLifecycle::Failed
@@ -798,56 +830,11 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
     );
 }
 
-/// The saved-session surfaces (the `list --all` summary row and the
-/// `list_saved_sessions` catalog row) carry the persisted thinking
-/// level: the agents-view Model column renders "model:level" for
-/// sessions without a live worker, top-level and subagent alike.
-/// TS #2506's `serializeSavedSessionInfo`: the listing arm's bucket
-/// attach publishes `deletedDescendantUsage` on the saved row - the
-/// agents-view recursive rollup's deleted-descendant term. Absent
-/// rows (no tombstoned descendants) carry no field, matching the
-/// optional wire shape.
-#[test]
-fn saved_session_rows_publish_deleted_descendant_usage() {
-    let dir = std::env::temp_dir().join(format!("pa-saved-dd-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
-    let path = dir.join(format!("{}.jsonl", session.session_id()));
-    session.set_path(path.clone());
-    session.rewrite().unwrap();
-    let mut info = crate::session_store::read_session_info(&path).unwrap();
-    assert!(
-        info.deleted_descendant_usage.is_none(),
-        "the file scan never sets the ledger-derived field"
-    );
-    info.deleted_descendant_usage = Some(crate::session_usage::SessionUsageSummary {
-        input_tokens: 1_100,
-        output_tokens: 110,
-        cost: 0.5,
-    });
-    let row = saved_session_row(
-        &info,
-        &std::collections::HashMap::new(),
-        &std::collections::HashMap::new(),
-    );
-    assert_eq!(
-        row["deletedDescendantUsage"],
-        json!({ "inputTokens": 1_100, "outputTokens": 110, "cost": 0.5 })
-    );
-    // Absent again: the field never rides as a null.
-    info.deleted_descendant_usage = None;
-    let row = saved_session_row(
-        &info,
-        &std::collections::HashMap::new(),
-        &std::collections::HashMap::new(),
-    );
-    assert!(row.get("deletedDescendantUsage").is_none());
-}
-
 /// A catalog row carries the session's own stored factory specs (its local harness store's factory
 /// entries), read from disk without a kernel; a session without any carries no field.
 #[tokio::test]
 async fn saved_session_rows_count_the_sessions_stored_factory_specs() {
+    let ledger = test_usage_ledger();
     let root = std::env::temp_dir().join(format!("pa-saved-fs-{}", uuid::Uuid::new_v4()));
     let sessions = root.join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -860,7 +847,7 @@ async fn saved_session_rows_count_the_sessions_stored_factory_specs() {
     let specs = super::sessions::stored_factory_specs(vec![info.clone()])
         .await
         .unwrap();
-    assert!(saved_session_row(&info, &shells, &specs)
+    assert!(saved_session_row(&info, &shells, &specs, &ledger)
         .get("factorySpecs")
         .is_none());
     let harness = pa_core::refinement::get_local_harness_state_dir(
@@ -872,7 +859,7 @@ async fn saved_session_rows_count_the_sessions_stored_factory_specs() {
         .await
         .unwrap();
     assert_eq!(
-        saved_session_row(&info, &shells, &specs)["factorySpecs"],
+        saved_session_row(&info, &shells, &specs, &ledger)["factorySpecs"],
         json!(2)
     );
     #[cfg(unix)]
@@ -885,7 +872,7 @@ async fn saved_session_rows_count_the_sessions_stored_factory_specs() {
         .await
         .expect("asynchronous factory spec read");
         assert_eq!(
-            saved_session_row(&info, &shells, &specs)["factorySpecs"],
+            saved_session_row(&info, &shells, &specs, &ledger)["factorySpecs"],
             json!(2)
         );
     }
@@ -1014,6 +1001,7 @@ async fn a_saved_session_listing_skips_stored_factory_specs_while_the_factory_is
 
 #[test]
 fn saved_session_rows_carry_the_persisted_thinking_level() {
+    let ledger = test_usage_ledger();
     let dir = std::env::temp_dir().join(format!("pa-saved-tl-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
@@ -1025,13 +1013,14 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
     assert_eq!(info.thinking_level.as_deref(), Some("high"));
-    let summary = saved_session_summary(&info);
+    let summary = saved_session_summary(&info, &ledger);
     assert_eq!(summary["thinkingLevel"], json!("high"));
     assert!(summary["model"].is_null(), "saved rows carry no model");
     let row = saved_session_row(
         &info,
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
+        &ledger,
     );
     assert_eq!(row["thinkingLevel"], json!("high"));
     assert_eq!(row["model"], json!({ "provider": "p", "modelId": "m" }));
@@ -1043,13 +1032,14 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     draft.rewrite().unwrap();
     let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
     assert_eq!(draft_info.thinking_level, None);
-    assert!(saved_session_summary(&draft_info)
+    assert!(saved_session_summary(&draft_info, &ledger)
         .get("thinkingLevel")
         .is_none());
     assert!(saved_session_row(
         &draft_info,
         &std::collections::HashMap::new(),
-        &std::collections::HashMap::new()
+        &std::collections::HashMap::new(),
+        &ledger
     )
     .get("thinkingLevel")
     .is_none());
@@ -1059,6 +1049,7 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
 /// No billable work stays bare, like TS's undefined serialization.
 #[test]
 fn saved_session_rows_publish_the_own_usage_summary() {
+    let ledger = test_usage_ledger();
     let dir = std::env::temp_dir().join(format!("pa-saved-usage-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
@@ -1075,16 +1066,19 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     }));
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
+    // The listing reconciles the family before it stamps the row.
+    ledger.reconcile_family(&path).unwrap();
     let row = saved_session_row(
         &info,
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
+        &ledger,
     );
     assert_eq!(
         row["usage"],
         json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
     );
-    let summary = saved_session_summary(&info);
+    let summary = saved_session_summary(&info, &ledger);
     assert_eq!(
         summary["usage"],
         json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
@@ -1098,11 +1092,14 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     assert!(saved_session_row(
         &draft_info,
         &std::collections::HashMap::new(),
-        &std::collections::HashMap::new()
+        &std::collections::HashMap::new(),
+        &ledger
     )
     .get("usage")
     .is_none());
-    assert!(saved_session_summary(&draft_info).get("usage").is_none());
+    assert!(saved_session_summary(&draft_info, &ledger)
+        .get("usage")
+        .is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1112,6 +1109,7 @@ fn saved_session_rows_publish_the_own_usage_summary() {
 /// here first, before any client depends on the new shape.
 #[test]
 fn saved_session_rows_match_the_catalog_row_golden() {
+    let ledger = test_usage_ledger();
     let dir = std::env::temp_dir().join(format!("pa-saved-golden-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut session =
@@ -1144,11 +1142,13 @@ fn saved_session_rows_match_the_catalog_row_golden() {
     session.rewrite().unwrap();
 
     let info = crate::session_store::read_session_info(&path).unwrap();
+    ledger.reconcile_family(&path).unwrap();
     assert_eq!(
         saved_session_row(
             &info,
             &std::collections::HashMap::new(),
-            &std::collections::HashMap::new()
+            &std::collections::HashMap::new(),
+            &ledger
         ),
         json!({
             "path": path.to_string_lossy(),
@@ -1164,6 +1164,7 @@ fn saved_session_rows_match_the_catalog_row_golden() {
             "parentSessionPath": "/s/parent.jsonl",
             "model": { "provider": "p", "modelId": "m" },
             "usage": { "inputTokens": 105, "outputTokens": 10, "cost": 0.25 },
+            "totalUsage": { "inputTokens": 105, "outputTokens": 10, "cost": 0.25 },
             "thinkingLevel": "high"
         })
     );
@@ -1174,6 +1175,7 @@ fn saved_session_rows_match_the_catalog_row_golden() {
 /// non-resident bound session keeps its family edge.
 #[test]
 fn saved_session_summaries_carry_the_parent_binding() {
+    let ledger = test_usage_ledger();
     let dir = std::env::temp_dir().join(format!("pa-saved-binding-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut bound = crate::session_store::SessionFile::create("/tmp", Some("/s/p.jsonl"), 1);
@@ -1182,7 +1184,7 @@ fn saved_session_summaries_carry_the_parent_binding() {
     bound.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     bound.rewrite().unwrap();
     let bound_info = crate::session_store::read_session_info(&bound_path).unwrap();
-    let summary = saved_session_summary(&bound_info);
+    let summary = saved_session_summary(&bound_info, &ledger);
     assert_eq!(
         (summary.get("parentSessionPath"), summary.get("rlmDepth")),
         (Some(&json!("/s/p.jsonl")), Some(&json!(1)))
@@ -1194,7 +1196,7 @@ fn saved_session_summaries_carry_the_parent_binding() {
     root.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     root.rewrite().unwrap();
     let root_info = crate::session_store::read_session_info(&root_path).unwrap();
-    let summary = saved_session_summary(&root_info);
+    let summary = saved_session_summary(&root_info, &ledger);
     assert_eq!(
         (summary.get("parentSessionPath"), summary.get("rlmDepth")),
         (None, Some(&json!(0)))
@@ -1266,6 +1268,8 @@ async fn adoption_settles_then_seeds_the_roster_once() {
             depth: 1,
             name: "lane".to_string(),
             factory: None,
+            decision_child: false,
+            refine_child: false,
         })
         .unwrap();
     let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
@@ -2066,7 +2070,9 @@ async fn a_passivated_row_prompt_joins_an_already_hosting_resident() {
     let before = supervisor.registry.list().await.len();
     // The wake: the roster row resolves, the reuse arm finds the hosting
     // resident, and NO second launch runs.
-    let route = supervisor.wake_saved_session("passive-routing-1").await;
+    let route = supervisor
+        .wake_saved_session("passive-routing-1", None)
+        .await;
     match route {
         super::routing::WakeRoute::Woken(woken) => {
             assert!(
@@ -2119,7 +2125,9 @@ async fn a_passivated_row_prompt_with_no_rival_falls_through_the_failed_launch()
     // The launch gate: any launch is refused (a deterministic stand-in
     // for the race's losing launch).
     supervisor.shutting_down.store(true, Ordering::SeqCst);
-    let route = supervisor.wake_saved_session("passive-routing-2").await;
+    let route = supervisor
+        .wake_saved_session("passive-routing-2", None)
+        .await;
     match route {
         super::routing::WakeRoute::Fallthrough(message) => {
             assert!(
@@ -2176,6 +2184,8 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
             depth: 1,
             name: "parked-worker".to_string(),
             factory: None,
+            decision_child: false,
+            refine_child: false,
         })
         .expect("the spawn edge appends");
     assert_eq!(ledger.live_edges().expect("edges").len(), 1);
@@ -2231,13 +2241,10 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
 /// The stopped-child delete settles the roster the way the resident
 /// delete does (the D1b composition with the idle passivation): a
 /// `rlmLedgerDelete` aimed at an idle-passivated child finds no stop to
-/// settle the row, so the passivation's unowned row would linger while
-/// the bucket bills the captured spend on the parent - the same child
-/// billed twice until some later stop's unowned sweep catches the row.
-/// The delete's own push carries both halves together: the parent's
-/// refreshed bucket AND the child's row removal, one `roster_update`.
+/// settle the row, so the delete's own push removes the passivation's
+/// lingering unowned row.
 #[tokio::test]
-async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
+async fn the_stopped_childs_delete_removes_its_row() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
@@ -2340,6 +2347,8 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
             depth: 1,
             name: "parked-worker".to_string(),
             factory: None,
+            decision_child: false,
+            refine_child: false,
         })
         .expect("the spawn edge appends");
     let mut events = supervisor.events.subscribe();
@@ -2352,8 +2361,7 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
         )
         .await
         .expect("the stopped child's delete tombstones");
-    // ONE push carries both halves of the settle: the parent's
-    // refreshed bucket and the child's row removal.
+    // ONE push removes the lingering row.
     let mut pushes = Vec::new();
     loop {
         match events.try_recv() {
@@ -2372,24 +2380,6 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
         pushes.len(),
         1,
         "the stopped child's delete settles in one push: {pushes:?}"
-    );
-    let parent_after = supervisor
-        .roster
-        .lock()
-        .unwrap()
-        .entries()
-        .into_iter()
-        .find(|entry| entry.summary.get("sessionId").and_then(Value::as_str) == Some("p"))
-        .expect("the parent row");
-    assert_eq!(
-        pushes[0]["changed"],
-        serde_json::to_value(vec![parent_after]).expect("serialized parent"),
-        "the push carries the parent's refreshed row: {pushes:?}"
-    );
-    assert_eq!(
-        pushes[0]["changed"][0]["summary"]["deletedDescendantUsage"],
-        json!({ "inputTokens": 60, "outputTokens": 6, "cost": 0.3 }),
-        "the deleted child's captured spend bills through the parent"
     );
     assert_eq!(
         pushes[0]["removed"],
@@ -2452,6 +2442,8 @@ async fn a_ledger_delete_never_tombstones_an_unrelated_edge_sharing_the_child_id
                 depth: 1,
                 name: stem.to_string(),
                 factory: None,
+                decision_child: false,
+                refine_child: false,
             })
             .expect("the spawn edge appends");
     }
@@ -2522,6 +2514,8 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
             depth: 1,
             name: "kid-1".to_string(),
             factory: None,
+            decision_child: false,
+            refine_child: false,
         })
         .expect("the spawn edge appends");
     // The concurrent revival's resident already hosting the child's file.
@@ -2565,7 +2559,7 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
     let before = supervisor.registry.list().await.len();
     // The wake by the child's NAME: the catalog misses (the artifacts tree), the ledger
     // matches, and the REUSE arm joins — no second launch.
-    let route = supervisor.wake_saved_session("kid-1").await;
+    let route = supervisor.wake_saved_session("kid-1", None).await;
     match route {
         super::routing::WakeRoute::Woken(woken) => {
             assert!(
@@ -2791,4 +2785,15 @@ async fn a_restarted_supervisors_registration_seeds_the_roster_family() {
     assert_eq!(row.summary["runtimeKind"], "subagent");
     assert_eq!(row.worker_id, None, "the seeded row, never a worker's");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A usage ledger over a fresh temp agent dir (the saved-row builders stamp from it).
+fn test_usage_ledger() -> crate::usage_ledger::UsageLedger {
+    let agent_dir = std::env::temp_dir().join(format!("pa-usage-{}", uuid::Uuid::new_v4()));
+    let spawns = Arc::new(crate::rlm_ledger::RlmSpawnLedger::new(
+        &agent_dir,
+        &agent_dir.join("sessions"),
+        |_| {},
+    ));
+    crate::usage_ledger::UsageLedger::new(&agent_dir, spawns)
 }

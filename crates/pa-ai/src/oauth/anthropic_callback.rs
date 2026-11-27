@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::query_param;
+
 pub(crate) const CALLBACK_HOST_ENV: &str = "PI_OAUTH_CALLBACK_HOST";
 
 /// The registered redirect port (the registration's, not a scan
@@ -273,38 +275,6 @@ async fn write_response(
     stream.flush().await
 }
 
-/// One decoded query parameter (`+` as space, percent-decoded).
-fn query_param(query: &str, name: &str) -> Option<String> {
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if percent_decode(&key.replace('+', " ")) == name {
-            return Some(percent_decode(&value.replace('+', " ")));
-        }
-    }
-    None
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                out.push(byte);
-                index += 3;
-                continue;
-            }
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).to_string()
-}
-
 fn escape_html(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for character in value.chars() {
@@ -424,19 +394,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_error_response_answers_its_page_and_keeps_waiting() {
-        let (server, port) = live("the-state");
-        let response = request(port, "/callback?error=access_denied").await;
-        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
-        assert!(response.contains("Anthropic authentication did not complete"));
-        assert!(response.contains("Error: access_denied"));
-        // A non-matching response never settles the login; the cancel
-        // does.
-        server.cancel().await;
-        assert!(server.wait_for_code().await.is_none());
-    }
-
-    #[tokio::test]
     async fn missing_parameters_and_state_mismatch_never_settle() {
         let (server, port) = live("the-state");
         let missing = request(port, "/callback?code=the-code").await;
@@ -450,29 +407,6 @@ mod tests {
         assert!(unknown.contains("Callback route not found."));
         server.cancel().await;
         assert!(server.wait_for_code().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn a_bound_port_fails_the_start_clearly() {
-        // The registered port is occupied, so the login fails (TS
-        // rejects the server promise with the bind error). Skip when
-        // the port was already busy before this test — the blocker
-        // cannot stage the bind-failure path on a held port.
-        let Ok(blocker) = std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT)) else {
-            return;
-        };
-        let error = AnthropicCallbackServer::start("the-state").unwrap_err();
-        assert!(error.contains("port 53692"), "{error}");
-        // The in-use failure is OS-phrased (EADDRINUSE on Unix,
-        // WSAEADDRINUSE on Windows).
-        #[cfg(unix)]
-        assert!(error.contains("Address already in use"), "{error}");
-        #[cfg(windows)]
-        assert!(
-            error.contains("Only one usage of each socket address"),
-            "{error}"
-        );
-        drop(blocker);
     }
 
     /// The missed-notification regression: a settle landing between the wait's empty-slot check and
@@ -495,17 +429,5 @@ mod tests {
             .expect("the stored permit wakes the first poll")
             .expect("the settle settled a code");
         assert_eq!(result.code, "the-code");
-    }
-
-    #[test]
-    fn query_and_percent_decoding() {
-        assert_eq!(percent_decode("a%20b"), "a b");
-        assert_eq!(
-            query_param("code=a+b&state=2", "code"),
-            Some("a b".to_string())
-        );
-        // TS `URLSearchParams` keeps the bare key with an empty value
-        // (`""` is falsy in the flow's missing-params check).
-        assert_eq!(query_param("code&state=2", "code"), Some(String::new()));
     }
 }

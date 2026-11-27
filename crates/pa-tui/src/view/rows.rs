@@ -243,12 +243,7 @@ impl AgentView {
                 width,
                 self.conversation_leading(index, detail.tool_output_expanded()),
             ),
-            ChatEntry::InboxNotice(row) => crate::custom_message::render::render_inbox_notice(
-                row,
-                &self.theme,
-                width,
-                self.conversation_leading(index, detail.tool_output_expanded()),
-            ),
+            ChatEntry::InboxNotice(row) => self.render_inbox_notice_entry(index, row, width),
             // TS `addMessageToChat`'s user case: `Spacer(1)` when the chat is non-empty, then the
             // card.
             ChatEntry::SkillInvocation(row) => {
@@ -266,6 +261,7 @@ impl AgentView {
                     detail,
                     &self.theme,
                     width,
+                    true,
                 )
             }
             ChatEntry::ShellCompletion(row) => {

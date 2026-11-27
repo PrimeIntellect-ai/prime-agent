@@ -60,45 +60,39 @@ import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Callable
 from unittest.mock import patch
 
 import rlm as rlm_module
+import rlm.repl as repl_module
 from rlm.factory import (
     ANSWER_BINDING_CAP,
+    FACTORY_OUTPUTS_FILE,
+    FactoryEmitError,
     ANSWER_CAPTURE_CAP,
     BACKOFF_MAX_ATTEMPTS,
     EVENT_WINDOW,
-    MACHINE_FILE_NAME,
     MACHINE_SPEC_FENCE,
+    NODE_OUTPUTS_CAP,
     POLL_TIMEOUT_MS,
     RUN_MAX_CHILDREN_DEFAULT,
     RUN_MAX_PARALLEL_DEFAULT,
     SUBAGENT_NAME_MAX_LENGTH,
     FactoryExecutor,
     MachineFile,
-    MachineResolutionError,
     _child_name,
     _guard_passes,
     _parse_json_output,
-    _scan_machine_library,
     _spawn_label,
     canonicalize_factory_spec,
     cli_dispatch,
     compile_factory_dag,
     export_factory_spec,
-    export_library_machine,
     export_machine,
-    import_machine,
-    list_machines,
     machine_description_errors,
     machine_name_errors,
-    parse_machine_file,
     render_machine_file,
-    repo_machines_dir,
-    resolve_machine,
     topological_order,
-    user_machines_dir,
     validate_factory_machine,
     validate_factory_spec,
 )
@@ -217,14 +211,6 @@ class ValidateFactorySpecTest(unittest.TestCase):
             validate_factory_spec({"run": "bad", "nodes": "nope"}),
             ["run must be an object", "factory dag requires a nodes list"],
         )
-
-    def test_node_cap(self) -> None:
-        at_cap = {"nodes": [node(f"n{i}") for i in range(1024)]}
-        self.assertEqual(validate_factory_spec(at_cap), [])
-        over_cap = {"nodes": [node(f"n{i}") for i in range(1025)]}
-        errors = validate_factory_spec(over_cap)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("between 1 and 1024 nodes", errors[0])
 
     def test_node_ids(self) -> None:
         for good in ("a", "node-1", "1st-node", "a" * 64):
@@ -346,28 +332,6 @@ class ValidateFactorySpecTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("run failure_policy must be one of", errors[0])
 
-    def test_run_max_parallel(self) -> None:
-        for good in (1, 8, 64):
-            self.assertEqual(validate_factory_spec({"run": {"max_parallel": good}, "nodes": [node("a")]}), [])
-        for bad in (0, 65, -1, 1.5, "8", True):
-            errors = validate_factory_spec({"run": {"max_parallel": bad}, "nodes": [node("a")]})
-            self.assertEqual(errors, ["run max_parallel must be an integer between 1 and 64"], bad)
-
-    def test_run_max_transitions(self) -> None:
-        for good in (1, 40, 10_000):
-            self.assertEqual(validate_factory_spec({"run": {"max_transitions": good}, "nodes": [node("a")]}), [])
-        for bad in (0, -1, 10_001, 1.5, "5", True):
-            errors = validate_factory_spec({"run": {"max_transitions": bad}, "nodes": [node("a")]})
-            self.assertEqual(errors, ["run max_transitions must be a positive integer no greater than 10000"], bad)
-
-    def test_run_max_children(self) -> None:
-        # The run-wide child budget: total admissions over the run's life.
-        for good in (1, 40, 1_000_000):
-            self.assertEqual(validate_factory_spec({"run": {"max_children": good}, "nodes": [node("a")]}), [])
-        for bad in (0, -1, 1_000_001, 1.5, "5", True):
-            errors = validate_factory_spec({"run": {"max_children": bad}, "nodes": [node("a")]})
-            self.assertEqual(errors, ["run max_children must be a positive integer no greater than 1000000"], bad)
-
     def test_node_failure_policy(self) -> None:
         for good in ("fail_fast", "continue", "escalate"):
             self.assertEqual(validate_factory_spec({"nodes": [node("a", failure_policy=good)]}), [])
@@ -434,28 +398,12 @@ class ValidateFactorySpecTest(unittest.TestCase):
         # limit. Presence-based checks reject null with the field's own
         # message instead of treating it as an omitted default.
         self.assertEqual(
-            validate_factory_spec({"run": {"max_parallel": None}, "nodes": [node("a")]}),
-            ["run max_parallel must be an integer between 1 and 64"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"run": {"max_transitions": None}, "nodes": [node("a")]}),
-            ["run max_transitions must be a positive integer no greater than 10000"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"run": {"max_children": None}, "nodes": [node("a")]}),
-            ["run max_children must be a positive integer no greater than 1000000"],
-        )
-        self.assertEqual(
             validate_factory_spec({"run": {"budget_ms": None}, "nodes": [node("a")]}),
             ["run budget_ms must be a positive integer"],
         )
         self.assertEqual(
             validate_factory_spec({"run": {"failure_policy": None}, "nodes": [node("a")]}),
             ["run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got None"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"nodes": [node("a", retries=None)]}),
-            ["node a retries must be an integer between 0 and 10"],
         )
         self.assertEqual(
             validate_factory_spec({"nodes": [node("a", budget_ms=None)]}),
@@ -468,25 +416,6 @@ class ValidateFactorySpecTest(unittest.TestCase):
         self.assertEqual(
             validate_factory_spec({"nodes": [node("a", lifecycle=None)]}),
             ["node a lifecycle must be 'task' or 'resident', got None"],
-        )
-        machine_nulls = {
-            "states": [
-                {
-                    "id": "a",
-                    "entry": True,
-                    "subagent": "w",
-                    "max_entries": None,
-                    "retries": None,
-                }
-            ],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(machine_nulls),
-            [
-                "state a retries must be an integer between 0 and 10",
-                "state a max_entries must be an integer >= 1",
-            ],
         )
         self.assertEqual(
             validate_factory_machine({"states": [{"id": "a", "entry": None, "subagent": "w"}], "transitions": []}),
@@ -654,6 +583,14 @@ class ValidateFactorySpecTest(unittest.TestCase):
         zero_retries = {"nodes": [node("watcher", lifecycle="resident", retries=0)]}
         self.assertEqual(validate_factory_spec(zero_retries), [])
 
+        # The type/range guard runs before the resident rule: a malformed
+        # value names the bound, not "cannot declare retries".
+        malformed_retries = {"nodes": [node("watcher", lifecycle="resident", retries="bad")]}
+        self.assertEqual(
+            validate_factory_spec(malformed_retries),
+            ["node watcher retries must be an integer between 0 and 10"],
+        )
+
         # Empty outputs list on a resident node is fine: nothing is declared.
         empty_outputs = {"nodes": [node("watcher", lifecycle="resident", outputs=[])]}
         self.assertEqual(validate_factory_spec(empty_outputs), [])
@@ -683,20 +620,6 @@ class ValidateFactorySpecTest(unittest.TestCase):
                 ]
             }
             self.assertEqual(validate_factory_spec(ok_max), [])
-
-        for bad_max in (0, 257, -1, 1.5, "8", True):
-            bad = {
-                "nodes": [
-                    node("a", outputs=[{"name": "items", "type": "json"}]),
-                    node(
-                        "b",
-                        inputs=[{"name": "items", "type": "json", "from": "a.items"}],
-                        foreach={"over": "items", "max": bad_max},
-                    ),
-                ]
-            }
-            errors = validate_factory_spec(bad)
-            self.assertEqual(errors, ["node b foreach.max must be an integer between 1 and 256"], bad_max)
 
         wrong_port = {
             "nodes": [
@@ -804,7 +727,6 @@ class ValidateFactorySpecTest(unittest.TestCase):
             errors,
             [
                 "run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'nope'",
-                "run max_parallel must be an integer between 1 and 64",
                 "node a depends on unknown node 'ghost'",
                 "node b retries must be an integer between 0 and 10",
                 "node c failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'retry'",
@@ -902,11 +824,9 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
         self.assertEqual(result["states"][0]["failure_policy"], "continue")
         self.assertEqual(result["states"][1]["failure_policy"], "escalate")
 
-    def test_max_transitions_defaults_to_ten_per_state_capped(self) -> None:
+    def test_max_transitions_defaults_to_ten_per_state(self) -> None:
         ten_states = {"nodes": [node(f"n{i}") for i in range(10)]}
         self.assertEqual(canonicalize_factory_spec(ten_states)["run"]["max_transitions"], 100)
-        many_states = {"nodes": [node(f"n{i}") for i in range(1024)]}
-        self.assertEqual(canonicalize_factory_spec(many_states)["run"]["max_transitions"], 10_000)
 
     def test_deduplicates_depends_on_into_one_transition(self) -> None:
         dag = {
@@ -1051,17 +971,8 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         at_cap = {"states": [state(f"s{i}") for i in range(1024)], "transitions": []}
         at_cap["states"][0]["entry"] = True
         self.assertEqual(validate_factory_machine(at_cap), [])
-        over_cap = {"states": [state(f"s{i}") for i in range(1025)], "transitions": []}
-        over_cap["states"][0]["entry"] = True
-        self.assertEqual(
-            validate_factory_machine(over_cap),
-            [f"factory machine must declare between 1 and 1024 states, got 1025"],
-        )
         empty = {"states": [], "transitions": []}
-        self.assertEqual(
-            validate_factory_machine(empty),
-            ["factory machine must declare between 1 and 1024 states, got 0"],
-        )
+        self.assertEqual(validate_factory_machine(empty), ["factory machine must declare at least one state"])
 
     def test_state_ids(self) -> None:
         for good in ("a", "state-1", "1st-state", "a" * 64):
@@ -1207,18 +1118,6 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         }
         self.assertEqual(validate_factory_spec(dag), [])
 
-    def test_max_entries(self) -> None:
-        for good in (1, 2, 99):
-            machine = {"states": [state("a", entry=True, max_entries=good)], "transitions": []}
-            self.assertEqual(validate_factory_machine(machine), [], good)
-        for bad in (0, -1, 1.5, "2", True):
-            machine = {"states": [state("a", entry=True, max_entries=bad)], "transitions": []}
-            self.assertEqual(
-                validate_factory_machine(machine),
-                ["state a max_entries must be an integer >= 1"],
-                repr(bad),
-            )
-
     def test_python_states(self) -> None:
         python = {"import": "tools", "callable": "plan"}
         machine = {
@@ -1240,6 +1139,9 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             "declares both subagent and python": {"python": python, "subagent": "worker"},
             "python requires non-empty 'import' and 'callable' strings": {"python": {"import": "tools"}},
             "python state a cannot be resident": {"python": python, "lifecycle": "resident"},
+            "state a python path must be an absolute directory when provided": {
+                "python": {**python, "path": "nodes"}
+            },
             "python state a cannot use foreach": {
                 "python": python,
                 "inputs": [{"name": "xs", "type": "json", "from": "b.xs"}],
@@ -1256,6 +1158,34 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             }
             errors = validate_factory_machine(machine)
             self.assertTrue(any(expected in error for error in errors), (expected, errors))
+
+    def test_params(self) -> None:
+        machine = {
+            "params": {"task": "ship it", "max_loc": 400},
+            "states": [state("a", entry=True)],
+            "transitions": [],
+        }
+        self.assertEqual(validate_factory_machine(machine), [])
+        self.assertEqual(canonicalize_factory_spec(machine)["params"], {"task": "ship it", "max_loc": 400})
+        self.assertNotIn("params", canonicalize_factory_spec({"states": [state("a", entry=True)]}))
+        for params in (["task"], {"Task": "x"}, {"1x": 1}):
+            self.assertEqual(
+                validate_factory_machine({**machine, "params": params}),
+                ["params must be an object keyed by lowercase identifiers"],
+                repr(params),
+            )
+        colliding = {
+            "params": {"items": []},
+            "states": [
+                state("a", entry=True, outputs=[{"name": "items", "type": "json"}]),
+                state("b", inputs=[{"name": "items", "type": "json", "from": "a.items"}]),
+            ],
+            "transitions": [{"from": "a", "to": "b"}],
+        }
+        self.assertEqual(
+            validate_factory_machine(colliding),
+            ["state b input 'items' is also a param; rename the input"],
+        )
 
     def test_subagent_required(self) -> None:
         missing = {"states": [{"id": "a", "entry": True}], "transitions": []}
@@ -1466,6 +1396,15 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             validate_factory_machine(declares_retries),
             ["resident state watcher cannot declare retries"],
         )
+        # Same order as the node form: the bound check reports first.
+        malformed_retries = {
+            "states": [state("watcher", entry=True, lifecycle="resident", retries="bad")],
+            "transitions": [],
+        }
+        self.assertEqual(
+            validate_factory_machine(malformed_retries),
+            ["state watcher retries must be an integer between 0 and 10"],
+        )
         leaves_resident = {
             "states": [
                 {"id": "entry", "entry": True, "subagent": "w"},
@@ -1552,13 +1491,6 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             self.assertEqual(validate_factory_machine(machine), ["run budget_ms must be a positive integer"], bad)
             machine = {"states": [state("a", entry=True, budget_ms=bad)], "transitions": []}
             self.assertEqual(validate_factory_machine(machine), ["state a budget_ms must be a positive integer"], bad)
-        for bad in (-1, 11, 1.5, "2", True):
-            machine = {"states": [state("a", entry=True, retries=bad)], "transitions": []}
-            self.assertEqual(
-                validate_factory_machine(machine),
-                ["state a retries must be an integer between 0 and 10"],
-                bad,
-            )
         bad_policy = {"states": [state("a", entry=True, failure_policy="retry")], "transitions": []}
         self.assertEqual(
             validate_factory_machine(bad_policy),
@@ -1569,18 +1501,6 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             validate_factory_machine(bad_lifecycle),
             ["state a lifecycle must be 'task' or 'resident', got 'daemon'"],
         )
-
-    def test_run_max_transitions(self) -> None:
-        for good in (1, 40, 10_000):
-            machine = {"run": {"max_transitions": good}, "states": [state("a", entry=True)], "transitions": []}
-            self.assertEqual(validate_factory_machine(machine), [], good)
-        for bad in (0, -1, 10_001, 1.5, "5", True):
-            machine = {"run": {"max_transitions": bad}, "states": [state("a", entry=True)], "transitions": []}
-            self.assertEqual(
-                validate_factory_machine(machine),
-                ["run max_transitions must be a positive integer no greater than 10000"],
-                bad,
-            )
 
     def test_foreach_rules(self) -> None:
         ok = {
@@ -1622,18 +1542,6 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             "transitions": [{"from": "a", "to": "b"}],
         }
         self.assertEqual(validate_factory_machine(text_port), ["state b foreach.over input 'draft' must have type 'json'"])
-        bad_max = {
-            "states": [
-                state("a", entry=True, outputs=[{"name": "items", "type": "json"}]),
-                state(
-                    "b",
-                    inputs=[{"name": "items", "type": "json", "from": "a.items"}],
-                    foreach={"over": "items", "max": 257},
-                ),
-            ],
-            "transitions": [{"from": "a", "to": "b"}],
-        }
-        self.assertEqual(validate_factory_machine(bad_max), ["state b foreach.max must be an integer between 1 and 256"])
         not_object = {"states": [state("a", entry=True, foreach=["bad"])], "transitions": []}
         self.assertEqual(validate_factory_machine(not_object), ["state a foreach must be an object"])
 
@@ -2020,9 +1928,7 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             validate_factory_machine(machine),
             [
                 "run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'nope'",
-                "run max_parallel must be an integer between 1 and 64",
                 "state a retries must be an integer between 0 and 10",
-                "state b max_entries must be an integer >= 1",
                 "transitions[0] references unknown to-state 'ghost'",
             ],
         )
@@ -2178,7 +2084,7 @@ class CompileFactoryDagTest(unittest.TestCase):
         for bad, expected in (
             ("nope", "factory dag must be a JSON object"),
             ({"nodes": "nope"}, "factory dag requires a nodes list"),
-            ({"nodes": []}, "factory dag must declare between 1 and 1024 nodes, got 0"),
+            ({"nodes": []}, "factory dag must declare at least one node"),
             ({"nodes": [node("a", depends_on=["ghost"])]}, "node a depends on unknown node 'ghost'"),
         ):
             machine, errors = compile_factory_dag(bad)
@@ -2276,9 +2182,10 @@ class ValidateFactorySpecFormTest(unittest.TestCase):
             {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": ["a", {}], "to": "a"}]},
             {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": ["a"], "to": {}}]},
             {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": "a", "to": "a", "when": {"op": "eq", "value": [1]}}]},
-            {"states": [{"id": "a", "entry": True, "subagent": "w", "max_entries": {}}]},
+            {"states": [{"id": "a", "entry": True, "subagent": "w", "failure_policy": {}}]},
             {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": {"from": "a"}},
             {"nodes": [{"id": "a", "subagent": "w"}], "states": [{"id": "b", "entry": True, "subagent": "w"}]},
+            {"params": {"x": 1}, "states": [{"id": "a", "entry": True, "subagent": "w", "inputs": [{"name": ["x"]}]}]},
         ]
         for index, spec in enumerate(hostile):
             result = validate_factory_spec(spec)
@@ -2562,21 +2469,20 @@ class FactoryHelpTest(unittest.TestCase):
         # fact-checked against the machine-library code (parse/import
         # gate/run fallback).
         self.assertIn(
-            "The machine library: machines are `MACHINE.md` files (frontmatter plus "
-            "one fenced `machine-spec` block), one directory per machine, resolved "
-            "from two levels — the bundled seeds shipped inside the runtime "
-            "(visible in every install; `PRIME_AGENT_MACHINES_DIR` redirects the "
-            "level at a team directory) first, the personal `machines/` library "
-            "under the agent dir second",
+            "The machine library: one folder per machine, either a machine directory "
+            "(`machine.toml`) or a `MACHINE.md` file (frontmatter plus one fenced "
+            "`machine-spec` block), resolved from two levels — the bundled seeds "
+            "shipped inside the runtime (visible in every install; "
+            "`PRIME_AGENT_MACHINES_DIR` redirects the level at a team directory) "
+            "first, the personal `machines/` library under the agent dir second",
             flat,
         )
         self.assertIn(
             "`prime-agent factory list | import | export` manages them: list shows "
-            "only what parses and validates (broken files print as warnings), "
-            "import runs the same write-time validation as a stored spec so an "
-            "invalid machine never persists, and export copies a library machine "
-            "verbatim to a fresh path (an existing target is refused, never "
-            "overwritten)",
+            "what loads (broken folders print as warnings), import checks the spec "
+            "like a stored one so an invalid machine never persists, and export "
+            "copies a library MACHINE.md verbatim to a fresh path (an existing "
+            "target is refused, never overwritten)",
             flat,
         )
         self.assertIn(
@@ -2588,6 +2494,7 @@ class FactoryHelpTest(unittest.TestCase):
         self.assertIn(
             "The bundled seeds are `builder`, `pr-manager`, and `review-sweep`", flat
         )
+
 
         # The configured inline subagent name contract.
         self.assertIn("The optional `name` labels the spawned children", flat)
@@ -2673,6 +2580,21 @@ class FactorySettingReadTest(unittest.TestCase):
         # ...and /factory off writes enabled false, leaving the rest intact.
         document["factory"] = {"enabled": False}
         self.write_settings(document)
+        self.assertFalse(factory_module.factory_enabled())
+
+    def test_the_read_survives_its_first_call_and_rereads_on_a_rewrite(self):
+        # The stat-keyed cache behind the boot arm's per-execute read:
+        # the FIRST call (a missing settings file, an empty cache) must
+        # answer, never crash — the arm asks on every executed command
+        # while it keeps declining — and a rewrite moves the stat key so
+        # the next call re-reads the new document (an unconditional
+        # cache would serve the stale verdict forever).
+        self.assertFalse(factory_module.factory_enabled())
+        self.write_settings({"factory": {"enabled": True}})
+        self.assertTrue(factory_module.factory_enabled())
+        self.write_settings({"factory": {"enabled": False}})
+        self.assertFalse(factory_module.factory_enabled())
+        # The unchanged-document re-read: repeated calls stay consistent.
         self.assertFalse(factory_module.factory_enabled())
 
     def test_missing_or_wrong_typed_settings_read_as_disabled(self) -> None:
@@ -2825,6 +2747,25 @@ class FakeHost:
         self.gates: dict[tuple[str, int], asyncio.Event] = {}
         self.gate_entries: dict[tuple[str, int], asyncio.Event] = {}
         self._call_indices: dict[str, int] = {}
+        # factory.compile replies by machine directory path or library
+        # name (the Rust loader's answer, scripted).
+        self.compiled: dict[str, dict[str, Any]] = {}
+        # factory.describe replies by library name (the drill-in's template).
+        self.described: dict[str, dict[str, Any]] = {}
+        # Emit-state children: with session_root set, each spawn gets a real
+        # session dir; ``emitted[node]`` is written there as the child's
+        # accepted outputs at spawn, and ``on_message`` runs on every
+        # agent_message.send (a child answering a repair request).
+        self.session_root: Path | None = None
+        self.emitted: dict[str, dict[str, Any]] = {}
+        self.on_message: Callable[[dict[str, Any]], None] | None = None
+        self.check_errors: dict[str, str] = {}
+        self.factory_task_busy_until_collect: dict[str, int] = {}
+        self.deleted: dict[str, dict[str, Any]] = {}
+        # factory.limits answers the Rust max_transitions bound unless a
+        # test scripts its error.
+        self.limits_error: str | None = None
+        self.max_transitions_bound = 10_000
 
     def gate(self, request_type: str, call_number: int) -> asyncio.Event:
         """Suspend the call_number-th call of that type on a returned event."""
@@ -2857,6 +2798,8 @@ class FakeHost:
         settled: bool,
         answer: str | None = None,
         error: str | None = None,
+        duration_ms: int = 5,
+        factory_task_busy: bool | None = False,
     ) -> dict[str, Any]:
         entry: dict[str, Any] = {
             "rlm_child_id": child_id,
@@ -2865,8 +2808,10 @@ class FakeHost:
             "status": status,
             "settled": settled,
             "tool_use_count": 1,
-            "duration_ms": 5,
+            "duration_ms": duration_ms,
         }
+        if factory_task_busy is not None:
+            entry["factory_task_busy"] = factory_task_busy
         if answer is not None:
             # The real host hands the kernel a compact preview (about 160
             # characters, whitespace-collapsed, ellipsis tail) plus the
@@ -2887,7 +2832,7 @@ class FakeHost:
     async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
         gate = None
-        if request_type in ("rlm.collect", "rlm.delete_subagent", "rlm.run", "factory.progress"):
+        if request_type in ("rlm.collect", "rlm.delete_subagent", "rlm.run", "factory.progress", "factory.check"):
             index = self._call_indices.get(request_type, 0) + 1
             self._call_indices[request_type] = index
             gate = self.gates.pop((request_type, index), None)
@@ -2926,10 +2871,18 @@ class FakeHost:
             self.counter += 1
             child_id = f"child-{self.counter}"
             self.children[child_id] = {"name": name, "node": node_id}
+            session_dir = f"/tmp/{child_id}"
+            if self.session_root is not None:
+                session_dir = str(self.session_root / child_id)
+                Path(session_dir).mkdir(parents=True, exist_ok=True)
+                if node_id in self.emitted:
+                    Path(session_dir, FACTORY_OUTPUTS_FILE).write_text(
+                        json.dumps(self.emitted[node_id]), encoding="utf-8"
+                    )
             return {
                 "rlm_child_id": child_id,
                 "name": name,
-                "session_dir": f"/tmp/{child_id}",
+                "session_dir": session_dir,
                 "model": "fake-model",
             }
         self.calls.append((request_type, payload))
@@ -2940,16 +2893,39 @@ class FakeHost:
             results = []
             for target in payload["targets"]:
                 child = self.children.get(target)
+                if target in self.deleted:
+                    # The real host answers a deleted factory child with a
+                    # settled cancelled envelope that owns no background jobs.
+                    results.append(
+                        self._entry(
+                            child_id=target,
+                            name=self.deleted[target]["name"],
+                            status="cancelled",
+                            settled=True,
+                            error="deleted",
+                        )
+                    )
+                    continue
                 if child is None:
-                    continue  # deleted children vanish from collect results
+                    continue
                 outcome = (
                     self.child_outcomes.get(target)
                     or self.outcomes.get(child["node"])
                     or {"status": "done", "answer": f"answer-{child['node']}"}
                 )
+                factory_task_busy = outcome.get(
+                    "factory_task_busy",
+                    self.collects <= self.factory_task_busy_until_collect.get(child["node"], 0),
+                )
                 if outcome["status"] == "running":
                     results.append(
-                        self._entry(child_id=target, name=child["name"], status="running", settled=False)
+                        self._entry(
+                            child_id=target,
+                            name=child["name"],
+                            status="running",
+                            settled=False,
+                            factory_task_busy=factory_task_busy,
+                        )
                     )
                     continue
                 results.append(
@@ -2960,12 +2936,28 @@ class FakeHost:
                         settled=True,
                         answer=outcome.get("answer"),
                         error=outcome.get("error"),
+                        duration_ms=outcome.get("duration_ms", 5),
+                        factory_task_busy=factory_task_busy,
                     )
                 )
             return {"results": results}
+        if request_type == "rlm.list_subagents":
+            return {
+                "subagents": [
+                    {
+                        "rlm_child_id": child_id,
+                        "session_name": child["name"],
+                        "session_dir": f"/tmp/{child_id}",
+                        "status": "running",
+                    }
+                    for child_id, child in self.children.items()
+                ]
+            }
         if request_type == "rlm.delete_subagent":
             target = payload["target"]
             child = self.children.pop(target, None)
+            if child is not None:
+                self.deleted[target] = child
             # The real host's delete receipt reports the row as cancelled
             # (a live child's delete settles it cancelled), so the kernel's
             # payload validation sees the same shape it sees in production.
@@ -2981,6 +2973,29 @@ class FakeHost:
         if request_type == "factory.progress":
             self.notices.append(payload)
             return {}
+        if request_type == "factory.compile":
+            key = (payload or {}).get("path") or (payload or {}).get("name")
+            if key not in self.compiled:
+                raise RuntimeError(f"no library machine named {key!r} (machines: none)")
+            return self.compiled[key]
+        if request_type == "factory.describe":
+            name = (payload or {}).get("name")
+            if name not in self.described:
+                raise RuntimeError(f"no library machine named {name!r} (machines: none)")
+            return self.described[name]
+        if request_type == "factory.limits":
+            if self.limits_error is not None:
+                raise RuntimeError(self.limits_error)
+            return {"max_transitions": self.max_transitions_bound}
+        if request_type == "agent_message.send":
+            if self.on_message is not None:
+                self.on_message(payload or {})
+            return {"deliveryStatus": "delivered"}
+        if request_type == "factory.check":
+            error = self.check_errors.get(json.dumps((payload or {}).get("outputs"), sort_keys=True))
+            if error is not None:
+                raise RuntimeError(error)
+            return {}
         raise AssertionError(f"unexpected host request type {request_type!r}")
 
 
@@ -2992,6 +3007,24 @@ class DeleteFailsHost(FakeHost):
             self.calls.append((request_type, payload or {}))
             raise RuntimeError("delete_subagent: child already gone")
         return await super().__call__(request_type, payload)
+
+
+class StaleCollectHost(FakeHost):
+    """FakeHost whose ``stale_collect``-th collect computes its results, then
+    suspends until ``release`` is set: the caller reads them stale."""
+
+    def __init__(self, clock: "FakeClock | None" = None, *, stale_collect: int):
+        super().__init__(clock=clock)
+        self.stale_collect = stale_collect
+        self.computed = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = await super().__call__(request_type, payload)
+        if request_type == "rlm.collect" and self.collects == self.stale_collect:
+            self.computed.set()
+            await self.release.wait()
+        return result
 
 
 class LateAnswerHost(FakeHost):
@@ -3099,6 +3132,13 @@ class _ExecutorTestCase(unittest.TestCase):
     def disable_factory(self) -> None:
         """Flip the settings file to the disabled default."""
         self.write_settings({"factory": {"enabled": False}})
+
+    async def wait_until(self, predicate, *, max_polls: int = 50_000) -> None:
+        for _ in range(max_polls):
+            if predicate():
+                return
+            await yield_loop_turn()
+        self.fail("condition never became true")
 
     # -- helpers shared with the opt-in gate tests ----------------------------
 
@@ -3300,13 +3340,6 @@ class FactoryExecutorTest(_ExecutorTestCase):
                 return await rlm_module.rlm.factory.status(run_id)
             await yield_loop_turn()
         self.fail(f"run {run_id} never left the running state")
-
-    async def wait_until(self, predicate, *, max_polls: int = 50_000) -> None:
-        for _ in range(max_polls):
-            if predicate():
-                return
-            await yield_loop_turn()
-        self.fail("condition never became true")
 
     def node_status(self, status: dict[str, Any], node_id: str) -> dict[str, Any]:
         return next(entry for entry in status["nodes"] if entry["id"] == node_id)
@@ -4311,6 +4344,25 @@ class FactoryExecutorTest(_ExecutorTestCase):
     # -- failure policies ---------------------------------------------------------
 
     @async_test
+    async def test_a_busy_owner_adds_no_poll_sleep_while_another_child_runs(self) -> None:
+        # The collect of the running child already waits, so the owner's
+        # background work adds no extra sleep on top of it.
+        self.host.outcomes["a"] = {"status": "done", "answer": "a", "factory_task_busy": True}
+        self.host.outcomes["b"] = {"status": "running"}
+        self.store_factory(
+            {"nodes": [{"id": "a", "subagent": "worker"}, {"id": "b", "subagent": "worker"}]}
+        )
+        held = self.host.gate("rlm.collect", 4)
+        result = await self.start()
+        await self.host.gate_entered("rlm.collect", 4).wait()
+        self.host.outcomes["a"]["factory_task_busy"] = False
+        self.host.outcomes["b"] = {"status": "done", "answer": "b"}
+        held.set()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertNotIn(factory_module.REPAIR_POLL_SECONDS, self.sleeps.sleeps)
+
+    @async_test
     async def test_fail_fast_cancels_running_children(self) -> None:
         self.host.outcomes["a"] = {"status": "error", "error": "boom"}
         self.host.outcomes["b"] = {"status": "running"}
@@ -4573,6 +4625,35 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertIn(factory_module.INFRA_VERIFY_QUIET_SECONDS, self.sleeps.sleeps)
 
     @async_test
+    async def test_failed_infra_retirement_blocks_resume_replacement(self) -> None:
+        failing = DeleteFailsHost(clock=self.clock)
+        patcher = patch.object(rlm_module, "host_request", failing)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        failing.child_outcomes["child-1"] = {
+            "status": "error",
+            "error": "Child worker unreachable",
+        }
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker"}]})
+        result = await self.start()
+        paused = await self.settle(result)
+
+        self.assertEqual(paused["state"], "paused")
+        self.assertEqual(len(failing.spawn_calls("work")), 1)
+        instance = self.node_status(paused, "work")["instances"][0]
+        self.assertEqual(instance["child"], "child-1")
+        self.assertIn("child-1", failing.children)
+        self.assertEqual(len(self.all_events_of(result, "infra_respawn")), 0)
+
+        resumed = await rlm_module.rlm.factory.resume(result["run_id"])
+        self.assertEqual(resumed["state"], "paused")
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(len(failing.spawn_calls("work")), 1)
+        self.assertEqual(self.node_status(status, "work")["instances"][0]["child"], "child-1")
+        self.assertIn("child-1", failing.children)
+        self.assertEqual(len(failing.deleted_targets()), 2)
+
+    @async_test
     async def test_second_worker_death_falls_through_retries_and_policy(self) -> None:
         # Only ONE free respawn: a second verified death charges the normal
         # retries budget (the free respawn consumed none) and then the
@@ -4706,9 +4787,13 @@ class FactoryExecutorTest(_ExecutorTestCase):
 
     @async_test
     async def test_node_budget_marks_attempt_failed(self) -> None:
-        # The fake clock advances 2s per collect, so the node's 1000ms budget
-        # (admission to settlement) is exceeded when the child settles.
+        # The budget measures the CHILD'S OWN run time (the collect
+        # result's duration): a's child ran 2000ms against the node's
+        # 1000ms budget. The wall clock no longer drives the check (a
+        # pause between admission and settlement must not reject
+        # finished work).
         self.clock.advance_per_collect = 2.0
+        self.host.outcomes["a"] = {"status": "done", "duration_ms": 2000}
         self.store_factory(
             {
                 "run": {"failure_policy": "continue"},
@@ -5060,8 +5145,9 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(result["started"], [])
         await gate_entered.wait()  # the loop is suspended mid-spawn
         stopped = await rlm_module.rlm.factory.stop(result["run_id"])
-        self.assertEqual(stopped["cancelled"], ["a"])
-        spawn_gate.set()  # the admission returns a child into a stopped run
+        self.assertEqual(stopped["state"], "stopping")
+        self.assertEqual(stopped["cancelled"], [])
+        spawn_gate.set()  # the admission returns a child into a stopping run
         run = self.executor._runs[result["run_id"]]
         await run.task
         status = await rlm_module.rlm.factory.status(result["run_id"])
@@ -5072,10 +5158,28 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(self.host.deleted_targets(), ["child-1"])  # retracted
         self.assertEqual(status["usage"]["spawns"], 0)  # never registered
         self.assertEqual(len(self.host.spawn_calls("a")), 2)  # no re-admission
-        # the retraction is recorded after run_stopped: a cancelled ledger
-        # entry for the retracted child, and no spawned event after it.
+        # The child is retracted before the run can be reported stopped.
         kinds = [event["kind"] for event in status["events"]]
-        self.assertEqual(kinds[kinds.index("run_stopped"):], ["run_stopped", "cancelled"])
+        self.assertLess(kinds.index("cancelled"), kinds.index("run_stopped"))
+        self.assertNotIn("spawned", kinds[kinds.index("run_stopped") + 1 :])
+
+    @async_test
+    async def test_stop_during_an_in_flight_admission_that_fails_finishes_the_stop(self) -> None:
+        # stop() waits for the in-flight spawn; when that spawn fails, no
+        # child exists and the run must not stay stopping.
+        self.host.rate_limit_first["a"] = 2
+        spawn_gate = self.host.gate("rlm.run", 2)
+        gate_entered = self.host.gate_entered("rlm.run", 2)
+        self.store_factory({"nodes": [{"id": "a", "subagent": "worker"}]})
+        result = await self.start()
+        await gate_entered.wait()
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["state"], "stopping")
+        spawn_gate.set()  # the admission fails into a stopping run
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(self.host.deleted_targets(), [])
 
     @async_test
     async def test_stop_during_admission_backoff_cancels_the_instance(self) -> None:
@@ -5162,16 +5266,16 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # "failed" only after its cascade): its pass must skip b (claimed)
         # and cancel c itself.
         stopped = await rlm_module.rlm.factory.stop(result["run_id"])
-        self.assertEqual(stopped["state"], "stopped")
+        self.assertEqual(stopped["state"], "stopping")
         delete_gate.set()
-        final = await self.settle(result)
-        self.assertEqual(final["state"], "stopped")
         # The gated delete resumes after the stop pass: the fail_fast
         # cascade finishes inside the control-loop task, so the task-done
         # barrier waits for BOTH deletions deterministically (an assert on
         # the delete list alone could race the released call).
         run = self.executor._runs[result["run_id"]]
         await self.wait_until(lambda: run.task.done())
+        final = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(final["state"], "stopped")
         # every child deleted exactly once, in one pass each
         self.assertEqual(sorted(self.host.deleted_targets()), ["child-2", "child-3"])
         self.assertEqual(
@@ -5179,11 +5283,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         )
 
     @async_test
-    async def test_failed_delete_records_cancel_failed_and_cancelled(self) -> None:
-        # A delete that raises still releases the executor's slot, so the
-        # ledger records the failure AND the cancellation (the eval replay
-        # checker keys off cancelled events) while the instance reads
-        # cancelled in the stopped run.
+    async def test_failed_delete_keeps_stop_incomplete_and_actor_owned(self) -> None:
         failing = DeleteFailsHost(clock=self.clock)
         patcher = patch.object(rlm_module, "host_request", failing)
         patcher.start()
@@ -5192,17 +5292,20 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.store_factory({"nodes": [{"id": "a", "subagent": "worker"}]})
         result = await self.start()
         await self.wait_until(lambda: failing.collects >= 1)
+
         stopped = await rlm_module.rlm.factory.stop(result["run_id"])
-        self.assertEqual(stopped["cancelled"], ["a"])
+        self.assertEqual(stopped["state"], "stopping")
+        self.assertEqual(stopped["cancelled"], [])
         status = await rlm_module.rlm.factory.status(result["run_id"])
-        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(status["state"], "stopping")
         instance = self.node_status(status, "a")["instances"][0]
-        self.assertEqual(instance["status"], "cancelled")
-        kinds = [(event["kind"], event.get("detail")) for event in status["events"]]
-        self.assertIn(("cancel_failed", None), kinds)
-        self.assertIn(("cancelled", "slot released despite the failed delete"), kinds)
-        # the failure is recorded before the cancellation it explains
-        self.assertLess(kinds.index(("cancel_failed", None)), kinds.index(("cancelled", "slot released despite the failed delete")))
+        self.assertEqual(instance["status"], "running")
+        self.assertEqual(instance["child"], "child-1")
+        self.assertIn("child-1", failing.children)
+        kinds = [event["kind"] for event in status["events"]]
+        self.assertIn("cancel_failed", kinds)
+        self.assertNotIn("run_stopped", kinds)
+        self.assertFalse(any(event["kind"] == "cancelled" and event.get("child") == "child-1" for event in status["events"]))
 
     @async_test
     async def test_rate_limit_at_admission_defers_to_backoff(self) -> None:
@@ -6273,6 +6376,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
             [e["detail"] for e in self.all_events_of(result, "node_ready") if e.get("node") == "fan"],
             ["foreach expanded to zero items; nothing to run"] * 2,
         )
+        node_reply = self.executor._node_report(result["run_id"], "fan")
+        self.assertEqual(node_reply["state"]["id"], "fan")
+        self.assertEqual(node_reply["entry"]["status"], "done")
+        self.assertIn("outputs", node_reply["entry"])
+        self.assertIn("output_errors", node_reply["entry"])
+        self.assertIsNone(node_reply["instance"])
 
     @async_test
     async def test_optional_input_waits_for_a_live_upstream_before_spawning(self) -> None:
@@ -6639,6 +6748,10 @@ class FactoryExecutorTest(_ExecutorTestCase):
             dep["entries"][0]["error"],
         )
         self.assertEqual(self.host.spawn_calls("dep"), [])
+        node = await self.executor.activity(
+            {"action": "node", "runId": result["run_id"], "specId": "dep"}
+        )
+        self.assertEqual(node["entry"]["error"], dep["entries"][0]["error"])
 
     @async_test
     async def test_machine_optional_input_over_a_settled_source_with_no_captured_value_binds_the_null_sentinel(self) -> None:
@@ -7018,6 +7131,11 @@ def plan(inputs):
 async def echo(inputs):
     return {"echo": inputs}
 
+def owner(inputs):
+    import os
+    return {"owner": os.environ.get("PRIME_AGENT_FACTORY_OWNER_SESSION"), "rlm": sorted(k for k in os.environ if k.startswith("RLM_"))}
+
+
 def boom(inputs):
     raise ValueError("boom")
 
@@ -7103,6 +7221,110 @@ class FactoryPythonStateTest(_ExecutorTestCase):
         graph_states = {row["id"]: row for row in self.executor.graph(result["run_id"])["machine"]["states"]}
         self.assertEqual(graph_states["plan"]["python"], "factory_py_tools.plan")
         self.assertNotIn("subagent", graph_states["plan"])
+
+    @async_test
+    async def test_a_python_state_sees_the_owner_session_and_no_rlm_env(self) -> None:
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "who",
+                        "entry": True,
+                        "python": self.py("owner"),
+                        "outputs": [{"name": "owner", "type": "json"}, {"name": "rlm", "type": "json"}],
+                    }
+                ]
+            }
+        )
+        with patch.dict(os.environ, {"RLM_SESSION_ID": "owner-session"}):
+            result = await self.start()
+            status = await self.finish(result)
+        self.assertEqual(status["state"], "done")
+        run = self.executor._runs[result["run_id"]]
+        self.assertEqual(run.states["who"].entries[0].outputs, {"owner": "owner-session", "rlm": []})
+
+    @async_test
+    async def test_emit_python_states_pass_the_contract_check(self) -> None:
+        self.host.check_errors[json.dumps({"items": ["a", "b"], "mode": "go"}, sort_keys=True)] = (
+            'mode: "go" is not one of fast, slow'
+        )
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "plan",
+                        "entry": True,
+                        "python": self.py("plan"),
+                        "outputs": [{"name": "items", "type": "json"}, {"name": "mode", "type": "text"}],
+                        "emit": {
+                            "outputs": [{"name": "items", "type": "list[text]"}, {"name": "mode", "type": "enum(fast, slow)"}],
+                            "records": {},
+                        },
+                    }
+                ],
+            }
+        )
+        status = await self.finish(await self.start())
+        self.assertEqual(status["state"], "failed")
+        self.assertIn('python state output: mode: "go" is not one of fast, slow', self.node_status(status, "plan")["error"])
+
+    @async_test
+    async def test_a_stop_during_the_python_output_check_keeps_the_entry_cancelled(self) -> None:
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "plan",
+                        "entry": True,
+                        "python": self.py("plan"),
+                        "outputs": [{"name": "items", "type": "json"}, {"name": "mode", "type": "text"}],
+                        "emit": {
+                            "outputs": [{"name": "items", "type": "list[text]"}, {"name": "mode", "type": "enum(go, stop)"}],
+                            "records": {},
+                        },
+                    },
+                    state("build", inputs=[{"name": "items", "type": "json", "from": "plan.items"}]),
+                ],
+                "transitions": [{"from": "plan", "to": "build"}],
+            }
+        )
+        check_gate = self.host.gate("factory.check", 1)
+        result = await self.start()
+        await self.host.gate_entered("factory.check", 1).wait()  # the python call exited; its check is in flight
+        stopping = asyncio.create_task(rlm_module.rlm.factory.stop(result["run_id"]))
+        for _ in range(50):
+            await yield_loop_turn()
+        check_gate.set()
+        await stopping
+        status = await self.finish(result)
+
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(self.node_status(status, "plan")["status"], "cancelled")
+        self.assertEqual(self.host.spawn_calls("build"), [])
+
+    @async_test
+    async def test_a_node_file_named_like_a_loaded_stdlib_module_runs(self) -> None:
+        nodes = Path(os.getcwd(), "nodes")
+        nodes.mkdir()
+        (nodes / "select.py").write_text("def pick(inputs):\n    return {'picked': 'a'}\n", encoding="utf-8")
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "pick",
+                        "entry": True,
+                        "python": {"import": "select", "callable": "pick", "path": str(nodes)},
+                        "outputs": [{"name": "picked", "type": "text"}],
+                    }
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.finish(result)
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.executor._runs[result["run_id"]].states["pick"].entries[0].outputs, {"picked": "a"})
 
     @async_test
     async def test_failed_calls_retry_then_apply_the_failure_policy(self) -> None:
@@ -7218,6 +7440,1514 @@ class FactoryPythonStateTest(_ExecutorTestCase):
 # ---------------------------------------------------------------------------
 # Graph and watch (the fused machine view + the bounded wait)
 # ---------------------------------------------------------------------------
+
+
+class FactoryMachineDirectoryTest(_ExecutorTestCase):
+    """Machine directories (machine.toml) run through the factory.compile
+    host request: the Rust loader's spec, with params bound into prompts and
+    python inputs, and python states imported from the directory."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.machine_dir = Path(os.environ["PRIME_AGENT_CODING_AGENT_DIR"]) / "machines" / "review"
+        (self.machine_dir / "nodes").mkdir(parents=True)
+        (self.machine_dir / "machine.toml").write_text("format = 1\n", encoding="utf-8")
+        (self.machine_dir / "nodes" / "review_nodes.py").write_text(
+            "def plan(inputs):\n    return {'items': [inputs['task'], inputs['max_loc']]}\n",
+            encoding="utf-8",
+        )
+        self.host.compiled["review"] = {
+            "name": "review",
+            "path": str(self.machine_dir),
+            "version": 3,
+            "description": "Plan and review",
+            "author": None,
+            "spec": {
+                "run": {},
+                "params": {"task": "ship it", "max_loc": 400},
+                "states": [
+                    {
+                        "id": "plan",
+                        "entry": True,
+                        "python": {
+                            "import": "review_nodes",
+                            "callable": "plan",
+                            "path": str(self.machine_dir / "nodes"),
+                        },
+                        "outputs": [{"name": "items", "type": "json"}],
+                    },
+                    {
+                        "id": "work",
+                        "subagent": {"prompt": "Do {items} for {task}, at most {max_loc} lines."},
+                        "inputs": [{"name": "items", "type": "json", "from": "plan.items"}],
+                    },
+                ],
+                "transitions": [{"from": "plan", "to": "work"}],
+            },
+        }
+
+    @async_test
+    async def test_a_machine_directory_runs_with_its_params(self) -> None:
+        self.host.outcomes["work"] = {"status": "done", "answer": "done"}
+        result = await rlm_module.rlm.factory.run("review", params={"task": "ship it"})
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(result["machine_path"], str(self.machine_dir))
+        self.assertEqual(
+            self.host.calls_of("factory.compile"),
+            [{"name": "review", "params": {"task": "ship it"}}],
+        )
+        # The python state imported from the directory and received the
+        # params; the prompt rendered both, and no unused param was
+        # appended as an input.
+        self.assertEqual(
+            [call["prompt"] for call in self.host.spawn_calls("work")],
+            ['Do ["ship it", 400] for ship it, at most 400 lines.'],
+        )
+
+    @async_test
+    async def test_params_need_a_machine_directory(self) -> None:
+        self.store_machine({"states": [state("a", entry=True)]})
+        with self.assertRaisesRegex(ValueError, "params apply to machine directories"):
+            await rlm_module.rlm.factory.run("sw", params={"task": "x"})
+
+    @async_test
+    async def test_a_run_asks_the_host_for_the_limits_before_it_starts(self) -> None:
+        spec = {"run": {"max_parallel": 65}, "states": [state("a", entry=True)]}
+        self.store_machine(spec)
+        self.host.limits_error = "run max_parallel must be an integer between 1 and 64"
+        with self.assertRaisesRegex(ValueError, "run max_parallel must be an integer between 1 and 64"):
+            await rlm_module.rlm.factory.run("sw")
+        self.assertEqual(self.host.calls_of("factory.limits"), [{"spec": spec}])
+        self.assertEqual(self.host.calls_of("rlm.run"), [])
+
+    @async_test
+    async def test_the_default_max_transitions_is_capped_at_the_host_bound(self) -> None:
+        # Two states default to 20 transitions; the host's bound caps it.
+        self.store_machine({"states": [state("a", entry=True), state("b")], "transitions": [{"from": "a", "to": "b"}]})
+        self.host.max_transitions_bound = 15
+        result = await rlm_module.rlm.factory.run("sw")
+        self.assertEqual(self.executor._runs[result["run_id"]].max_transitions, 15)
+
+
+class FactoryEmitTest(_ExecutorTestCase):
+    """Emit states (a machine directory's compiled states): outputs come
+    from what the child emitted, never from its answer text, and a child
+    that owes an output is steered once in its own session, never replaced."""
+
+    EMIT = {
+        "outputs": [{"name": "design", "type": "text"}, {"name": "risk", "type": "enum(low, high)"}],
+        "records": {},
+    }
+
+    def setUp(self) -> None:
+        super().setUp()
+        root = TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.host.session_root = Path(root.name)
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "design",
+                        "entry": True,
+                        "subagent": {"prompt": "Design."},
+                        "outputs": [{"name": "design", "type": "text"}, {"name": "risk", "type": "json"}],
+                        "emit": self.EMIT,
+                    },
+                    state(
+                        "build",
+                        inputs=[
+                            {"name": "design", "type": "text", "from": "design.design"},
+                            {"name": "risk", "type": "json", "from": "design.risk"},
+                        ],
+                    ),
+                ],
+                "transitions": [{"from": "design", "to": "build"}],
+            }
+        )
+        # The answer carries a JSON block a scraper would bind: emit
+        # states must ignore it.
+        self.host.outcomes["design"] = {
+            "status": "done",
+            "answer": 'Done.\n```json\n{"design": "SCRAPED", "risk": "high"}\n```',
+        }
+        self.host.outcomes["build"] = {"status": "done", "answer": "built"}
+
+    async def finish(self) -> dict[str, Any]:
+        result = await self.start()
+        await self.executor._runs[result["run_id"]].task
+        return await rlm_module.rlm.factory.status(result["run_id"])
+
+    async def settle(self, run_result: dict[str, Any]) -> dict[str, Any]:
+        run_id = run_result["run_id"]
+        for _ in range(50_000):
+            if self.executor._runs[run_id].state != "running":
+                return await rlm_module.rlm.factory.status(run_id)
+            await yield_loop_turn()
+        self.fail(f"run {run_id} never left the running state")
+
+    def node_status(self, status: dict[str, Any], node_id: str) -> dict[str, Any]:
+        return next(entry for entry in status["nodes"] if entry["id"] == node_id)
+
+    def contract_of(self, node_id: str) -> Any:
+        return [call["kwargs"].get("factoryContract") for call in self.host.spawn_calls(node_id)]
+
+    @async_test
+    async def test_outputs_come_from_emit_and_reach_the_next_state(self) -> None:
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        status = await self.finish()
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.contract_of("design"), [{**self.EMIT, "inputs": {}}])
+        self.assertEqual(
+            [call["prompt"] for call in self.host.spawn_calls("build")],
+            ['Do the work carefully.\n\n## Inputs\n- design: the design\n- risk: "low"\n'],
+        )
+        self.assertEqual(self.host.calls_of("agent_message.send"), [])
+
+    @async_test
+    async def test_node_report_caps_large_outputs_without_changing_the_settle(self) -> None:
+        large_output = "x" * 300_000
+        self.host.emitted["report"] = {"result": large_output}
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "report",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "result", "type": "text"}],
+                        "emit": {"outputs": [{"name": "result", "type": "text"}], "records": {}},
+                    }
+                ]
+            },
+            spec_id="node-report",
+        )
+        result = await self.start("node-report")
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "done")
+
+        run = self.executor._require_run(result["run_id"])
+        stored = run.states["report"].entries[-1].outputs
+        self.assertEqual(stored, {"result": large_output})
+        node = self.executor._node_report(result["run_id"], "report")
+        preview = node["entry"]["outputs"]
+        self.assertTrue(node["entry"]["outputs_truncated"])
+        self.assertEqual(len(preview.encode("utf-8")), NODE_OUTPUTS_CAP)
+        self.assertLess(len(json.dumps(node).encode("utf-8")), 262_144)
+
+    @async_test
+    async def test_node_activity_caps_aggregate_previews_in_the_final_frame(self) -> None:
+        backslashes = "\\" * 65_536
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "report",
+                        "entry": True,
+                        "subagent": {"prompt": backslashes},
+                        "outputs": [{"name": "result", "type": "text"}],
+                        "emit": {"outputs": [{"name": "result", "type": "text"}], "records": {}},
+                    }
+                ]
+            },
+            spec_id="node-frame",
+        )
+        self.host.emitted["report"] = {"result": backslashes}
+        self.host.outcomes["report"] = {"status": "done", "answer": backslashes}
+        started = await self.start("node-frame")
+        await self.executor._runs[started["run_id"]].task
+        entry = self.executor._require_run(started["run_id"]).states["report"].entries[-1]
+        self.assertEqual(entry.outputs, {"result": backslashes})
+        entry.output_errors = {"risk_score": backslashes}
+
+        sent: list[dict[str, Any]] = []
+        with patch("rlm.repl._send", sent.append):
+            await factory_module._run_activity(
+                {
+                    "id": "node-frame",
+                    "action": "node",
+                    "runId": started["run_id"],
+                    "specId": "report",
+                }
+            )
+        self.assertEqual(len(sent), 1)
+        frame = sent[0]
+        self.assertEqual(frame["event"], "done")
+        self.assertEqual(frame["id"], "node-frame")
+        self.assertEqual(frame["status"], "ok")
+        self.assertIn("result", frame, "the bounded Node result stays available")
+        self.assertLessEqual(
+            len(json.dumps(frame).encode("utf-8")),
+            factory_module.FACTORY_FRAME_CAP,
+            "the actual event/id/status/result frame stays under the existing cap",
+        )
+        self.assertTrue(
+            frame["result"]["instance"]["promptTruncated"]
+            or frame["result"]["instance"]["answerTruncated"]
+            or frame["result"]["entry"]["outputErrorsTruncated"],
+            "the aggregate preview reduction is visible",
+        )
+        self.assertTrue(frame["result"]["entry"]["outputsTruncated"])
+        self.assertTrue(frame["result"]["entry"]["outputErrorsTruncated"])
+        self.assertEqual(set(frame["result"]["entry"]["outputErrors"]), {"risk_score"})
+        self.assertEqual(
+            self.executor._require_run(started["run_id"]).states["report"].entries[-1].outputs,
+            {"result": backslashes},
+            "wire preview reduction never mutates stored outputs",
+        )
+
+    @async_test
+    async def test_node_wire_preserves_output_error_port_names(self) -> None:
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "report",
+                        "entry": True,
+                        "subagent": {"prompt": "Capture the result."},
+                        "outputs": [{"name": "risk_score", "type": "json"}],
+                    }
+                ],
+            },
+            spec_id="node-errors",
+        )
+        self.host.outcomes["report"] = {"status": "done", "answer": "not json"}
+        started = await self.start("node-errors")
+        await self.executor._runs[started["run_id"]].task
+
+        node = await self.executor.activity(
+            {"action": "node", "runId": started["run_id"], "specId": "report"}
+        )
+        errors = node["entry"]["outputErrors"]
+        self.assertEqual(set(errors), {"risk_score"})
+        self.assertIn("no JSON object containing output 'risk_score'", errors["risk_score"])
+
+    async def _run_with_a_never_entered_state(self) -> str:
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "report",
+                        "entry": True,
+                        "subagent": {"prompt": "Report."},
+                        "outputs": [{"name": "verdict", "type": "json"}],
+                    },
+                    {"id": "fix", "subagent": {"prompt": "Fix."}},
+                ],
+                "transitions": [
+                    {
+                        "from": "report",
+                        "to": "fix",
+                        "when": {"output": "verdict", "path": "approved", "op": "eq", "value": False},
+                    }
+                ],
+            },
+            spec_id="node-unentered",
+        )
+        self.host.outcomes["report"] = {"status": "done", "answer": '{"verdict": {"approved": true}}'}
+        started = await self.start("node-unentered")
+        await self.executor._runs[started["run_id"]].task
+        self.assertEqual(self.executor._require_run(started["run_id"]).states["fix"].entries, [])
+        return started["run_id"]
+
+    @async_test
+    async def test_a_never_entered_node_state_reports_no_entry(self) -> None:
+        run_id = await self._run_with_a_never_entered_state()
+
+        node = await self.executor.activity({"action": "node", "runId": run_id, "specId": "fix"})
+        self.assertIsNone(node["entry"])
+        self.assertIsNone(node["instance"])
+        self.assertEqual(node["state"]["instances"], [])
+        with self.assertRaisesRegex(ValueError, "unknown entry 0"):
+            await self.executor.activity(
+                {"action": "node", "runId": run_id, "specId": "fix", "entry": 0, "instance": 0}
+            )
+
+    @async_test
+    async def test_present_malformed_node_selectors_are_rejected_without_defaulting_to_latest(
+        self,
+    ) -> None:
+        run_id = await self._run_with_a_never_entered_state()
+        base = {"action": "node", "runId": run_id, "specId": "report"}
+        latest = await self.executor.activity(base)
+        self.assertEqual(latest["entry"]["index"], 0)
+        # The kernel frame's own "no selector" shape: both keys null.
+        framed = await self.executor.activity({**base, "entry": None, "instance": None})
+        self.assertEqual(framed["entry"], latest["entry"])
+
+        for selectors in (
+            {"entry": 0, "instance": None},
+            {"entry": True, "instance": 0},
+            {"entry": "0", "instance": 0},
+            {"entry": -1, "instance": 0},
+            {"entry": 0},
+        ):
+            with self.subTest(selectors=selectors):
+                with self.assertRaises(ValueError):
+                    await self.executor.activity({**base, **selectors})
+
+    @async_test
+    async def test_a_successful_emit_waits_for_background_quiescence_before_dependent_writer(self) -> None:
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = True
+        owner_poll = self.host.gate("rlm.collect", 2)
+        started = await self.start()
+        run = self.executor._runs[started["run_id"]]
+
+        await asyncio.wait_for(self.host.gate_entered("rlm.collect", 2).wait(), 1)
+        status = await rlm_module.rlm.factory.status(started["run_id"])
+        self.assertEqual(status["state"], "running")
+        self.assertEqual(self.node_status(status, "design")["status"], "done")
+        self.assertEqual(self.node_status(status, "build")["instances"][0]["status"], "pending", status)
+        self.assertEqual(self.host.spawn_calls("build"), [])
+        self.assertEqual(
+            self.node_status(status, "design")["instances"][0]["factory_task_activity"],
+            "busy",
+        )
+
+        self.host.outcomes["design"]["factory_task_busy"] = False
+        owner_poll.set()
+        await run.task
+        final = await rlm_module.rlm.factory.status(started["run_id"])
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("build")), 1)
+
+    @async_test
+    async def test_a_background_work_hold_tells_the_parent_once_and_ends_with_the_work(self) -> None:
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = True
+        owner_poll = self.host.gate("rlm.collect", 3)
+        started = await self.start()
+        await self.host.gate_entered("rlm.collect", 3).wait()
+
+        held = [notice for notice in self.host.notices if notice["kind"] == factory_module.TASK_WORK_HELD]
+        self.assertEqual(len(held), 1)
+        [design] = self.executor._runs[started["run_id"]].states["design"].entries[0].instances
+        self.assertIn(design.child_name, held[0]["detail"])
+        self.assertEqual(self.host.spawn_calls("build"), [])
+
+        self.host.outcomes["design"]["factory_task_busy"] = False
+        owner_poll.set()
+        status = await self.settle(started)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("build")), 1)
+
+    @async_test
+    async def test_each_settled_childs_background_work_hold_is_announced(self) -> None:
+        self.store_machine(
+            {
+                "states": [state("a", entry=True), state("b", entry=True), state("c")],
+                "transitions": [{"from": ["a", "b"], "to": "c"}],
+            },
+            spec_id="holds",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "a", "factory_task_busy": True}
+        self.host.outcomes["b"] = {"status": "done", "answer": "b", "factory_task_busy": True}
+        owner_poll = self.host.gate("rlm.collect", 3)
+        started = await self.start("holds")
+        await self.host.gate_entered("rlm.collect", 3).wait()
+        held = [notice for notice in self.host.notices if notice["kind"] == factory_module.TASK_WORK_HELD]
+        self.assertEqual(len(held), 2, held)
+
+        self.host.outcomes["a"]["factory_task_busy"] = False
+        self.host.outcomes["b"]["factory_task_busy"] = False
+        owner_poll.set()
+        status = await self.settle(started)
+        self.assertEqual(status["state"], "done")
+
+    @async_test
+    async def test_a_repaired_child_that_keeps_background_work_is_announced(self) -> None:
+        self.host.emitted["design"] = {"design": "the design"}
+        self.host.outcomes["design"] = {"status": "done", "factory_task_busy": False}
+
+        def repair(payload: dict[str, Any]) -> None:
+            (self.host.session_root / "child-1" / FACTORY_OUTPUTS_FILE).write_text(
+                json.dumps({"design": "the design", "risk": "high"}), encoding="utf-8"
+            )
+            self.host.outcomes["design"]["factory_task_busy"] = True  # a job outlives the repair
+
+        self.host.on_message = repair
+        later_poll = self.host.gate("rlm.collect", 4)
+        started = await self.start()
+        await self.host.gate_entered("rlm.collect", 4).wait()
+
+        held = [notice for notice in self.host.notices if notice["kind"] == factory_module.TASK_WORK_HELD]
+        self.assertEqual(len(held), 1, self.host.notices)
+        self.assertEqual(self.host.spawn_calls("build"), [])
+        self.host.outcomes["design"]["factory_task_busy"] = False
+        later_poll.set()
+        status = await self.settle(started)
+        self.assertEqual(status["state"], "done")
+
+    @async_test
+    async def test_deleting_the_held_child_starts_the_next_state(self) -> None:
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = True
+        owner_poll = self.host.gate("rlm.collect", 2)
+        started = await self.start()
+        await self.host.gate_entered("rlm.collect", 2).wait()
+
+        await rlm_module.rlm.delete_subagent("child-1")
+        owner_poll.set()
+        status = await self.settle(started)
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("build")), 1)
+
+    @async_test
+    async def test_a_stale_owner_poll_cannot_reopen_a_stopped_run(self) -> None:
+        # stop() lands while an owner poll's busy result is in flight.
+        stale = StaleCollectHost(clock=self.clock, stale_collect=3)
+        stale.session_root = self.host.session_root
+        stale.outcomes = self.host.outcomes
+        self.host = stale
+        repatch = patch.object(rlm_module, "host_request", self.host)
+        repatch.start()
+        self.addCleanup(repatch.stop)
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = True
+        started = await self.start()
+        run = self.executor._runs[started["run_id"]]
+        await self.host.computed.wait()
+
+        await rlm_module.rlm.factory.stop(started["run_id"])
+        self.host.release.set()
+        await run.task
+
+        [design] = run.states["design"].entries[0].instances
+        self.assertEqual(
+            (run.state, design.status, design.factory_task_activity),
+            ("stopped", "cancelled", "idle"),
+        )
+
+    @async_test
+    async def test_valid_emit_with_unverified_activity_is_stored_but_holds_successor(self) -> None:
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = None
+        started = await self.start()
+        status = await self.settle(started)
+
+        self.assertEqual(status["state"], "paused")
+        self.assertIn("UNVERIFIED", status["pause_reason"])
+        design = self.node_status(status, "design")
+        self.assertEqual(design["status"], "done")
+        run = self.executor._runs[started["run_id"]]
+        self.assertEqual(run.states["design"].entries[0].outputs, {"design": "the design", "risk": "low"})
+        self.assertEqual(design["instances"][0]["factory_task_activity"], "unverified")
+        self.assertEqual(self.node_status(status, "build")["status"], "pending")
+        self.assertEqual(self.host.spawn_calls("build"), [])
+        self.assertIn("child-1", self.host.children)
+
+    @async_test
+    async def test_a_child_owing_an_output_is_steered_once_and_settles(self) -> None:
+        self.host.emitted["design"] = {"design": "the design"}
+
+        def repair(payload: dict[str, Any]) -> None:
+            child_dir = self.host.session_root / "child-1"
+            (child_dir / FACTORY_OUTPUTS_FILE).write_text(
+                json.dumps({"design": "the design", "risk": "high"}), encoding="utf-8"
+            )
+
+        self.host.on_message = repair
+        status = await self.finish()
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("design")), 1)
+        [message] = self.host.calls_of("agent_message.send")
+        self.assertEqual(message["receiver_role"], "child")
+        self.assertEqual(message["receiver_name"], self.host.children["child-1"]["name"])
+        self.assertIn("await rlm.factory.emit(risk=...)", message["message"])
+        kinds = [event["kind"] for event in status["events"]]
+        self.assertIn("repair_requested", kinds)
+        self.assertIn("repaired", kinds)
+
+    @async_test
+    async def test_output_repair_waits_for_background_task_work(self) -> None:
+        self.host.emitted["design"] = {"design": "the design"}
+        self.host.factory_task_busy_until_collect["design"] = 2
+        repair_sent_after_collect = []
+        sleeps_before_repair = []
+
+        def repair(payload: dict[str, Any]) -> None:
+            repair_sent_after_collect.append(self.host.collects)
+            sleeps_before_repair.append(list(self.sleeps.sleeps))
+            child_dir = self.host.session_root / "child-1"
+            (child_dir / FACTORY_OUTPUTS_FILE).write_text(
+                json.dumps({"design": "the design", "risk": "high"}), encoding="utf-8"
+            )
+
+        self.host.on_message = repair
+        status = await self.finish()
+
+        self.assertEqual(status["state"], "done", status)
+        self.assertGreaterEqual(repair_sent_after_collect[0], 3)
+        self.assertEqual(len(self.host.spawn_calls("design")), 1)
+        # The settled child's collect returned at once, so the wait for its
+        # background work is a poll interval, never a tight loop.
+        self.assertEqual(sleeps_before_repair[0], [factory_module.REPAIR_POLL_SECONDS] * 2)
+
+    @async_test
+    async def test_unknown_task_activity_pauses_unverified_without_replacing_child(self) -> None:
+        self.host.emitted["design"] = {"design": "the design"}
+        self.host.outcomes["design"] = {"status": "done", "factory_task_busy": False}
+
+        def lose_task_observation(payload: dict[str, Any]) -> None:
+            self.host.outcomes["design"]["factory_task_busy"] = None
+
+        self.host.on_message = lose_task_observation
+        started = await self.start()
+        status = await self.settle(started)
+
+        self.assertEqual(status["state"], "paused")
+        self.assertIn("UNVERIFIED", status["pause_reason"])
+        design = self.node_status(status, "design")
+        self.assertEqual(design["instances"][0]["factory_task_activity"], "unverified")
+        self.assertEqual(design["instances"][0]["child"], "child-1")
+        self.assertIn("child-1", self.host.children)
+        self.assertEqual(len(self.host.spawn_calls("design")), 1)
+        self.assertEqual(len(self.host.deleted_targets()), 0)
+        self.assertEqual(len(self.host.calls_of("agent_message.send")), 1)
+        self.assertIn("factory_task_activity_unverified", [event["kind"] for event in status["events"]])
+        notices = self.host.calls_of("factory.progress")
+        self.assertEqual([notice["kind"] for notice in notices], ["paused"])
+        self.assertIn("UNVERIFIED", notices[0]["detail"])
+
+        stopped = await rlm_module.rlm.factory.stop(started["run_id"])
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertNotIn("child-1", self.host.children)
+
+    @async_test
+    async def test_a_repair_turn_that_runs_long_is_decided_only_when_it_ends(self) -> None:
+        self.host.emitted["design"] = {"design": "the design"}
+        self.host.outcomes["design"] = {"status": "done", "factory_task_busy": False}
+
+        def repair(payload: dict[str, Any]) -> None:
+            self.host.outcomes["design"]["factory_task_busy"] = True  # the repair turn runs
+
+        self.host.on_message = repair
+        started = await self.start()
+        run = self.executor._runs[started["run_id"]]
+        hour_later = self.clock.now + 3600
+        await self.wait_until(lambda: self.clock.now >= hour_later or run.state != "running")
+
+        self.assertEqual(run.state, "running", run.last_error)
+        self.assertEqual(len(self.host.spawn_calls("design")), 1)
+        self.host.outcomes["design"]["factory_task_busy"] = False  # the repair turn ended
+        await run.task
+        status = await rlm_module.rlm.factory.status(started["run_id"])
+        self.assertEqual(status["state"], "paused")
+        self.assertIn("missing_output", status["last_error"])
+        self.assertEqual(len(self.host.spawn_calls("design")), 1)
+
+    @async_test
+    async def test_a_child_still_owing_after_the_repair_fails_without_a_new_child(self) -> None:
+        self.host.emitted["design"] = {"design": "the design"}
+        started_at = self.clock.now
+        status = await self.finish()
+
+        # The repair turn ended (the child reads idle), so the verdict
+        # comes at the next read, not after a fixed wait.
+        self.assertLess(self.clock.now - started_at, 2 * factory_module.REPAIR_POLL_SECONDS)
+
+        self.assertEqual(status["state"], "paused")
+        self.assertEqual(len(self.host.spawn_calls("design")), 1)
+        self.assertEqual(len(self.host.calls_of("agent_message.send")), 1)
+        self.assertIn(
+            "missing_output: the child still owes risk after a repair request", status["last_error"]
+        )
+
+    @async_test
+    async def test_resume_deletes_the_failed_emit_actor_before_replacement(self) -> None:
+        self.host.emitted["design"] = {"design": "the design"}
+        first = await self.finish()
+        self.assertEqual(first["state"], "paused")
+        self.assertIn("child-1", self.host.children)
+
+        await rlm_module.rlm.factory.resume(first["run_id"])
+        await self.executor._runs[first["run_id"]].task
+        status = await rlm_module.rlm.factory.status(first["run_id"])
+
+        self.assertEqual(status["state"], "paused")
+        self.assertEqual(self.host.deleted_targets(), ["child-1"])
+        self.assertNotIn("child-1", self.host.children)
+        self.assertEqual(len(self.host.spawn_calls("design")), 2)
+
+
+class FactoryKernelRestartTest(_ExecutorTestCase):
+    """A kernel restart must not orphan a run: the registry snapshot
+    rehydrates, the finished child's emitted outputs still route, and the
+    run continues to completion on the new kernel's executor."""
+
+    EMIT = {"outputs": [{"name": "design", "type": "text"}], "records": {}}
+
+    def setUp(self) -> None:
+        super().setUp()
+        root = TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.host.session_root = Path(root.name)
+        self.host.emitted["design"] = {"design": "the design"}
+        self.store_machine(
+            {
+                # A generous run budget: the restarted scenario advances the
+                # clock per admission, and the run must still complete.
+                "run": {"budget_ms": 3_600_000},
+                "states": [
+                    {
+                        "id": "design",
+                        "entry": True,
+                        "subagent": {"prompt": "Design."},
+                        "outputs": [{"name": "design", "type": "text"}],
+                        "emit": self.EMIT,
+                    },
+                    state(
+                        "build",
+                        inputs=[{"name": "design", "type": "text", "from": "design.design"}],
+                    ),
+                ],
+                "transitions": [{"from": "design", "to": "build"}],
+            }
+        )
+        # The registry's durable home: the session artifact dir the host
+        # exports. A kernel restart is the executor swap below; the
+        # snapshot on disk is all the new kernel recovers.
+        artifact_temp = TemporaryDirectory()
+        self.addCleanup(artifact_temp.cleanup)
+        self.runs_dir = Path(artifact_temp.name) / "factory-runs"
+        previous = os.environ.get("RLM_SESSION_DIR")
+        os.environ["RLM_SESSION_DIR"] = str(artifact_temp.name)
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("RLM_SESSION_DIR", None)
+            else:
+                os.environ["RLM_SESSION_DIR"] = previous
+
+        self.addCleanup(restore)
+
+    @async_test
+    async def test_resume_saves_the_running_state_before_it_returns(self) -> None:
+        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
+        self.store_machine({"states": [state("a", entry=True)]}, spec_id="resume")
+        result = await self.start("resume")
+        run_id = result["run_id"]
+        await self.wait_until(lambda: self.executor._runs[run_id].state == "paused")
+        snapshot = factory_module._runs_dir() / f"{run_id}.json"
+        self.assertEqual(json.loads(snapshot.read_text())["state"], "paused")
+        self.host.outcomes["a"] = {"status": "running"}
+        await rlm_module.rlm.factory.resume(run_id)
+        self.assertEqual(json.loads(snapshot.read_text())["state"], "running")
+        self.executor._runs[run_id].task.cancel()
+
+    @async_test
+    async def test_a_restart_after_one_join_source_settled_still_fires_the_join(self) -> None:
+        # The snapshot never holds a half-applied settle: a restart while
+        # the join waits on its other source continues the run.
+        self.store_machine(
+            {
+                "run": {"max_parallel": 4},
+                "states": [state("a", entry=True), state("b", entry=True), state("c")],
+                "transitions": [{"from": ["a", "b"], "to": "c"}],
+            },
+            spec_id="join",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "a"}
+        self.host.outcomes["b"] = {"status": "running"}
+        first = self.host.gate("rlm.collect", 1)
+        second = self.host.gate("rlm.collect", 2)
+        result = await self.start("join")
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 1).wait()
+        self.clock.advance(5.0)  # the loop sat in its collect for a while
+        first.set()
+        await self.host.gate_entered("rlm.collect", 2).wait()
+        run = self.executor._runs[run_id]
+        self.assertEqual(run.states["a"].entries[0].status, "done")
+        run.task.cancel()
+
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        self.host.outcomes["b"] = {"status": "done", "answer": "b"}
+        second.set()
+        await rlm_module.rlm.factory.status(run_id)
+        await restarted._runs[run_id].task
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("c")), 1)
+
+    @async_test
+    async def test_a_done_run_with_a_running_resident_stays_stoppable_after_a_restart(self) -> None:
+        self.host.outcomes["watcher"] = {"status": "running"}
+        self.store_factory(
+            {
+                "nodes": [
+                    {"id": "t", "subagent": "worker"},
+                    {"id": "watcher", "subagent": "worker", "lifecycle": "resident"},
+                ],
+            },
+            spec_id="resident",
+        )
+        result = await self.start("resident")
+        run_id = result["run_id"]
+        await self.executor._runs[run_id].task
+        self.assertEqual(self.executor._runs[run_id].state, "done")
+
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        stopped = await rlm_module.rlm.factory.stop(run_id)
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertEqual(stopped["cancelled"], ["watcher"])
+        self.assertEqual(self.host.deleted_targets(), ["child-2"])
+        self.assertFalse((factory_module._runs_dir() / f"{run_id}.json").exists(), "the stopped run retires its files")
+
+    @async_test
+    async def test_a_snapshotted_run_rehydrates_and_the_childs_emit_still_routes(self) -> None:
+        # Advance the clock per admission: the spawn's ledger touch lands
+        # past the persist throttle, so the snapshot itself carries the
+        # running child. Suspend the loop inside its first collect: the
+        # design child is admitted and its emit landed, but the settle
+        # never applied.
+        self.host.advance_per_run = 2.0
+        gate = self.host.gate("rlm.collect", 1)
+        result = await self.start()
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 1).wait()
+        run = self.executor._runs[run_id]
+        [design] = run.states["design"].entries[0].instances
+        self.assertEqual(design.status, "running")
+        self.assertIsNotNone(design.child_id)
+        self.assertTrue((Path(design.session_dir) / FACTORY_OUTPUTS_FILE).exists())
+
+        # The kernel restart: the old loop task dies with the kernel, a
+        # fresh executor (the new kernel's module state) rehydrates the
+        # registry off the artifact dir, and the namespace routes to it.
+        run.task.cancel()
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        gate.set()
+
+        # The first status after the restart arms the rehydrated run: the
+        # status answers the run id (never "unknown factory run"), and the
+        # re-armed loop collects the child that stayed alive under the
+        # supervisor, reads its emitted outputs, and the run continues.
+        [adopted] = restarted._runs[run_id].states["design"].entries[0].instances
+        self.assertEqual(adopted.status, "running")
+        self.assertEqual(adopted.child_id, design.child_id)
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "running")
+        self.assertIsNotNone(restarted._runs[run_id].task)
+        await restarted._runs[run_id].task
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(
+            [call["prompt"] for call in self.host.spawn_calls("build")],
+            ["Do the work carefully.\n\n## Inputs\n- design: the design\n"],
+        )
+        self.assertEqual(len(self.host.spawn_calls("design")), 1)
+
+    @async_test
+    async def test_an_admission_inside_the_throttle_window_survives_via_its_journal(self) -> None:
+        # The frozen clock keeps the spawn's ledger touch inside the
+        # persist throttle: the last snapshot predates the admission, and
+        # the admissions journal is the only durable record of the child.
+        gate = self.host.gate("rlm.collect", 1)
+        result = await self.start()
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 1).wait()
+        run = self.executor._runs[run_id]
+        run.task.cancel()
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        gate.set()
+
+        # The journal line rebuilds the entry around its admitted child:
+        # never orphaned, never re-admitted.
+        rehydrated = restarted._runs[run_id]
+        self.assertEqual(rehydrated.states["design"].entries_used, 1)
+        [adopted] = rehydrated.states["design"].entries[0].instances
+        self.assertEqual(adopted.status, "running")
+        self.assertEqual(adopted.child_id, "child-1")
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "running")
+        await rehydrated.task
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("design")), 1)
+
+    @async_test
+    async def test_a_stop_the_restart_interrupted_completes(self) -> None:
+        collect_gate = self.host.gate("rlm.collect", 1)
+        delete_gate = self.host.gate("rlm.delete_subagent", 1)
+        result = await self.start()
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 1).wait()
+        # stop() lands and its first child cancellation suspends on the
+        # delete gate; the kernel dies mid-stop. The snapshot must say
+        # "stopping" (the touch persists it), never "running".
+        stop_task = asyncio.ensure_future(rlm_module.rlm.factory.stop(run_id))
+        run = self.executor._runs[run_id]
+        await self.host.gate_entered("rlm.delete_subagent", 1).wait()
+        self.assertEqual(run.state, "stopping")
+        stop_task.cancel()
+        run.task.cancel()
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        self.assertEqual(restarted._runs[run_id].state, "stopping")
+
+        # The first factory use after the restart completes the stop.
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "stopped")
+        self.assertIn("child-1", self.host.deleted_targets())
+        collect_gate.set()
+        delete_gate.set()
+
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "stopped")
+        self.assertIn("child-1", self.host.deleted_targets())
+        collect_gate.set()
+        delete_gate.set()
+
+    @async_test
+    async def test_a_re_entered_states_second_entry_keeps_its_own_instance(self) -> None:
+        # The instance index is per-STATE, not per-entry: a cycle's second
+        # entry carries index 1 at list position 0. The journal replay must
+        # locate by index attribute (never pad by position), and the
+        # adopted index must never be reused (the next spawn label would
+        # collide with the still-registered earlier child).
+        self.store_machine(
+            {
+                "run": {"budget_ms": 3_600_000},
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker", "max_entries": 3},
+                    {"id": "b", "subagent": "worker", "max_entries": 2},
+                ],
+                "transitions": [{"from": "a", "to": "b"}, {"from": "b", "to": "a"}],
+            },
+            spec_id="cycle",
+        )
+        gate = self.host.gate("rlm.collect", 3)
+        result = await self.start("cycle")
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 3).wait()
+        # a1 settled, b1 settled, a2 admitted: the third collect is the
+        # restart point, inside the throttle window for a2's admission.
+        self.executor._runs[run_id].task.cancel()
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        gate.set()
+
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "running")
+        rehydrated = restarted._runs[run_id]
+        a_entries = rehydrated.states["a"].entries
+        self.assertEqual([entry.instances[0].index for entry in a_entries[:2]], [0, 1])
+        self.assertEqual(a_entries[1].instances[0].status, "running")
+        self.assertGreaterEqual(rehydrated.states["a"].instance_counter, 2)
+        await rehydrated.task
+        status = await rlm_module.rlm.factory.status(run_id)
+        # The cycle runs to its caps without a duplicate instance, a
+        # reused index, or a refused re-admission.
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("a")), 3)
+        self.assertEqual(len(self.host.spawn_calls("b")), 2)
+        for state_id, count in (("a", 3), ("b", 2)):
+            entries = restarted._runs[run_id].states[state_id].entries
+            self.assertEqual(len(entries), count)
+            for entry in entries:
+                self.assertEqual(len(entry.instances), 1)
+                self.assertEqual(entry.status, "done")
+
+    @async_test
+    async def test_a_foreachs_pending_siblings_survive_the_throttle_window(self) -> None:
+        # The prepare batch (the instances not admitted yet) is memory-only
+        # between snapshots: a restart inside the throttle window must
+        # replay the batch, not silently drop the pending fan items and
+        # complete having run one of four.
+        self.store_factory(
+            {
+                "run": {"max_parallel": 1},
+                "nodes": [
+                    {
+                        "id": "src",
+                        "subagent": "worker",
+                        "outputs": [{"name": "items", "type": "json"}],
+                    },
+                    {
+                        "id": "fan",
+                        "subagent": "worker",
+                        "foreach": {"over": "item", "max": 4},
+                        "inputs": [{"name": "item", "type": "json", "from": "src.items"}],
+                    },
+                ],
+            },
+            spec_id="fan",
+        )
+        self.host.outcomes["src"] = {"status": "done", "answer": '```json\n{"items": [1, 2, 3, 4]}\n```'}
+        gate = self.host.gate("rlm.collect", 2)
+        result = await self.start("fan")
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 2).wait()
+        # src settled and the fan's first child is admitted; the other
+        # three instances are prepared and pending.
+        self.executor._runs[run_id].task.cancel()
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        gate.set()
+
+        fan = restarted._runs[run_id].states["fan"].entries[0]
+        self.assertEqual(len(fan.instances), 4)
+        self.assertEqual([instance.status for instance in fan.instances], ["running", "pending", "pending", "pending"])
+        status = await rlm_module.rlm.factory.status(run_id)
+        await restarted._runs[run_id].task
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("fan")), 4)
+        self.assertTrue(all(instance.status == "done" for instance in restarted._runs[run_id].states["fan"].entries[0].instances))
+
+    @async_test
+    async def test_a_fired_join_does_not_refire_after_the_restart(self) -> None:
+        # The join's last-fired signature rides the forced settle snapshot;
+        # the rehydrated run must not re-enter the join target.
+        self.store_machine(
+            {
+                "run": {"budget_ms": 3_600_000},
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker"},
+                    {"id": "b", "entry": True, "subagent": "worker"},
+                    {"id": "c", "subagent": "worker", "max_entries": 1},
+                ],
+                "transitions": [{"from": ["a", "b"], "to": "c"}],
+            },
+            spec_id="joined",
+        )
+        # Both sources settle in ONE collect (the batch the join waits
+        # for), the join fires, c is admitted: the second collect is the
+        # restart point.
+        gate = self.host.gate("rlm.collect", 2)
+        result = await self.start("joined")
+        await self.host.gate_entered("rlm.collect", 2).wait()
+        run_id = result["run_id"]
+        # Both sources settled in one batch, the join fired, c is admitted.
+        self.executor._runs[run_id].task.cancel()
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        self.assertTrue(restarted._runs[run_id].join_fired)
+        gate.set()
+
+        status = await rlm_module.rlm.factory.status(run_id)
+        await restarted._runs[run_id].task
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("c")), 1)
+        self.assertEqual(restarted._runs[run_id].states["c"].entries_used, 1)
+
+    @async_test
+    async def test_the_status_lane_rehydrates_through_the_default_executor(self) -> None:
+        # The production seam is default_factory_executor(): a fresh module
+        # state must load the registry itself, not a pre-assigned executor.
+        # The default executor keeps the REAL clock while the run's
+        # started_at came from the frozen one, so the budget must be
+        # generous enough to span both epochs.
+        self.store_machine(
+            {
+                "run": {"budget_ms": 10_000_000_000},
+                "states": [
+                    {
+                        "id": "design",
+                        "entry": True,
+                        "subagent": {"prompt": "Design."},
+                        "outputs": [{"name": "design", "type": "text"}],
+                        "emit": self.EMIT,
+                    },
+                    state(
+                        "build",
+                        inputs=[{"name": "design", "type": "text", "from": "design.design"}],
+                    ),
+                ],
+                "transitions": [{"from": "design", "to": "build"}],
+            },
+            spec_id="lane",
+        )
+        self.host.advance_per_run = 2.0
+        gate = self.host.gate("rlm.collect", 1)
+        result = await self.start("lane")
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 1).wait()
+        self.executor._runs[run_id].task.cancel()
+        factory_module._DEFAULT_EXECUTOR = None
+        gate.set()
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "running")
+        awaited = factory_module._DEFAULT_EXECUTOR._runs[run_id]
+        self.assertIsNotNone(awaited.task)
+        await awaited.task
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "done")
+
+    @async_test
+    async def test_a_persist_failure_is_one_ledger_row_and_never_a_wedge(self) -> None:
+        # An unwritable registry dir must not stop the run: one
+        # persist_failed row, the run keeps going and completes.
+        blocked = TemporaryDirectory()
+        self.addCleanup(blocked.cleanup)
+        Path(blocked.name, "occupied").write_text("not a directory", encoding="utf-8")
+        os.environ["RLM_SESSION_DIR"] = str(Path(blocked.name, "occupied"))
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        await run.task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "done")
+        failures = [event for event in status["events"] if event["kind"] == "persist_failed"]
+        self.assertEqual(len(failures), 2)
+        details = " ".join(event["detail"] for event in failures)
+        self.assertIn("the run registry snapshot could not be written", details)
+        self.assertIn("the run's mutation journal could not be written", details)
+
+    @async_test
+    async def test_an_unreadable_snapshot_is_skipped_loudly(self) -> None:
+        runs_dir = Path(os.environ["RLM_SESSION_DIR"], factory_module.RUNS_DIR_NAME)
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "not-json.json").write_text("{not json", encoding="utf-8")
+        (runs_dir / "torn-rows.json").write_text(
+            json.dumps({"run_id": "torn", "spec_id": "sw", "machine": {}, "pending_evaluations": [[1]]}),
+            encoding="utf-8",
+        )
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()  # neither file may crash the boot
+        self.assertEqual(restarted._runs, {})
+
+    @async_test
+    async def test_a_python_call_lost_with_the_kernel_fails_through_its_policy(self) -> None:
+        workdir = TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        Path(workdir.name, "restart_tools.py").write_text(
+            "import time\n\ndef slow(inputs):\n    time.sleep(60)\n    return {}\n",
+            encoding="utf-8",
+        )
+        previous_cwd = os.getcwd()
+        os.chdir(workdir.name)
+        self.addCleanup(os.chdir, previous_cwd)
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {"id": "call", "entry": True, "python": {"import": "restart_tools", "callable": "slow"}}
+                ],
+            },
+            spec_id="pycall",
+        )
+        result = await self.start("pycall")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        while run.states["call"].entries[0].instances[0].process is None:
+            await asyncio.sleep(0)
+        process = run.states["call"].entries[0].instances[0].process
+        self.addCleanup(process._kill)
+        # The call is mid-flight and durable as running: the snapshot is
+        # the state the restart recovers.
+        self.executor._persist_run(run)
+        run.task.cancel()
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "running")
+        [instance] = restarted._runs[run_id].states["call"].entries[0].instances
+        self.assertEqual(instance.status, "error")
+        self.assertIn(factory_module.RUN_LOST_PYTHON_CALL, instance.error)
+        await restarted._runs[run_id].task
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "failed")
+
+    @async_test
+    async def test_the_snapshot_codec_round_trips_the_run_verbatim(self) -> None:
+        self.store_machine(
+            {
+                "run": {"budget_ms": 3_600_000},
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker"},
+                    {"id": "b", "entry": True, "subagent": "worker"},
+                    {"id": "c", "subagent": "worker", "max_entries": 1},
+                ],
+                "transitions": [{"from": ["a", "b"], "to": "c"}],
+            },
+            spec_id="codec",
+        )
+        result = await self.start("codec")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        await run.task
+        loaded = factory_module._run_from_json(json.loads(json.dumps(factory_module._run_json(run))))
+        self.assertEqual(loaded.run_id, run.run_id)
+        self.assertEqual(loaded.join_fired, run.join_fired)
+        # The keys are the transition's CANONICAL machine position — a
+        # memory-bound id() key would "round-trip" as a dead number no
+        # future evaluation can ever match again.
+        self.assertEqual(list(loaded.join_fired), [(0, "c")])
+        self.assertEqual(loaded.transitions_fired, run.transitions_fired)
+        self.assertEqual(loaded.order, run.order)
+        self.assertEqual(loaded.states["c"].entries_used, run.states["c"].entries_used)
+        self.assertEqual(loaded.machine, run.machine)
+
+    @async_test
+    async def test_the_peek_lane_reads_a_rehydrated_run_without_arming_it(self) -> None:
+        # The all-session overview polls each owner's live runs through the
+        # ``peek`` action: the same compact unscoped graph ``graph``
+        # answers, minus the rehydration re-arm. A display refresh in one
+        # session must never complete another owner's interrupted flows,
+        # so the read leaves the rehydrated queue and the control loop
+        # untouched (the ``graph`` poll's arm is the first-use seam the
+        # owner's own surfaces keep).
+        self.host.advance_per_run = 2.0
+        gate = self.host.gate("rlm.collect", 1)
+        result = await self.start()
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 1).wait()
+        # While the run executes under its own control loop, the peek row
+        # carries no not-armed marker: only a run still queued for its
+        # re-arm does.
+        healthy = await self.executor.activity({"action": "peek"})
+        self.assertIsNone(
+            healthy["runs"][0].get("armed"),
+            "an executing run carries no not-armed marker",
+        )
+        run = self.executor._runs[run_id]
+        run.task.cancel()
+
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        gate.set()
+        self.assertIn(run_id, restarted._rehydrated, "the run awaits its re-arm")
+
+        peeked = await restarted.activity({"action": "peek"})
+        self.assertEqual(
+            [row["runId"] for row in peeked["runs"]], [run_id], "the wire row lists"
+        )
+        self.assertEqual(peeked["runs"][0]["state"], "running")
+        self.assertEqual(peeked["runs"][0]["specId"], "sw")
+        self.assertFalse(
+            peeked["runs"][0]["armed"],
+            "a run still queued for its re-arm is marked not armed: the "
+            "overview paints the saved marker, never a live ticking age "
+            "for a run no loop drives",
+        )
+        self.assertIn(
+            run_id,
+            restarted._rehydrated,
+            "the peek read never drains the re-arm queue",
+        )
+        self.assertIsNone(
+            restarted._runs[run_id].task,
+            "the peek read never starts the re-armed control loop",
+        )
+        # Inspecting a machine's template (the machines page's drill-in)
+        # never re-arms either.
+        self.host.described["sweep"] = {
+            "name": "sweep",
+            "description": "Sweep a branch.",
+            "version": 1,
+            "spec": {"states": [{"id": "plan", "entry": True, "subagent": {"prompt": "Plan."}}]},
+        }
+        await restarted.activity({"action": "library", "specId": "sweep"})
+        self.assertIn(run_id, restarted._rehydrated, "the library read never drains the re-arm queue")
+        # The peek created the executor; the next executed command still
+        # releases the boot arm.
+        factory_module._BOOT_ARM_TASK = None
+        try:
+            self.assertTrue(factory_module.boot_arm_persisted_runs(), "a peek disabled the boot arm")
+            await factory_module._BOOT_ARM_TASK
+            self.assertNotIn(run_id, restarted._rehydrated)
+            self.assertIsNotNone(restarted._runs[run_id].task)
+            restarted._runs[run_id].task.cancel()
+        finally:
+            factory_module._BOOT_ARM_TASK = None
+
+
+class FactoryEmitRetryTest(_ExecutorTestCase):
+    """Typed emit outputs a child left out: the failure is the producing
+    entry's, retried per instance, and resume re-admits every omitted one."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.host.session_root = Path(temp.name)
+
+    def emitted(self, child_id: str, outputs: dict[str, Any]) -> None:
+        child_dir = self.host.session_root / child_id
+        child_dir.mkdir(parents=True, exist_ok=True)
+        (child_dir / factory_module.FACTORY_OUTPUTS_FILE).write_text(json.dumps(outputs), encoding="utf-8")
+
+    def machine(self) -> dict[str, Any]:
+        return {
+            "params": {"task": "ship it"},
+            "states": [
+                state(
+                    "plan",
+                    entry=True,
+                    subagent={"prompt": "Plan {task}."},
+                    outputs=[{"name": "plan", "type": "json"}],
+                    emit={"outputs": [{"name": "plan", "type": "plan"}], "records": {"plan": [["steps", "int"]]}},
+                    retries=0,
+                ),
+                state(
+                    "build",
+                    subagent={"prompt": "Build {plan}."},
+                    inputs=[{"name": "plan", "type": "json", "from": "plan.plan"}],
+                    outputs=[{"name": "report", "type": "text"}],
+                    emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
+                    retries=0,
+                ),
+            ],
+            "transitions": [{"from": "plan", "to": "build"}],
+        }
+
+    async def run_to_end(self) -> dict[str, Any]:
+        result = await self.start()
+        await self.executor._runs[result["run_id"]].task
+        return await rlm_module.rlm.factory.status(result["run_id"])
+
+    async def settle(self, run_result: dict[str, Any]) -> dict[str, Any]:
+        """Yield to the control loop until the run leaves the running state."""
+        run_id = run_result["run_id"]
+        for _ in range(50_000):
+            run = self.executor._runs[run_id]
+            if run.state != "running":
+                return await rlm_module.rlm.factory.status(run_id)
+            await yield_loop_turn()
+        self.fail(f"run {run_id} never left the running state")
+
+    @async_test
+    async def test_an_optional_output_may_be_left_out(self) -> None:
+        machine = self.machine()
+        machine["states"][0]["outputs"].append({"name": "note", "type": "text"})
+        machine["states"][0]["emit"]["outputs"].append({"name": "note", "type": "text?"})
+        self.emitted("child-1", {"plan": {"steps": 2}})
+        self.emitted("child-2", {"report": "built"})
+        self.store_machine(machine)
+        status = await self.run_to_end()
+
+        self.assertEqual(status["state"], "done")
+
+    @async_test
+    async def test_resume_readmits_every_foreach_instance_that_omitted_its_port(self) -> None:
+        # Cursor finding: with retries=0, the first omitted instance failed
+        # the entry and the other omitted instances stayed done, so resume
+        # re-admitted only the first and the entry failed again on the rest.
+        self.emitted("child-1", {"items": ["a", "b"]})
+        self.emitted("child-4", {"report": "a"})  # fan i0 resume emit
+        self.emitted("child-5", {"report": "b"})  # fan i1 resume emit
+        self.store_machine(
+            {
+                "params": {"task": "ship it"},
+                "states": [
+                    state(
+                        "plan",
+                        entry=True,
+                        subagent={"prompt": "Plan {task}."},
+                        outputs=[{"name": "items", "type": "json"}],
+                        emit={"outputs": [{"name": "items", "type": "json"}], "records": {}},
+                    ),
+                    state(
+                        "fan",
+                        subagent={"prompt": "Do {items}."},
+                        inputs=[{"name": "items", "type": "json", "from": "plan.items"}],
+                        outputs=[{"name": "report", "type": "text"}],
+                        emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
+                        foreach={"over": "items", "max": 2},
+                        retries=0,
+                    ),
+                ],
+                "transitions": [{"from": "plan", "to": "fan"}],
+            }
+        )
+        result = await self.start()
+        paused = await self.settle(result)
+
+        self.assertEqual(paused["state"], "paused")
+        fan = next(node for node in paused["nodes"] if node["id"] == "fan")
+        self.assertEqual([instance["status"] for instance in fan["instances"]], ["error", "error"])
+        resumed = await rlm_module.rlm.factory.resume(result["run_id"])
+        self.assertEqual(resumed["state"], "running")
+        final = await self.settle(result)
+
+        self.assertEqual(final["state"], "done")
+        names = [call["kwargs"]["name"] for call in self.host.spawn_calls("fan")]
+        self.assertEqual(len(names), 4)
+        self.assertEqual(sum("-i0-a2" in name for name in names), 1)
+        self.assertEqual(sum("-i1-a2" in name for name in names), 1)
+
+    @async_test
+    async def test_a_python_state_output_goes_through_the_contract_check(self) -> None:
+        nodes = Path(self.host.session_root) / "nodes"
+        nodes.mkdir()
+        (nodes / "plan_nodes.py").write_text("def plan(inputs):\n    return {'plan': {'steps': 'two'}}\n", encoding="utf-8")
+        machine = self.machine()
+        machine["states"][0] = {
+            **machine["states"][0],
+            "python": {"import": "plan_nodes", "callable": "plan", "path": str(nodes)},
+        }
+        del machine["states"][0]["subagent"]
+        self.host.check_errors[json.dumps({"plan": {"steps": "two"}}, sort_keys=True)] = (
+            "plan.steps: expected int, got text \"two\""
+        )
+        self.store_machine(machine)
+        status = await self.run_to_end()
+
+        plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
+        self.assertEqual(plan["error"], 'python state output: plan.steps: expected int, got text "two"')
+
+    @async_test
+    async def test_a_stop_during_the_python_output_check_keeps_the_entry_cancelled(self) -> None:
+        nodes = Path(self.host.session_root) / "nodes"
+        nodes.mkdir()
+        (nodes / "plan_nodes.py").write_text("def plan(inputs):\n    return {'plan': {'steps': 2}}\n", encoding="utf-8")
+        machine = self.machine()
+        machine["states"][0] = {
+            **machine["states"][0],
+            "python": {"import": "plan_nodes", "callable": "plan", "path": str(nodes)},
+        }
+        del machine["states"][0]["subagent"]
+        check_gate = self.host.gate("factory.check", 1)
+        self.store_machine(machine)
+        result = await self.start()
+        await self.host.gate_entered("factory.check", 1).wait()  # the python call exited; its check is in flight
+        await rlm_module.rlm.factory.stop(result["run_id"])
+        # The stop pass itself claims the call whose check is in flight.
+        instance = self.executor._runs[result["run_id"]].states["plan"].entries[0].instances[0]
+        self.assertEqual(instance.status, "cancelled")
+        check_gate.set()
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+
+        plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(plan["status"], "cancelled")
+        self.assertEqual(plan["instances"][0]["status"], "cancelled")
+        cancelled = [e for e in self.executor._runs[result["run_id"]].events if e["kind"] == "cancelled"]
+        self.assertEqual([(e["node"], e["instance"]) for e in cancelled], [("plan", 0)])
+        self.assertEqual(self.host.spawn_calls("build"), [])
+
+
+class FactoryEmitApiTest(unittest.TestCase):
+    """The child-side API: rlm.factory.emit / rlm.factory.inputs."""
+
+    @async_test
+    async def test_emit_sends_paths_as_strings_and_names_wrong_fields(self) -> None:
+        sent: list[tuple[str, dict[str, Any]]] = []
+
+        async def host(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            sent.append((request_type, payload or {}))
+            if (payload or {}).get("outputs", {}).get("risk") == "medium":
+                raise RuntimeError("risk: \"medium\" is not one of low, high")
+            return {"accepted": ["design", "risk"], "missing": []}
+
+        with patch.object(rlm_module, "host_request", host):
+            reply = await rlm_module.rlm.factory.emit(design=Path("DESIGN.md"), risk="low")
+            with self.assertRaisesRegex(FactoryEmitError, 'risk: "medium" is not one of low, high'):
+                await rlm_module.rlm.factory.emit(risk="medium")
+        self.assertEqual(reply, {"accepted": ["design", "risk"], "missing": []})
+        self.assertEqual(
+            sent[0], ("factory.emit", {"outputs": {"design": "DESIGN.md", "risk": "low"}, "cwd": os.getcwd()})
+        )
+
+    @async_test
+    async def test_outside_a_factory_child_the_error_says_so(self) -> None:
+        async def host(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            raise RuntimeError(f'host request type "{request_type}" is not available in this session')
+
+        with patch.object(rlm_module, "host_request", host):
+            for call in (rlm_module.rlm.factory.emit(x=1), rlm_module.rlm.factory.inputs()):
+                with self.assertRaisesRegex(FactoryEmitError, "work only in a child spawned by a machine"):
+                    await call
+
+    @async_test
+    async def test_emit_sends_the_kernel_current_directory(self) -> None:
+        sent: list[dict[str, Any]] = []
+
+        async def record(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            sent.append(payload or {})
+            return {"accepted": ["design"], "missing": []}
+
+        previous = os.getcwd()
+        with TemporaryDirectory() as moved, patch.object(rlm_module, "host_request", record):
+            os.chdir(moved)
+            try:
+                await rlm_module.rlm.factory.emit(design=Path("PLAN.md"))
+            finally:
+                os.chdir(previous)
+            self.assertEqual(sent, [{"outputs": {"design": "PLAN.md"}, "cwd": os.path.realpath(moved)}])
+
+    @async_test
+    async def test_emit_accepts_an_output_named_self(self) -> None:
+        sent: list[dict[str, Any]] = []
+
+        async def record(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            sent.append(payload or {})
+            return {"accepted": ["self"], "missing": []}
+
+        with patch.object(rlm_module, "host_request", record):
+            await rlm_module.rlm.factory.emit(self="ok")
+        self.assertEqual(sent[0]["outputs"], {"self": "ok"})
+
+
+class FactoryLibraryDrillInTest(_ExecutorTestCase):
+    """The machines page's drill-in: ``library`` with a machine name answers
+    the Rust loader's template in a stored spec's graph shape."""
+
+    @async_test
+    async def test_library_answers_one_machines_graph_from_the_rust_loader(self) -> None:
+        self.host.described["sweep"] = {
+            "name": "sweep",
+            "description": "Sweep a branch.",
+            "version": 2,
+            "author": None,
+            "params": [{"name": "task", "type": "text"}],
+            "files": [{"path": "MACHINE.md \u00b7 plan", "text": "Plan {task}."}],
+            "state_files": [{"state": "plan", "paths": ["MACHINE.md \u00b7 plan"]}],
+            "spec": {"states": [{"id": "plan", "entry": True, "subagent": {"prompt": "Plan {task}."}}]},
+        }
+        graph = await self.executor.activity({"action": "library", "specId": "sweep"})
+        self.assertIn(("factory.describe", {"name": "sweep"}), self.host.calls)
+        self.assertIsNone(graph["runId"])
+        self.assertEqual(graph["specId"], "sweep")
+        self.assertEqual([state["id"] for state in graph["machine"]["states"]], ["plan"])
+        self.assertEqual(graph["version"], "2")
+        self.assertEqual(graph["author"], "")
+        self.assertEqual(graph["params"], [{"name": "task", "type": "text"}])
+        self.assertEqual(graph["stateFiles"], [{"state": "plan", "paths": ["MACHINE.md \u00b7 plan"]}])
+        self.assertEqual(len(graph["files"]), 1)
+
+    @async_test
+    async def test_library_keeps_json_param_defaults_verbatim(self) -> None:
+        self.host.described["sweep"] = {
+            "name": "sweep",
+            "description": "Sweep a branch.",
+            "version": 1,
+            "params": [{"name": "weights", "type": "json", "default": {"risk_score": 1}}],
+            "spec": {"states": [{"id": "plan", "entry": True, "subagent": {"prompt": "Plan."}}]},
+        }
+        graph = await self.executor.activity({"action": "library", "specId": "sweep"})
+        self.assertEqual(graph["params"][0]["default"], {"risk_score": 1})
+
+    @async_test
+    async def test_library_needs_a_machine_name(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.executor.activity({"action": "library"})
 
 
 class FactoryGraphWatchTest(_ExecutorTestCase):
@@ -7635,6 +9365,12 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
             {"action": "graph"}
         )
         self.assertEqual([run["runId"] for run in listed["runs"]], [run_id])
+        # peek is the overview's non-arming unscoped read: the same rows,
+        # with no target.
+        peeked = await factory_module.default_factory_executor().activity(
+            {"action": "peek"}
+        )
+        self.assertEqual([run["runId"] for run in peeked["runs"]], [run_id])
         one = await factory_module.default_factory_executor().activity(
             {"action": "graph", "runId": run_id}
         )
@@ -7924,7 +9660,7 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Out-of-band frame plumbing
+# The library lane: the machine list and one machine's graph payload.
 # ---------------------------------------------------------------------------
 
 
@@ -8082,220 +9818,19 @@ class FactoryFrameCapTest(unittest.TestCase):
 
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # ---------------------------------------------------------------------------
-# Machine library: MACHINE.md parse, render, gate, resolution, run.
-#
-# New-feature coverage (the machine library): the file format round-trips
-# (export -> import -> identical validated spec), the import gate refuses
-# invalid specs with the write-time validator's exact errors and never
-# persists, library resolution is repo-first/user-second, and
-# rlm.factory.run falls back to the library for machine names.
+# MACHINE.md render, export, the import gate's spec check, and running a
+# library machine by name (the Rust scan answers through factory.compile).
 # ---------------------------------------------------------------------------
 
 
-def machine_file_text(
-    *,
-    name: str = "sweep",
-    description: str = "A machine that sweeps.",
-    version: str = "1",
-    author: str = "Tester",
-    spec_json: str | None = None,
-    frontmatter: str | None = None,
-    body: str | None = None,
-) -> str:
-    """Build MACHINE.md text; ``frontmatter``/``body`` override the defaults."""
-    if frontmatter is None:
-        frontmatter = (
-            "---\n"
-            f"name: {name}\n"
-            f"description: {description}\n"
-            f"version: {version}\n"
-            f"author: {author}\n"
-            "---"
-        )
-    if body is None:
-        spec_json = spec_json or json.dumps({"run": {"failure_policy": "continue"}, "states": [
-            {"id": "a", "entry": True, "subagent": {"prompt": "Do the work."}}
-        ]})
-        body = f"# {name}\n\n```machine-spec\n{spec_json}\n```"
-    return f"{frontmatter}\n\n{body}"
-
-
-class MachineFileParseTest(unittest.TestCase):
-    """The strict MACHINE.md format: frontmatter + one machine-spec fence."""
-
-    def parse(self, text: str) -> "tuple[MachineFile | None, list[str]]":
-        return parse_machine_file(text, source="test-MACHINE.md")
-
-    def test_parses_frontmatter_and_spec(self) -> None:
-        machine, errors = self.parse(machine_file_text())
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.name, "sweep")
-        self.assertEqual(machine.description, "A machine that sweeps.")
-        self.assertEqual(machine.version, "1")
-        self.assertEqual(machine.author, "Tester")
-        self.assertEqual(machine.spec["states"][0]["id"], "a")
-
-    def test_parses_quoted_frontmatter_values(self) -> None:
-        text = machine_file_text(
-            frontmatter=(
-                "---\n"
-                'name: "sweep"\n'
-                "description: 'It: reviews things.'\n"
-                "version: 1\n"
-                "author: Prime Agent\n"
-                "---"
-            )
-        )
-        machine, errors = self.parse(text)
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.name, "sweep")
-        self.assertEqual(machine.description, "It: reviews things.")
-
-    def test_missing_frontmatter_is_an_exact_error(self) -> None:
-        machine, errors = self.parse("# just prose\n\n```machine-spec\n{}\n```")
-        self.assertIsNone(machine)
-        self.assertEqual(
-            errors, ["test-MACHINE.md: MACHINE.md must start with a `---` frontmatter block"]
-        )
-
-    def test_unclosed_frontmatter_is_an_exact_error(self) -> None:
-        machine, errors = self.parse("---\nname: sweep\nno close")
-        self.assertIsNone(machine)
-        self.assertEqual(
-            errors, ["test-MACHINE.md: frontmatter is not closed (end it with a `---` line)"]
-        )
-
-    def test_unknown_and_duplicate_frontmatter_keys_are_exact_errors(self) -> None:
-        machine, errors = self.parse(
-            machine_file_text(frontmatter="---\nname: sweep\ndescription: A machine.\n---", body="x")
-        )
-        # Missing the spec fence is reported too, but the frontmatter still parsed:
-        self.assertIsNone(machine)
-        machine2, errors2 = self.parse(
-            machine_file_text(frontmatter="---\nname: sweep\nname: again\ndescription: A machine.\n---")
-        )
-        self.assertIsNone(machine2)
-        self.assertTrue(any("declared more than once" in error for error in errors2), errors2)
-        machine3, errors3 = self.parse(
-            machine_file_text(frontmatter="---\nname: sweep\ndescription: A machine.\nlicense: MIT\n---")
-        )
-        self.assertIsNone(machine3)
-        self.assertTrue(any("unknown frontmatter key 'license'" in error for error in errors3), errors3)
-
-    def test_missing_name_and_description_are_exact_errors(self) -> None:
-        machine, errors = self.parse(
-            machine_file_text(frontmatter="---\nversion: 1\nauthor: Tester\n---")
-        )
-        self.assertIsNone(machine)
-        self.assertTrue(any("machine name must be a non-empty string" in error for error in errors), errors)
-        self.assertTrue(any("frontmatter description is required" in error for error in errors), errors)
-
-    def test_multiline_descriptions_are_rejected(self) -> None:
-        # The description is one listing row by contract, so a quoted
-        # frontmatter value that decodes an embedded line break is a format
-        # error with its own sentence — not a machine whose listing renders
-        # across several terminal lines.
-        for description in ('"A machine that\\nsweeps."', '"A machine that\\rsweeps."'):
-            machine, errors = self.parse(machine_file_text(frontmatter=(
-                "---\nname: sweep\n"
-                f"description: {description}\n"
-                "version: 1\nauthor: Tester\n---"
-            )))
-            self.assertIsNone(machine, description)
-            self.assertEqual(
-                errors, ["frontmatter description must be a single line"]
-            )
-        self.assertEqual(
-            machine_description_errors("One line, as the format requires."), []
-        )
-
-    def test_name_rules_mirror_the_skill_library(self) -> None:
-        for bad in ("Sweep", "sweep x", "-sweep", "sweep-", "a" * 65):
-            machine, errors = self.parse(machine_file_text(name=bad))
-            self.assertIsNone(machine, bad)
-            self.assertTrue(errors, bad)
-        self.assertEqual(machine_name_errors("sweep-2"), [])
-        self.assertEqual(machine_name_errors(""), ["machine name must be a non-empty string"])
-        self.assertEqual(machine_name_errors(7), ["machine name must be a non-empty string"])
-        self.assertIn("must not end with a hyphen", machine_name_errors("sweep-")[0])
-
-    def test_plain_value_with_colon_demands_quotes(self) -> None:
-        machine, errors = self.parse(
-            machine_file_text(
-                frontmatter="---\nname: sweep\ndescription: Reviews: everything\n---",
-                body="# sweep\n\n```machine-spec\n{\"run\": {}}\n```",
-            )
-        )
-        self.assertIsNone(machine)
-        self.assertTrue(any("quote the value" in error for error in errors), errors)
-
-    def test_no_fence_is_an_exact_error(self) -> None:
-        machine, errors = self.parse(machine_file_text(body="# sweep\n\nNo spec here."))
-        self.assertIsNone(machine)
-        self.assertEqual(
-            errors,
-            ["test-MACHINE.md: MACHINE.md requires exactly one fenced ```machine-spec block; found none"],
-        )
-
-    def test_multiple_fences_are_an_exact_error(self) -> None:
-        spec_json = '{"run": {"failure_policy": "continue"}, "states": [{"id": "a", "entry": true, "subagent": {"prompt": "P."}}]}'
-        text = machine_file_text(body=f"# sweep\n\n```machine-spec\n{spec_json}\n```\n\n```machine-spec\n{spec_json}\n```")
-        machine, errors = self.parse(text)
-        self.assertIsNone(machine)
-        self.assertEqual(
-            errors,
-            ["test-MACHINE.md: MACHINE.md requires exactly one fenced ```machine-spec block; found 2"],
-        )
-
-    def test_unterminated_fence_is_an_exact_error(self) -> None:
-        text = machine_file_text(body="# sweep\n\n```machine-spec\n{\"run\": {}}")
-        machine, errors = self.parse(text)
-        self.assertIsNone(machine)
-        self.assertEqual(errors, ["test-MACHINE.md: the ```machine-spec fence is never closed"])
-
-    def test_fence_payload_must_be_a_json_object(self) -> None:
-        machine, errors = self.parse(machine_file_text(body="# sweep\n\n```machine-spec\n[1, 2]\n```"))
-        self.assertIsNone(machine)
-        self.assertIn(
-            "must contain a JSON object, got a list", errors[0]
-        )
-        machine2, errors2 = self.parse(machine_file_text(body="# sweep\n\n```machine-spec\nnot json\n```"))
-        self.assertIsNone(machine2)
-        self.assertTrue(errors2[0].startswith("test-MACHINE.md: the ```machine-spec block must contain a JSON object"), errors2)
-
-    def test_other_fenced_blocks_do_not_confuse_the_scan(self) -> None:
-        spec_json = '{"run": {"failure_policy": "continue"}, "states": [{"id": "a", "entry": true, "subagent": {"prompt": "P."}}]}'
-        text = machine_file_text(
-            body=(
-                "# sweep\n\n"
-                "Example prose with a json block:\n\n"
-                "```json\n{\"not\": \"a machine\"}\n```\n\n"
-                "```text\nplain text\n```\n\n"
-                f"```machine-spec\n{spec_json}\n```"
-            )
-        )
-        machine, errors = self.parse(text)
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.spec["run"]["failure_policy"], "continue")
-
-    def test_crlf_and_bom_are_normalized(self) -> None:
-        text = machine_file_text().replace("\n", "\r\n")
-        machine, errors = self.parse("\ufeff" + text)
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.name, "sweep")
+def rendered_spec(text: str) -> dict[str, Any]:
+    """The JSON spec inside a rendered MACHINE.md's machine-spec fence."""
+    return json.loads(text.split(f"```{MACHINE_SPEC_FENCE}\n", 1)[1].rsplit("\n```", 1)[0])
 
 
 class MachineFileRenderTest(unittest.TestCase):
-    """render_machine_file is byte-stable and parse-identical."""
+    """render_machine_file is byte-stable (the Rust parser reads it back)."""
 
     def render(self, spec: dict[str, Any]) -> str:
         machine = MachineFile(
@@ -8310,14 +9845,12 @@ class MachineFileRenderTest(unittest.TestCase):
     def test_render_is_byte_stable_and_round_trips(self) -> None:
         text = self.render(valid_machine())
         self.assertEqual(text, self.render(valid_machine()))
-        machine, errors = parse_machine_file(text, source="rendered")
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.name, "sweep")
-        self.assertEqual(machine.description, "A machine that sweeps.")
-        self.assertEqual(machine.version, "1")
-        self.assertEqual(machine.author, "Tester")
-        self.assertEqual(machine.spec, valid_machine())
+        self.assertTrue(
+            text.startswith(
+                "---\nname: sweep\ndescription: A machine that sweeps.\nversion: 1\nauthor: Tester\n---\n"
+            )
+        )
+        self.assertEqual(rendered_spec(text), valid_machine())
 
     def test_render_quotes_non_plain_values(self) -> None:
         machine = MachineFile(
@@ -8329,10 +9862,6 @@ class MachineFileRenderTest(unittest.TestCase):
         )
         text = render_machine_file(machine)
         self.assertIn('description: "Reviews: everything, carefully."', text)
-        reparsed, errors = parse_machine_file(text, source="rendered")
-        self.assertEqual(errors, [])
-        assert reparsed is not None
-        self.assertEqual(reparsed.description, "Reviews: everything, carefully.")
 
     def test_render_generates_contract_prose_from_both_forms(self) -> None:
         machine_text = self.render(valid_machine())
@@ -8355,603 +9884,24 @@ class MachineFileRenderTest(unittest.TestCase):
         self.assertIn('\n  "run": {\n    "failure_policy": "continue"\n  },', fence)
 
 
-class MachineFileRoundTripTest(unittest.TestCase):
-    """export -> import -> identical validated spec (the format round-trip)."""
-
-    def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        root = Path(temp.name).resolve()
-        self.library = root / "machines"
-        self.out_dir = root / "out"
-
-    def test_exported_file_imports_to_the_identical_spec(self) -> None:
-        spec = valid_dag()
-        out = self.out_dir / "shared.MACHINE.md"
-        export_factory_spec(spec, out, name="sweep", description="A machine that sweeps.")
-        imported = import_machine(out, target_dir=self.library)
-        self.assertEqual(imported["name"], "sweep")
-        self.assertTrue(imported["created"])
-        stored, errors = parse_machine_file(
-            (self.library / "sweep" / "MACHINE.md").read_text(encoding="utf-8"), source="stored"
-        )
-        self.assertEqual(errors, [])
-        assert stored is not None
-        self.assertEqual(validate_factory_spec(stored.spec), [])
-        self.assertEqual(
-            canonicalize_factory_spec(stored.spec), canonicalize_factory_spec(spec)
-        )
-
-    def test_library_export_import_export_is_byte_identical(self) -> None:
-        spec = valid_machine()
-        first = self.out_dir / "first.MACHINE.md"
-        export_factory_spec(spec, first, name="sweep", description="A machine that sweeps.")
-        import_machine(first, target_dir=self.library)
-        # Export the imported library machine (verbatim copy) and re-import: bytes never move.
-        second = self.out_dir / "second.MACHINE.md"
-        export_machine("sweep", second, repo_dir=None, user_dir=self.library)
-        self.assertEqual(first.read_text(encoding="utf-8"), second.read_text(encoding="utf-8"))
-        imported = import_machine(second, target_dir=self.library)
-        self.assertFalse(imported["created"])
-
-
-class ImportGateTest(unittest.TestCase):
-    """The import gate: invalid specs never persist, with exact errors."""
-
-    def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.library = Path(temp.name) / "machines"
-        self.sources = Path(temp.name) / "sources"
-
-    def write_source(self, text: str) -> Path:
-        self.sources.mkdir(parents=True, exist_ok=True)
-        path = self.sources / "machine.MACHINE.md"
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def test_import_persists_valid_files_verbatim(self) -> None:
-        text = machine_file_text(
-            description="A machine that sweeps.",
-            spec_json=json.dumps(valid_dag()),
-        )
-        path = self.write_source(text)
-        result = import_machine(path, target_dir=self.library)
-        self.assertEqual(result["name"], "sweep")
-        stored = self.library / "sweep" / "MACHINE.md"
-        self.assertTrue(stored.is_file())
-        self.assertEqual(stored.read_text(encoding="utf-8"), text)
-
-    def test_import_preserves_crlf_and_cr_files_byte_for_byte(self) -> None:
-        # The import persists the SUPPLIED file: a valid CRLF or CR machine
-        # keeps its exact bytes (a read_text/write_text round trip would
-        # silently rewrite every line ending), and the stored copy still
-        # parses.
-        text = machine_file_text(spec_json=json.dumps(valid_dag()))
-        self.sources.mkdir(parents=True, exist_ok=True)
-        for line_ending in ("\r\n", "\r"):
-            source = self.sources / f"{len(line_ending)}-byte-newline.MACHINE.md"
-            source.write_bytes(text.replace("\n", line_ending).encode("utf-8"))
-            result = import_machine(source, target_dir=self.library)
-            stored = Path(result["path"])
-            self.assertEqual(stored.read_bytes(), source.read_bytes())
-            stored_machine, errors = parse_machine_file(
-                stored.read_text(encoding="utf-8"), source=str(stored)
-            )
-            self.assertEqual(errors, [])
-            assert stored_machine is not None
-            self.assertEqual(stored_machine.name, "sweep")
-
-    def test_import_rejects_invalid_spec_with_exact_errors_and_persists_nothing(self) -> None:
-        invalid_spec = {
-            "run": {"max_parallel": None},
-            "states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}],
-        }
-        path = self.write_source(machine_file_text(spec_json=json.dumps(invalid_spec)))
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn(
-            "run max_parallel must be an integer between 1 and 64", str(ctx.exception)
-        )
-        self.assertFalse(self.library.exists())
-
-    def test_import_rejects_both_forms_and_guaranteed_dead_specs(self) -> None:
-        both_forms = {
-            "nodes": [{"id": "a", "subagent": {"prompt": "P."}}],
-            "states": [{"id": "s", "subagent": {"prompt": "P."}}],
-        }
-        path = self.write_source(machine_file_text(spec_json=json.dumps(both_forms)))
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn("pass either dag or machine form, not both", str(ctx.exception))
-        dead = {"states": [
-            {"id": "start", "entry": True, "subagent": {"prompt": "P."}},
-            {
-                "id": "loop",
-                "subagent": {"prompt": "P."},
-                "inputs": [{"name": "v", "type": "text", "from": "loop.v"}],
-                "outputs": [{"name": "v", "type": "text"}],
-            },
-        ]}
-        path = self.write_source(machine_file_text(spec_json=json.dumps(dead)))
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn("cannot require itself", str(ctx.exception))
-        self.assertFalse(self.library.exists())
-
-    def test_import_rejects_malformed_files_with_format_errors(self) -> None:
-        path = self.write_source("# no frontmatter here")
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn("must start with a `---` frontmatter block", str(ctx.exception))
-        self.assertFalse(self.library.exists())
-
-    def test_import_rejects_multiline_descriptions_and_persists_nothing(self) -> None:
-        # A quoted description decoding an embedded newline renders the
-        # machine across several listing rows: the import gate refuses it
-        # with the format's own sentence, exactly like any other parse
-        # failure.
-        path = self.write_source(machine_file_text(frontmatter=(
-            "---\nname: multiline\n"
-            'description: "A machine that\\nsweeps the branch."\n'
-            "version: 1\nauthor: Tester\n---"
-        )))
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn("frontmatter description must be a single line", str(ctx.exception))
-        self.assertFalse(self.library.exists())
-
-    def test_import_rejects_missing_files_and_overwrites_renamed(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(self.sources / "nope.MACHINE.md", target_dir=self.library)
-        self.assertIn("machine file not found", str(ctx.exception))
-        text = machine_file_text()
-        first = self.write_source(text)
-        import_machine(first, target_dir=self.library)
-        result = import_machine(first, target_dir=self.library)
-        self.assertFalse(result["created"])
-
-    def test_import_gate_is_the_write_time_validator(self) -> None:
-        # The exact sentences import_machine raises are the write-time
-        # validator's: bypassing the gate must fail the reject test above.
-        invalid_spec = {"states": [{"id": "a", "entry": True, "subagent": 5}]}
-        path = self.write_source(machine_file_text(spec_json=json.dumps(invalid_spec)))
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn(
-            "state a requires a subagent", str(ctx.exception)
-        )
-        self.assertFalse(self.library.exists())
-
-
-class MachineLibraryResolutionTest(unittest.TestCase):
-    """Repo directory first, user directory second."""
-
-    def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        root = Path(temp.name).resolve()
-        self.repo = root / "repo-machines"
-        self.user = root / "user-machines"
-
-    def store(self, root: Path, name: str, description: str, spec: dict[str, Any] | None = None) -> Path:
-        directory = root / name
-        directory.mkdir(parents=True, exist_ok=True)
-        spec = spec if spec is not None else {"states": [
-            {"id": "a", "entry": True, "subagent": {"prompt": "P."}}
-        ]}
-        text = machine_file_text(name=name, description=description, spec_json=json.dumps(spec))
-        path = directory / "MACHINE.md"
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def test_repo_dir_wins_over_user_dir(self) -> None:
-        repo_path = self.store(self.repo, "sweep", "The repo machine.")
-        user_path = self.store(self.user, "sweep", "The user machine.")
-        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, repo_path)
-        self.assertEqual(machine.description, "The repo machine.")
-
-    def test_frontmatter_name_wins_over_the_directory_name(self) -> None:
-        # Mirrors the skill library: the declared name is the machine's
-        # name even when its directory is named differently.
-        directory = self.user / "renamed-dir"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(
-            machine_file_text(name="sweep", description="The renamed machine."),
-            encoding="utf-8",
-        )
-        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, directory / "MACHINE.md")
-        self.assertEqual(machine.description, "The renamed machine.")
-        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
-
-    def test_the_declared_name_wins_over_the_directory_name(self) -> None:
-        # The fast path reads <dir>/<name>/MACHINE.md but only returns it
-        # when its DECLARED name matches: a directory named `misdir`
-        # holding `name: actual` is not the machine `misdir` — it resolves
-        # as `actual` (and a repo machine declared `sweep` is never
-        # shadowed by a `sweep/` directory that declares another name).
-        directory = self.user / "misdir"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(
-            machine_file_text(name="actual", description="Declared, not directory-named."),
-            encoding="utf-8",
-        )
-        machine, path = resolve_machine("actual", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, directory / "MACHINE.md")
-        with self.assertRaises(ValueError) as raised:
-            resolve_machine("misdir", repo_dir=self.repo, user_dir=self.user)
-        self.assertIn("unknown machine 'misdir'", str(raised.exception))
-
-    def test_a_directory_named_machine_shadowing_is_refused(self) -> None:
-        # repo/sweep/ declares `other`: asking for `sweep` must not return
-        # that file, and a user machine legitimately named `sweep` wins.
-        misnamed = self.repo / "sweep"
-        misnamed.mkdir(parents=True)
-        (misnamed / "MACHINE.md").write_text(
-            machine_file_text(name="other", description="Not sweep."),
-            encoding="utf-8",
-        )
-        self.store(self.user, "sweep", "The real sweep.")
-        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, self.user / "sweep" / "MACHINE.md")
-        self.assertEqual(machine.description, "The real sweep.")
-
-    def test_user_dir_serves_names_the_repo_does_not_have(self) -> None:
-        self.store(self.repo, "repo-only", "The repo machine.")
-        user_path = self.store(self.user, "mine", "The user machine.")
-        machine, path = resolve_machine("mine", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, user_path)
-        self.assertEqual(machine.description, "The user machine.")
-
-    def test_unknown_name_lists_available_machines(self) -> None:
-        self.store(self.repo, "builder", "Builds.")
-        self.store(self.user, "sweep", "Sweeps.")
-        with self.assertRaises(ValueError) as ctx:
-            resolve_machine("missing", repo_dir=self.repo, user_dir=self.user)
-        self.assertIn("unknown machine 'missing'", str(ctx.exception))
-        self.assertIn("builder", str(ctx.exception))
-        self.assertIn("sweep", str(ctx.exception))
-
-    def test_invalid_machine_name_is_rejected_before_scanning(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            resolve_machine("Not A Name", repo_dir=self.repo, user_dir=self.user)
-        self.assertIn("invalid characters", str(ctx.exception))
-
-    def test_list_machines_dedupes_repo_first_and_sorts_by_name(self) -> None:
-        self.store(self.repo, "sweep", "The repo machine.")
-        self.store(self.user, "sweep", "The user machine.")
-        self.store(self.user, "alpha", "An early machine.")
-        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["alpha", "sweep"])
-        sweep = next(entry for entry in listed if entry["name"] == "sweep")
-        self.assertEqual(sweep["source"], "repo")
-        self.assertEqual(sweep["description"], "The repo machine.")
-        self.assertEqual(listed[0]["source"], "user")
-
-    def test_list_machines_skips_broken_files(self) -> None:
-        good = self.store(self.user, "good", "Good machine.")
-        broken = self.user / "broken" / "MACHINE.md"
-        broken.parent.mkdir(parents=True, exist_ok=True)
-        broken.write_text("no frontmatter", encoding="utf-8")
-        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["good"])
-
-    def test_list_machines_excludes_spec_invalid_files_with_their_errors(self) -> None:
-        # The listing reports only machines resolve/run can use: a repo
-        # file whose spec fails the write-time validator never wins the
-        # name, a valid user machine shows instead, and the exact
-        # validator sentences ride the scan warnings (the CLI list
-        # surface) naming the broken file.
-        invalid = self.store(self.repo, "sweep", "The broken repo machine.", spec={"states": []})
-        self.store(self.user, "sweep", "The user machine.")
-        listed, warnings = _scan_machine_library(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
-        self.assertEqual(listed[0]["source"], "user")
-        self.assertEqual(listed[0]["description"], "The user machine.")
-        self.assertEqual(
-            warnings,
-            [f"{invalid}: factory machine must declare between 1 and 1024 states, got 0"],
-        )
-        self.assertEqual(list_machines(repo_dir=self.repo, user_dir=self.user)[0]["source"], "user")
-
-    def test_resolve_machine_raises_exact_parse_errors_for_broken_files(self) -> None:
-        broken = self.user / "broken" / "MACHINE.md"
-        broken.parent.mkdir(parents=True, exist_ok=True)
-        broken.write_text("---\nname: broken\n---\n\n```machine-spec\n{}\n```\n", encoding="utf-8")
-        with self.assertRaises(ValueError) as ctx:
-            resolve_machine("broken", repo_dir=self.repo, user_dir=self.user)
-        self.assertIn("frontmatter description is required", str(ctx.exception))
-
-    def test_resolve_machine_reports_non_utf8_files_as_broken(self) -> None:
-        # A machine file that exists but does not decode is a broken library
-        # file, exactly like one that fails to parse: the decode error rides
-        # the broken frame with the SAME sentence the listing scan warns
-        # with (the shared verdict's wording, path-prefixed).
-        # (UnicodeDecodeError is a ValueError, so an unguarded read would
-        # instead surface through run_factory's name-rule arm as an
-        # invalid id.)
-        corrupt = self.user / "broken" / "MACHINE.md"
-        corrupt.parent.mkdir(parents=True, exist_ok=True)
-        corrupt.write_bytes(b"\xff\xfe\xff not utf-8")
-        with self.assertRaises(MachineResolutionError) as ctx:
-            resolve_machine("broken", repo_dir=self.repo, user_dir=self.user)
-        self.assertTrue(ctx.exception.broken)
-        self.assertIn("not valid UTF-8", str(ctx.exception))
-        self.assertIn(str(corrupt), str(ctx.exception))
-
-    def test_resolve_machine_reports_spec_invalid_files_as_broken(self) -> None:
-        # A file that parses but carries a spec the write-time validator
-        # rejects is the exists-but-broken case at resolve time when it is
-        # the name's only carrier — the exact broken frame naming the file,
-        # never a usable machine the run rejects late, and never a missing
-        # frame. The scan path below skips one in a differently-named
-        # directory, so an unknown name keeps the missing frame instead of
-        # resolving a spec-invalid file, and a file at the name's directory
-        # that DECLARES another name never carried the requested one: the
-        # invalid file claims no name on either surface.
-        invalid = self.store(self.repo, "sweep", "The broken repo machine.", spec={"states": []})
-        with self.assertRaises(MachineResolutionError) as ctx:
-            resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertTrue(ctx.exception.broken)
-        message = str(ctx.exception)
-        self.assertIn(str(invalid), message)
-        self.assertIn("factory machine must declare between 1 and 1024 states, got 0", message)
-        renamed = self.repo / "renamed-dir"
-        renamed.mkdir(parents=True)
-        (renamed / "MACHINE.md").write_text(
-            machine_file_text(
-                name="ghost", description="Ghost.", spec_json=json.dumps({"states": []})
-            ),
-            encoding="utf-8",
-        )
-        with self.assertRaises(MachineResolutionError) as scan_ctx:
-            resolve_machine("ghost", repo_dir=self.repo, user_dir=self.user)
-        self.assertFalse(scan_ctx.exception.broken)
-        self.assertIn("unknown machine 'ghost'", str(scan_ctx.exception))
-        misnamed = self.repo / "warp"
-        misnamed.mkdir(parents=True)
-        (misnamed / "MACHINE.md").write_text(
-            machine_file_text(
-                name="other", description="Not warp.", spec_json=json.dumps({"states": []})
-            ),
-            encoding="utf-8",
-        )
-        with self.assertRaises(MachineResolutionError) as misnamed_ctx:
-            resolve_machine("warp", repo_dir=self.repo, user_dir=self.user)
-        self.assertFalse(misnamed_ctx.exception.broken)
-        self.assertIn("unknown machine 'warp'", str(misnamed_ctx.exception))
-
-    def test_list_and_resolve_agree_on_spec_invalid_files(self) -> None:
-        # Cursor's finding: the scan skips a spec-invalid repo machine so
-        # the listing surfaces a valid user machine of the same name, but
-        # resolve still raised broken on the repo file — `factory list`
-        # advertised a machine that run and export refused. Both surfaces
-        # now share _read_library_machine's verdict: an invalid file never
-        # claims its name, so the valid user machine serves exactly where
-        # the listing shows it, and export copies it verbatim.
-        self.store(self.repo, "sweep", "The broken repo machine.", spec={"states": []})
-        user_path = self.store(self.user, "sweep", "The user machine.")
-        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
-        self.assertEqual(listed[0]["source"], "user")
-        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, user_path)
-        self.assertEqual(machine.description, "The user machine.")
-        self.assertEqual(validate_factory_spec(machine.spec), [])
-        out = self.user.parent / "exported.MACHINE.md"
-        result = export_library_machine("sweep", out, repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(result["source"], "library")
-        self.assertEqual(out.read_text(encoding="utf-8"), user_path.read_text(encoding="utf-8"))
-
-    def test_resolve_falls_through_parse_broken_files_to_valid_user_machines(self) -> None:
-        # The shared verdict covers every invalidity class: a repo file
-        # that fails to parse claims its name no more than a spec-invalid
-        # one, so the valid user machine serves on both surfaces (the
-        # listing always skipped it) instead of resolve raising broken on
-        # the repo file.
-        broken = self.repo / "sweep" / "MACHINE.md"
-        broken.parent.mkdir(parents=True)
-        broken.write_text("no frontmatter", encoding="utf-8")
-        user_path = self.store(self.user, "sweep", "The user machine.")
-        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
-        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, user_path)
-        self.assertEqual(machine.description, "The user machine.")
-
-    def test_one_non_utf8_file_never_poisons_the_listing_scan(self) -> None:
-        # The shared scan skips a non-decodable file like any other broken
-        # one (its warning rides the CLI list surface), so it can neither
-        # break the listing nor reframe an unrelated unknown name.
-        self.store(self.repo, "builder", "Builds.")
-        corrupt = self.user / "zz-corrupt" / "MACHINE.md"
-        corrupt.parent.mkdir(parents=True, exist_ok=True)
-        corrupt.write_bytes(b"\xff\xfe")
-        listed, warnings = _scan_machine_library(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["builder"])
-        self.assertTrue(any("not valid UTF-8" in warning for warning in warnings), warnings)
-        with self.assertRaises(MachineResolutionError) as ctx:
-            resolve_machine("missing", repo_dir=self.repo, user_dir=self.user)
-        self.assertFalse(ctx.exception.broken)
-        self.assertIn("unknown machine 'missing'", str(ctx.exception))
-        self.assertIn("builder", str(ctx.exception))
-
-    def test_env_overrides_drive_the_production_dirs(self) -> None:
-        env = patch.dict(os.environ, {
-            "PRIME_AGENT_MACHINES_DIR": str(self.repo),
-            "PRIME_AGENT_CODING_AGENT_DIR": str(Path(self.repo).parent / "agent-home"),
-        })
-        env.start()
-        self.addCleanup(env.stop)
-        self.store(self.repo, "sweep", "The repo machine.")
-        self.assertEqual(repo_machines_dir(), self.repo)
-        self.assertEqual(user_machines_dir(), Path(self.repo).parent / "agent-home" / "machines")
-        machine, path = resolve_machine("sweep")
-        self.assertEqual(path, self.repo / "sweep" / "MACHINE.md")
-
-    def test_the_bundled_library_ships_inside_the_runtime_package(self) -> None:
-        # The repo level is the packaged library: the machines directory
-        # beside this module (site-packages/rlm/machines in an installed
-        # kernel, src/rlm/machines in a checkout), so an installed kernel
-        # resolves the seeds a checkout does. The env override still wins.
-        packaged = Path(factory_module.__file__).resolve().parent / "machines"
-        repo_dir = repo_machines_dir()
-        self.assertEqual(repo_dir, packaged)
-        self.assertTrue(packaged.is_dir())
-        with patch.dict(os.environ, {"PRIME_AGENT_MACHINES_DIR": str(self.repo)}):
-            self.assertEqual(repo_machines_dir(), self.repo)
-
-    def test_the_shipped_seed_machines_validate_clean(self) -> None:
-        # The repo-level library resolves as the packaged directory and the
-        # shipped examples parse, validate, and canonicalize: a broken seed
-        # fails here before it can ship.
-        repo_dir = repo_machines_dir()
-        names = {entry["name"] for entry in list_machines(repo_dir=repo_dir, user_dir=Path("/nonexistent-user-machines"))}
-        self.assertIn("review-sweep", names)
-        self.assertIn("builder", names)
-        self.assertIn("pr-manager", names)
-        for name in ("review-sweep", "builder", "pr-manager"):
-            machine, path = resolve_machine(name, repo_dir=repo_dir, user_dir=Path("/nonexistent-user-machines"))
-            self.assertEqual(machine.name, name)
-            self.assertEqual(validate_factory_spec(machine.spec), [], name)
-            self.assertEqual(validate_factory_spec(canonicalize_factory_spec(machine.spec)), [], name)
-            machine_two = parse_machine_file(path.read_text(encoding="utf-8"), source=str(path))[0]
-            assert machine_two is not None
-            self.assertEqual(machine_two.spec, machine.spec, name)
-
-
 class MachineCliDispatchTest(unittest.TestCase):
-    """The JSON facade the CLI's factory subcommands drive.
+    """cli_dispatch's one op: the import gate's structural spec check."""
 
-    The payload carries only what the user typed (an op, a path, a name, an
-    out target); the dispatch process resolves every library directory
-    itself through the production env seams (`PRIME_AGENT_MACHINES_DIR`,
-    `PRIME_AGENT_CODING_AGENT_DIR`), so these tests exercise the same
-    resolution a real CLI invocation runs.
-    """
+    def test_validate_answers_ok_or_the_exact_errors(self) -> None:
+        self.assertEqual(cli_dispatch({"op": "validate", "spec": valid_machine()}), {"ok": True})
+        result = cli_dispatch({"op": "validate", "spec": {"states": []}})
+        self.assertEqual(result["ok"], False)
+        self.assertEqual(result["errors"], validate_factory_spec({"states": []}))
 
-    def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        root = Path(temp.name).resolve()
-        self.repo = root / "repo-machines"
-        self.agent_home = root / "agent-home"
-        self.sources = root / "sources"
-        self.out_dir = root / "out"
-        self.source_text = machine_file_text(
-            description="A machine that sweeps.", spec_json=json.dumps(valid_dag())
-        )
-        self.sources.mkdir(parents=True, exist_ok=True)
-        self.source_path = self.sources / "machine.MACHINE.md"
-        self.source_path.write_text(self.source_text, encoding="utf-8")
-        env = patch.dict(os.environ, {
-            "PRIME_AGENT_MACHINES_DIR": str(self.repo),
-            "PRIME_AGENT_CODING_AGENT_DIR": str(self.agent_home),
-        })
-        env.start()
-        self.addCleanup(env.stop)
+    def test_dispatch_rejects_other_payloads(self) -> None:
+        for payload in ([], {"op": "list"}, {"op": "import", "path": "/x"}):
+            self.assertEqual(cli_dispatch(payload)["ok"], False, payload)
 
-    def test_import_dispatch_persists_into_the_user_library(self) -> None:
-        result = cli_dispatch({"op": "import", "path": str(self.source_path)})
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["name"], "sweep")
-        destination = self.agent_home / "machines" / "sweep" / "MACHINE.md"
-        self.assertEqual(Path(result["path"]), destination)
-        self.assertEqual(destination.read_text(encoding="utf-8"), self.source_text)
 
-    def test_import_dispatch_surfaces_gate_errors_as_data(self) -> None:
-        bad = self.sources / "bad.MACHINE.md"
-        bad.write_text(
-            machine_file_text(spec_json=json.dumps({"run": {"max_parallel": None}, "states": [
-                {"id": "a", "entry": True, "subagent": {"prompt": "P."}}
-            ]})),
-            encoding="utf-8",
-        )
-        result = cli_dispatch({"op": "import", "path": str(bad)})
-        self.assertFalse(result["ok"])
-        self.assertFalse((self.agent_home / "machines").exists())
-        self.assertTrue(any("max_parallel must be an integer between 1 and 64" in e for e in result["errors"]), result)
-
-    def test_export_dispatch_resolves_library_machines(self) -> None:
-        import_machine(self.source_path, target_dir=self.repo)
-        result = cli_dispatch({
-            "op": "export",
-            "name": "sweep",
-            "out": str(self.out_dir / "shared.MACHINE.md"),
-        })
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["source"], "library")
-        self.assertEqual(
-            Path(result["path"]).read_text(encoding="utf-8"), self.source_text
-        )
-
-    def test_export_dispatch_refuses_to_overwrite_the_target(self) -> None:
-        import_machine(self.source_path, target_dir=self.repo)
-        target = self.out_dir / "shared.MACHINE.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("keep me", encoding="utf-8")
-        result = cli_dispatch({
-            "op": "export",
-            "name": "sweep",
-            "out": str(target),
-        })
-        self.assertFalse(result["ok"])
-        self.assertTrue(any("already exists" in e for e in result["errors"]), result)
-        self.assertEqual(target.read_text(encoding="utf-8"), "keep me")
-
-    def test_export_dispatch_resolves_the_library_only(self) -> None:
-        # A fresh CLI process has no session state, so the dispatch resolves
-        # library machines only: a stored factory entry never intercepts
-        # the CLI's export, even when one exists.
-        self.agent_home.mkdir(parents=True, exist_ok=True)
-        (self.agent_home / "settings.json").write_text(
-            json.dumps({"factory": {"enabled": True}}), encoding="utf-8"
-        )
-        harness = HarnessState(Path(self.agent_home) / "harness_state.json")
-        previous_executor = factory_module._DEFAULT_EXECUTOR
-        factory_module._DEFAULT_EXECUTOR = FactoryExecutor(harness=harness)
-        self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", previous_executor))
-        harness.create_factory(
-            "sweep", "Stored.",
-            machine={"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
-        )
-        result = cli_dispatch({"op": "export", "name": "sweep", "out": str(self.out_dir / "s.MACHINE.md")})
-        self.assertFalse(result["ok"])
-        self.assertTrue(any("unknown machine 'sweep'" in e for e in result["errors"]), result)
-
-    def test_export_dispatch_reports_unknown_machines(self) -> None:
-        result = cli_dispatch({
-            "op": "export",
-            "name": "ghost",
-            "out": str(self.out_dir / "ghost.MACHINE.md"),
-        })
-        self.assertFalse(result["ok"])
-        self.assertTrue(any("unknown machine 'ghost'" in e for e in result["errors"]), result)
-
-    def test_list_dispatch_lists_the_library_with_warnings(self) -> None:
-        (self.repo / "sweep").mkdir(parents=True)
-        (self.repo / "sweep" / "MACHINE.md").write_text(self.source_text, encoding="utf-8")
-        broken = self.agent_home / "machines" / "broken"
-        broken.mkdir(parents=True)
-        (broken / "MACHINE.md").write_text("no frontmatter", encoding="utf-8")
-        result = cli_dispatch({"op": "list"})
-        self.assertTrue(result["ok"], result)
-        self.assertEqual([m["name"] for m in result["machines"]], ["sweep"])
-        self.assertEqual(result["machines"][0]["source"], "repo")
-        self.assertTrue(any("broken" in warning for warning in result["warnings"]), result)
-
-    def test_dispatch_rejects_bad_payloads(self) -> None:
-        self.assertEqual(cli_dispatch("nope")["ok"], False)
-        missing = cli_dispatch({"op": "import"})
-        self.assertFalse(missing["ok"])
-        self.assertIn("requires a `path` string", missing["errors"][0])
-        unknown_op = cli_dispatch({"op": "wat"})
-        self.assertFalse(unknown_op["ok"])
-        self.assertIn("unknown factory cli op", unknown_op["errors"][0])
-        self.assertIn("'list'", unknown_op["errors"][0])
+# ---------------------------------------------------------------------------
+# The mermaid renderer and the library graph seam (the TUI library view's
+# kernel surface).
+# ---------------------------------------------------------------------------
 
 
 class ExportMachineTest(unittest.TestCase):
@@ -8995,47 +9945,17 @@ class ExportMachineTest(unittest.TestCase):
 
         self.addCleanup(restore)
 
-    def test_exports_a_library_machine_verbatim(self) -> None:
-        text = machine_file_text(description="A machine that sweeps.", spec_json=json.dumps(valid_dag()))
-        directory = self.library / "sweep"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(text, encoding="utf-8")
-        out = self.out_dir / "shared.MACHINE.md"
-        result = export_machine("sweep", out, repo_dir=None, user_dir=self.library)
-        self.assertEqual(result["source"], "library")
-        self.assertEqual(out.read_text(encoding="utf-8"), text)
-
-    def test_export_refuses_to_silently_overwrite_the_target(self) -> None:
-        # A fresh target only: an existing file refuses (overwrite=True is
-        # the explicit opt-in), so an export never clobbers a user file.
-        text = machine_file_text(description="A machine that sweeps.", spec_json=json.dumps(valid_dag()))
-        directory = self.library / "sweep"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(text, encoding="utf-8")
-        out = self.out_dir / "shared.MACHINE.md"
-        out.write_text("keep me", encoding="utf-8")
-        with self.assertRaises(ValueError) as raised:
-            export_machine("sweep", out, repo_dir=None, user_dir=self.library)
-        self.assertIn("already exists", str(raised.exception))
-        self.assertEqual(out.read_text(encoding="utf-8"), "keep me")
-        result = export_machine("sweep", out, repo_dir=None, user_dir=self.library, overwrite=True)
-        self.assertEqual(result["source"], "library")
-        self.assertEqual(out.read_text(encoding="utf-8"), text)
-
     def test_export_refuses_a_symlinked_target_without_following_it(self) -> None:
         # The no-overwrite path creates the file exclusively, so a symlink
         # planted at the target refuses instead of being followed and its
         # victim keeps its bytes.
-        text = machine_file_text(description="A machine that sweeps.", spec_json=json.dumps(valid_dag()))
-        directory = self.library / "sweep"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(text, encoding="utf-8")
+        self.harness.create_factory("Sweep", "A machine that sweeps.", id="sweep", dag=valid_dag())
         victim = self.out_dir / "victim.txt"
         victim.write_text("keep me", encoding="utf-8")
         link = self.out_dir / "link.MACHINE.md"
         link.symlink_to(victim)
         with self.assertRaises(ValueError) as raised:
-            export_machine("sweep", link, repo_dir=None, user_dir=self.library)
+            export_machine("sweep", link)
         self.assertIn("already exists", str(raised.exception))
         self.assertEqual(victim.read_text(encoding="utf-8"), "keep me")
         self.assertTrue(link.is_symlink())
@@ -9086,19 +10006,18 @@ class ExportMachineTest(unittest.TestCase):
     def test_exports_a_stored_entry_spec_byte_pretty(self) -> None:
         self.harness.create_factory("Sweep", "A machine that sweeps.", id="sweep", dag=valid_dag())
         out = self.out_dir / "sweep.MACHINE.md"
-        result = export_machine("sweep", out, repo_dir=None, user_dir=self.library)
+        result = export_machine("sweep", out)
         self.assertEqual(result["source"], "spec")
-        machine, errors = parse_machine_file(out.read_text(encoding="utf-8"), source=str(out))
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.name, "sweep")
-        self.assertEqual(validate_factory_spec(machine.spec), [])
-        self.assertEqual(canonicalize_factory_spec(machine.spec), canonicalize_factory_spec(valid_dag()))
+        text = out.read_text(encoding="utf-8")
+        self.assertIn("name: sweep\n", text)
+        spec = rendered_spec(text)
+        self.assertEqual(validate_factory_spec(spec), [])
+        self.assertEqual(canonicalize_factory_spec(spec), canonicalize_factory_spec(valid_dag()))
 
     def test_entry_ids_that_are_not_machine_names_are_rejected(self) -> None:
         self.harness.create_factory("Sweep", "A machine that sweeps.", id="Sweep Entry", dag=valid_dag())
         with self.assertRaises(ValueError) as ctx:
-            export_machine("Sweep Entry", self.out_dir / "x.MACHINE.md", repo_dir=None, user_dir=self.library)
+            export_machine("Sweep Entry", self.out_dir / "x.MACHINE.md")
         self.assertIn("invalid characters", str(ctx.exception))
 
     def test_exports_a_runs_canonical_machine(self) -> None:
@@ -9109,37 +10028,26 @@ class ExportMachineTest(unittest.TestCase):
         self.executor._runs[run.run_id] = run
         self.assertEqual(run.machine, canonicalize_factory_spec(valid_machine()))
         out = self.out_dir / "run-machine.MACHINE.md"
-        result = export_machine(run.run_id, out, repo_dir=None, user_dir=self.library)
+        result = export_machine(run.run_id, out)
         self.assertEqual(result["source"], "spec")
-        machine, errors = parse_machine_file(out.read_text(encoding="utf-8"), source=str(out))
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.spec, canonicalize_factory_spec(valid_machine()))
+        self.assertEqual(
+            rendered_spec(out.read_text(encoding="utf-8")), canonicalize_factory_spec(valid_machine())
+        )
 
     def test_unknown_targets_list_every_source(self) -> None:
         with self.assertRaises(ValueError) as ctx:
-            export_machine("ghost", self.out_dir / "ghost.MACHINE.md", repo_dir=None, user_dir=self.library)
-        self.assertIn("unknown machine 'ghost'", str(ctx.exception))
-
-    def test_out_path_must_not_be_a_directory(self) -> None:
-        directory = self.library / "sweep"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(
-            machine_file_text(description="A machine that sweeps."), encoding="utf-8"
-        )
-        with self.assertRaises(ValueError) as ctx:
-            export_machine("sweep", self.out_dir, repo_dir=None, user_dir=self.library)
-        self.assertIn("is a directory", str(ctx.exception))
+            export_machine("ghost", self.out_dir / "ghost.MACHINE.md")
+        self.assertIn("no stored factory entry or live run 'ghost'", str(ctx.exception))
 
     def test_export_rejects_invalid_specs(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             export_factory_spec(
-                {"run": {"max_parallel": None}, "states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
+                {"run": {"failure_policy": "sometimes"}, "states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
                 self.out_dir / "bad.MACHINE.md",
                 name="sweep",
                 description="A machine that sweeps.",
             )
-        self.assertIn("max_parallel must be an integer between 1 and 64", str(ctx.exception))
+        self.assertIn("run failure_policy must be one of", str(ctx.exception))
         self.assertFalse((self.out_dir / "bad.MACHINE.md").exists())
 
 
@@ -9181,13 +10089,17 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def store_machine_file(self, name: str, spec: dict[str, Any]) -> Path:
-        directory = self.library / name
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / "MACHINE.md"
-        path.write_text(
-            machine_file_text(name=name, description="A machine that sweeps.", spec_json=json.dumps(spec)),
-            encoding="utf-8",
-        )
+        """Script the host's library scan: ``factory.compile`` by name
+        answers this MACHINE.md machine."""
+        path = self.library / name / "MACHINE.md"
+        self.host.compiled[name] = {
+            "name": name,
+            "description": "A machine that sweeps.",
+            "version": "1",
+            "author": "Tester",
+            "spec": spec,
+            "path": str(path),
+        }
         return path
 
     @async_test
@@ -9216,6 +10128,7 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.assertEqual(status["state"], "done")
         self.assertEqual(status["spec_id"], "sweep")
         self.assertEqual(len(self.host.calls_of("rlm.run")), 2)
+        self.assertEqual(self.host.calls_of("factory.compile"), [{"name": "sweep", "params": {}}])
 
     @async_test
     async def test_stored_entries_win_over_library_machines(self) -> None:
@@ -9235,6 +10148,15 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.assertEqual(sorted(result["started"]), ["entry-a", "entry-b"])
 
     @async_test
+    async def test_a_stored_entry_id_that_looks_like_a_path_still_runs(self) -> None:
+        self.harness.create_factory(
+            "Team review", "A stored instance.", id="team/review",
+            dag={"nodes": [{"id": "only", "subagent": "worker"}]},
+        )
+        result = await rlm_module.rlm.factory.run("team/review")
+        self.assertEqual(result["started"], ["only"])
+
+    @async_test
     async def test_unknown_names_report_the_library(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown factory spec 'missing-spec'"):
             await rlm_module.rlm.factory.run("missing-spec")
@@ -9242,120 +10164,7 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
             await rlm_module.rlm.factory.run("missing-spec")
         except ValueError as error:
             self.assertIn("no stored factory entry", str(error))
-            self.assertIn("no library machine with that name", str(error))
-
-    @async_test
-    async def test_an_invalid_name_still_reports_the_unknown_spec_frame(self) -> None:
-        # A stored-entry id that is not a legal machine name (spaces,
-        # capitals) can never resolve from the library: the lookup must
-        # not surface the bare name-rule sentence, losing the unknown-spec
-        # frame.
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("My Spec")
-        message = str(raised.exception)
-        self.assertIn("unknown factory spec 'My Spec'", message)
-        self.assertIn("not a valid machine name", message)
-        self.assertIn("lowercase a-z, 0-9, hyphens", message)
-        self.assertEqual(self.host.calls, [])
-
-    @async_test
-    async def test_a_broken_library_file_names_its_errors_not_a_missing_name(self) -> None:
-        # A file that exists but fails to parse reports the exact parse
-        # errors; it never pretends the name is unknown.
-        directory = self.library / "broken"
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "MACHINE.md").write_text(
-            "---\nname: broken\n---\n\n```machine-spec\n{}\n```\n", encoding="utf-8"
-        )
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("broken")
-        self.assertIn("exists but is broken", str(raised.exception))
-        self.assertIn("frontmatter description is required", str(raised.exception))
-        self.assertNotIn("no library machine with that name", str(raised.exception))
-        self.assertEqual(self.host.calls, [])
-
-    @async_test
-    async def test_a_spec_invalid_library_file_is_broken_not_a_late_rejection(self) -> None:
-        # A file that parses but carries a spec the write-time validator
-        # rejects is the exists-but-broken case at resolve time: the run
-        # refuses with the exact validator sentences naming the file,
-        # never a late canonicalize error after resolution, and nothing
-        # spawns.
-        path = self.store_machine_file("sweep", {"states": []})
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("sweep")
-        message = str(raised.exception)
-        self.assertIn("exists but is broken", message)
-        self.assertIn("factory machine must declare between 1 and 1024 states, got 0", message)
-        self.assertIn(str(path), message)
-        self.assertNotIn("no library machine with that name", message)
-        self.assertEqual(self.host.calls, [])
-
-    @async_test
-    async def test_an_invalid_repo_machine_never_shadows_a_valid_user_machine(self) -> None:
-        # Cursor's follow-up finding: the listing scan skips a spec-invalid
-        # repo machine so a valid user machine of the same name surfaces,
-        # but the run still raised exists-but-broken on the repo file —
-        # `factory list` advertised a machine the run refused. Run, resolve,
-        # and export share the listing's verdict, so the run serves the
-        # user machine the listing advertises; the invalid repo file never
-        # shadows it and never masquerades as usable.
-        self.store_machine_file("sweep", {"states": []})
-        agent_home = Path(os.environ["PRIME_AGENT_CODING_AGENT_DIR"])
-        user_file = agent_home / "machines" / "sweep" / "MACHINE.md"
-        user_file.parent.mkdir(parents=True)
-        user_file.write_text(
-            machine_file_text(
-                name="sweep",
-                description="The user machine.",
-                spec_json=json.dumps({"nodes": [{"id": "a", "subagent": "worker"}]}),
-            ),
-            encoding="utf-8",
-        )
-        listed = list_machines()
-        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
-        self.assertEqual(listed[0]["source"], "user")
-        result = await rlm_module.rlm.factory.run("sweep")
-        self.assertEqual(result["spec_id"], "sweep")
-        self.assertEqual(result["machine"], "sweep")
-        self.assertEqual(result["machine_path"], str(user_file))
-        self.assertEqual(result["started"], ["a"])
-        status = await self.settle(result)
-        self.assertEqual(status["state"], "done")
-        self.assertEqual(status["spec_id"], "sweep")
-
-    @async_test
-    async def test_a_non_utf8_library_file_is_broken_not_an_invalid_name(self) -> None:
-        # A machine file that exists but does not decode is a broken library
-        # file: the run reports it in the exists-but-broken frame, never as
-        # an invalid machine name (the name-rule arm must not swallow the
-        # decode error).
-        directory = self.library / "sweep"
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "MACHINE.md").write_bytes(b"\xff\xfe\xff not utf-8")
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("sweep")
-        message = str(raised.exception)
-        self.assertIn("exists but is broken", message)
-        self.assertIn("not valid UTF-8", message)
-        self.assertNotIn("not a valid machine name", message)
-        self.assertEqual(self.host.calls, [])
-
-    @async_test
-    async def test_one_corrupt_library_file_never_reframes_unknown_names(self) -> None:
-        # One non-decodable file skips in the listing scan like any broken
-        # file: an unrelated unknown name keeps the unknown-spec frame, never
-        # the name-rule arm the decode error would otherwise reach.
-        corrupt = self.library / "zz-corrupt"
-        corrupt.mkdir(parents=True, exist_ok=True)
-        (corrupt / "MACHINE.md").write_bytes(b"\xff\xfe")
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("missing-spec")
-        message = str(raised.exception)
-        self.assertIn("unknown factory spec 'missing-spec'", message)
-        self.assertIn("no library machine with that name", message)
-        self.assertNotIn("not a valid machine name", message)
-        self.assertEqual(self.host.calls, [])
+            self.assertIn("no library machine named 'missing-spec'", str(error))
 
     @async_test
     async def test_the_opt_in_gate_refuses_library_runs_while_disabled(self) -> None:
@@ -9418,191 +10227,2842 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.fail(f"run {run_id} never left the running state")
 
 
-# ---------------------------------------------------------------------------
-# The installed-runtime library: the wheel a kernel venv actually installs.
-# ---------------------------------------------------------------------------
 
-_INSTALLED_LIBRARY_RUNNER = r"""
-import asyncio
-import importlib
-import json
+class FactoryJoinLiveSourcesTest(_ExecutorTestCase):
+    """A join waits for every source's CURRENT round: no firing while a
+    source state has a live entry (the review-loop shape — one fresh
+    review plus stale siblings feeding the escalation)."""
 
 
-class ScriptedHost:
-    # Deterministic fake for the rlm host bridge: spawn registers a child,
-    # collect settles it with the review-sweep node's scripted answer.
-    def __init__(self):
-        self.children = {}
-        self.counter = 0
 
-    @staticmethod
-    def answer_for(name):
-        # The spawn labels are run-prefixed (run-scoped names), so the
-        # configured name matches anywhere in the label.
-        if "files-source" in name:
-            return "```json\n{\"files\": [\"sample.ts\"]}\n```"
-        if "file-reviewer" in name:
-            return "sample.ts: clean"
-        if "review-aggregator" in name:
-            return "```json\n{\"issues\": [], \"clean\": 1}\n```"
-        return "done"
+
+
+
+class FactoryClockRebaseTest(_ExecutorTestCase):
+    """A host reboot restarts the monotonic clock; the snapshot's wall+mono
+    pair rebases every stored time field so a pre-reboot deadline reads as
+    passed exactly when its wall-clock moment passed (probe D: the rebooted
+    executor must not wait out the old boot's uptime)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        artifact_temp = TemporaryDirectory()
+        self.addCleanup(artifact_temp.cleanup)
+        previous = os.environ.get("RLM_SESSION_DIR")
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("RLM_SESSION_DIR", None)
+            else:
+                os.environ["RLM_SESSION_DIR"] = previous
+
+        self.addCleanup(restore)
+        os.environ["RLM_SESSION_DIR"] = str(artifact_temp.name)
+
+    async def settle(self, run_result: dict[str, Any], *, max_polls: int = 50_000) -> dict[str, Any]:
+        run_id = run_result["run_id"]
+        for _ in range(max_polls):
+            run = self.executor._runs[run_id]
+            if run.state != "running":
+                return await rlm_module.rlm.factory.status(run_id)
+            await asyncio.sleep(0)
+        return await rlm_module.rlm.factory.status(run_id)
+
+    @async_test
+    async def test_a_join_waits_for_a_source_still_running_its_round(self) -> None:
+        # The probe-A machine: a fans out to b and c, the join [b, c]
+        # enters d, and d loops back to a. Two rounds total (a's
+        # max_entries 2).
+        self.store_machine(
+            {
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker", "max_entries": 2},
+                    {
+                        "id": "b", "subagent": "worker", "max_entries": 2,
+                        "outputs": [{"name": "out", "type": "text"}],
+                    },
+                    {
+                        "id": "c", "subagent": "worker", "max_entries": 2,
+                        "outputs": [{"name": "out", "type": "text"}],
+                    },
+                    {
+                        "id": "d", "subagent": "worker", "max_entries": 2,
+                        "inputs": [
+                            {"name": "rb", "type": "text", "from": "b.out"},
+                            {"name": "rc", "type": "text", "from": "c.out"},
+                        ],
+                    },
+                ],
+                "transitions": [
+                    {"from": "a", "to": "b"},
+                    {"from": "a", "to": "c"},
+                    {"from": ["b", "c"], "to": "d"},
+                    {"from": "d", "to": "a"},
+                ],
+            },
+            spec_id="joinlive",
+        )
+        # Round 2's c (child-7 by admission order) never settles until
+        # the test says so: the run stalls in round 2 with b settled and
+        # c live — exactly the window the join must not fire in.
+        self.host.outcomes["b"] = {"status": "done", "answer": "B-ROUND-2"}
+        self.host.outcomes["c"] = {"status": "done", "answer": "C-ROUND-1"}
+        self.host.child_outcomes["child-7"] = {"status": "running"}
+        result = await self.start("joinlive")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        # Wait for round 2's b to settle (the stall point: c live).
+        deadline = time.monotonic() + 30
+        while True:
+            b_entries = run.states["b"].entries
+            if len(b_entries) >= 2 and b_entries[1].status == "done":
+                break
+            assert time.monotonic() < deadline, "round 2's b never settled"
+            await asyncio.sleep(0)
+        # THE PIN: the join has NOT fired while c's round-2 entry runs —
+        # d stays at its single round-1 entry, and the run keeps running
+        # (the join waits for c, it does not bind c's stale round-1
+        # output).
+        self.assertEqual(len(self.host.spawn_calls("d")), 1)
+        self.assertEqual(run.state, "running")
+        # c's round-2 answer lands: NOW the join fires, once, with BOTH
+        # fresh round-2 outputs bound.
+        self.host.child_outcomes["child-7"] = {"status": "done", "answer": "C-ROUND-2"}
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("d")), 2)
+        d_calls = self.host.spawn_calls("d")
+        self.assertIn("B-ROUND-2", d_calls[1]["prompt"])
+        self.assertIn("C-ROUND-2", d_calls[1]["prompt"])
+        self.assertNotIn("C-ROUND-1", d_calls[1]["prompt"])
+
+    @async_test
+    async def test_a_rebooted_executor_rebases_pre_reboot_deadlines(self) -> None:
+        # A failing state with the escalate policy pauses the run: the
+        # snapshot persists (a terminal run retires its files).
+        self.store_machine(
+            {
+                "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+            },
+            spec_id="clock",
+        )
+        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
+        result = await self.start("clock")
+        run = self.executor._runs[result["run_id"]]
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        # The old boot's clock: 600s of real backoff remain (the deadline
+        # sits 600s past the snapshot's mono moment); snapshot; then the
+        # host reboots (the new clock starts at 50).
+        old_mono = self.executor._runs[result["run_id"]].revision  # noqa: F841 — read for clarity
+        run.admission_backoff_until = 1_600.0
+        run.revision += 1
+        self.executor._persist_run(run)
+        # The reboot: a NEW executor with a fresh clock at 50 (the fake
+        # clock's base is 1000; the wall walked ~0 since the snapshot, so
+        # the deadline's real remaining is ~600s).
+        rebooted = FactoryExecutor(now=FakeClock(50.0), sleep=self.sleeps, harness=self.harness)
+        rebooted.rehydrate_registry()
+        run_id = result["run_id"]
+        rebased = rebooted._runs[run_id]
+        self.assertIsNotNone(rebased)
+        self.assertIsNotNone(rebased.admission_backoff_until)
+        # THE PIN: the rebased deadline carries its REAL remaining time
+        # (~600s past the new clock's 50), not the old boot's uptime (the
+        # un-rebased deadline would read ~1,550s out — the old base).
+        self.assertLess(
+            (rebased.admission_backoff_until or 0) - 50.0,
+            700.0,
+            f"the deadline was not rebased onto the new clock: {rebased.admission_backoff_until}",
+        )
+
+
+
+
+class FactoryBudgetActiveTimeTest(_ExecutorTestCase):
+    """The run budget excludes paused time; the state budget measures the
+    child's OWN run time (probes B and C: the owner's decision latency and
+    a pause window must not throw away finished work or spend the budget)."""
+
+    async def settle(self, run_result: dict[str, Any], *, max_polls: int = 50_000) -> dict[str, Any]:
+        run_id = run_result["run_id"]
+        for _ in range(max_polls):
+            run = self.executor._runs[run_id]
+            if run.state != "running":
+                return await rlm_module.rlm.factory.status(run_id)
+            await asyncio.sleep(0)
+        return await rlm_module.rlm.factory.status(run_id)
+
+    @async_test
+    async def test_a_resume_after_a_long_pause_does_not_re_pause_on_the_budget(self) -> None:
+        # Probe B: the run budget (60s) must not count the 2 hours the run
+        # sat paused waiting for the owner.
+        self.store_machine(
+            {
+                "run": {"budget_ms": 60_000},
+                "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+            },
+            spec_id="budgetpause",
+        )
+        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
+        result = await self.start("budgetpause")
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        # The owner waits 2 hours.
+        self.clock.advance(7_200.0)
+        resumed = await rlm_module.rlm.factory.resume(result["run_id"])
+        self.assertEqual(
+            resumed["state"],
+            "running",
+            f"the resume re-paused on the budget: {resumed}",
+        )
+        # The fold: the 2-hour pause landed in paused_ms and the open
+        # marker cleared — so post-resume time counts as ACTIVE again.
+        # Without the fold the open marker would exclude every later
+        # second and the budget could never fire again.
+        run = self.executor._runs[result["run_id"]]
+        self.assertIsNone(run.pause_started_at)
+        self.assertGreater(run.paused_ms, 7_000_000.0)
+
+    @async_test
+    async def test_unverified_task_activity_pause_excludes_time_from_run_budget(self) -> None:
+        self.store_machine(
+            {
+                "run": {"budget_ms": 60_000},
+                "states": [
+                    {
+                        "id": "design",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "design", "type": "text"}],
+                    }
+                ],
+            },
+            spec_id="budgetunverified",
+        )
+        self.host.emitted["design"] = {"design": "the design"}
+        self.host.outcomes["design"] = {"status": "done", "factory_task_busy": False}
+
+        def lose_task_observation(payload: dict[str, Any]) -> None:
+            self.host.outcomes["design"]["factory_task_busy"] = None
+
+        self.host.on_message = lose_task_observation
+        started = await self.start("budgetunverified")
+        status = await self.settle(started)
+        self.assertEqual(status["state"], "paused")
+
+        run = self.executor._runs[started["run_id"]]
+        self.assertIsNotNone(run.pause_started_at)
+        active_before_pause = self.executor._run_budget_active_ms(run)
+        self.clock.advance(7_200.0)
+        self.assertEqual(self.executor._run_budget_active_ms(run), active_before_pause)
+        self.assertFalse(self.executor._run_budget_exceeded(run))
+
+    @async_test
+    async def test_a_finished_child_keeps_its_work_after_a_long_pause(self) -> None:
+        # Probe C: a fails (escalate pause) while b (budget 1h) is still
+        # in flight; b finishes in 20 minutes of its OWN run time; the
+        # owner resumes 2 hours later. b's done settle must NOT be thrown
+        # away by a wall reading that includes the pause.
+        self.store_machine(
+            {
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "b",
+                        "entry": True,
+                        "subagent": "worker",
+                        "budget_ms": 3_600_000,
+                        "outputs": [{"name": "y", "type": "text"}],
+                    },
+                ],
+            },
+            spec_id="budgetwork",
+        )
+        # a errors immediately (the escalate pause lands) while b is still
+        # running its review; the owner resumes 2 hours later and b
+        # finishes 20 minutes later — its own duration — but 2h20m on the
+        # wall.
+        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
+        self.host.outcomes["b"] = {"status": "running"}
+        result = await self.start("budgetwork")
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        self.clock.advance(7_200.0)
+        # Post-resume: a's re-admission succeeds, b finishes with 20
+        # minutes of its OWN run time.
+        self.host.outcomes["a"] = {"status": "done", "answer": "fine"}
+        self.host.outcomes["b"] = {"status": "done", "answer": "done", "duration_ms": 1_200_000}
+        resumed = await rlm_module.rlm.factory.resume(result["run_id"])
+        status = await self.settle(result)
+        # b's entry: done, output captured, never budget-rejected.
+        run = self.executor._runs[result["run_id"]]
+        b_entry = run.states["b"].entries[0]
+        self.assertEqual(
+            b_entry.status,
+            "done",
+            f"b's finished work was thrown away: {b_entry.error}",
+        )
+        self.assertEqual(b_entry.outputs, {"y": "done"})
+
+
+
+
+class FactoryBootRearmTest(_ExecutorTestCase):
+    """Persisted runs re-arm at KERNEL BOOT, not at the first factory call
+    (probe I: after a restart with no factory call, the run sat frozen and
+    the children settled uncollected)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        artifact_temp = TemporaryDirectory()
+        self.addCleanup(artifact_temp.cleanup)
+        previous = os.environ.get("RLM_SESSION_DIR")
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("RLM_SESSION_DIR", None)
+            else:
+                os.environ["RLM_SESSION_DIR"] = previous
+
+        self.addCleanup(restore)
+        os.environ["RLM_SESSION_DIR"] = str(artifact_temp.name)
+
+    @async_test
+    async def test_persisted_runs_rearm_at_boot_without_a_factory_call(self) -> None:
+        self.store_machine(
+            {
+                "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+            },
+            spec_id="bootarm",
+        )
+        # Executor A starts the run; the child is held running.
+        self.host.outcomes["a"] = {"status": "running"}
+        result = await self.start("bootarm")
+        run_id = result["run_id"]
+        old = self.executor._runs[run_id]
+        # Wait for the admission, then "restart the kernel": the old loop
+        # task dies, the snapshot holds a running child.
+        deadline = time.monotonic() + 30
+        while not old.states["a"].entries[0].instances:
+            assert time.monotonic() < deadline, "the child never admitted"
+            await asyncio.sleep(0)
+        old.task.cancel()
+        self.executor._persist_run(old)
+        # The new kernel: a FRESH executor (the module import shape) with
+        # no factory call made — the boot arm alone re-arms the run.
+        previous = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = None
+        try:
+            self.assertTrue(
+                factory_module.boot_arm_persisted_runs(),
+                "the boot arm did not schedule (no snapshots?)",
+            )
+            boot_task = factory_module._BOOT_ARM_TASK
+            self.assertIsNotNone(boot_task)
+            await boot_task
+            restarted = factory_module.default_factory_executor()
+            self.assertIn(run_id, restarted._runs)
+            self.assertIsNotNone(restarted._runs[run_id].task)
+            # The child (still settled-done under the fake host) is
+            # collected by the re-armed loop alone: the run completes with
+            # no factory API call.
+            self.host.outcomes["a"] = {"status": "done", "answer": "done"}
+            await restarted._runs[run_id].task
+            status = await rlm_module.rlm.factory.status(run_id)
+            self.assertEqual(status["state"], "done")
+        finally:
+            factory_module._DEFAULT_EXECUTOR = previous
+            factory_module._BOOT_ARM_TASK = None
+
+    @async_test
+    async def test_a_graceful_kernel_teardown_leaves_an_in_flight_run_rearmable(self) -> None:
+        # The shutdown inversion: a graceful daemon shutdown closes the
+        # host bridge while a run is in flight, and the control loop's
+        # except arm used to write state "failed" — the boot arm then
+        # skipped the run at the next kernel boot, while a hard SIGKILL
+        # (which writes nothing) left the run re-armable. Graceful
+        # shutdown must never be worse than a kill: teardown-time bridge
+        # loss keeps the run nonterminal and the boot arm re-arms it.
+        self.store_machine(
+            {
+                "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+            },
+            spec_id="teardown",
+        )
+        self.host.outcomes["a"] = {"status": "running"}
+        result = await self.start("teardown")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while not run.states["a"].entries[0].instances:
+            assert time.monotonic() < deadline, "the child never admitted"
+            await asyncio.sleep(0)
+        # The graceful shutdown's shape: the kernel's teardown flag is
+        # already set (its shutdown path sets it before the bridge goes),
+        # then the bridge raises inside the loop — the RuntimeError a
+        # closed bridge produces on every host request.
+        async def closed_bridge(*_args, **_kwargs):
+            raise RuntimeError(
+                "host connection closed; host_request cannot be answered"
+            )
+
+        with patch.object(repl_module, "_host_closed", True), patch.object(
+            rlm_module, "host_request", closed_bridge
+        ):
+            await self.wait_until(
+                lambda: any(
+                    event["kind"] == "executor_error" for event in run.events
+                )
+            )
+        # The interruption is evidence, not a verdict: no failed write.
+        self.assertEqual(run.state, "running")
+        errors = [event for event in run.events if event["kind"] == "executor_error"]
+        self.assertEqual(len(errors), 1)
+        # The kill-restart control's outcome on the graceful path: the
+        # persisted run re-arms at the next kernel boot.
+        run.task.cancel()
+        self.executor._persist_run(run)
+        previous = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = None
+        factory_module._BOOT_ARM_TASK = None
+        try:
+            self.assertTrue(factory_module.boot_arm_persisted_runs())
+            await factory_module._BOOT_ARM_TASK
+            restarted = factory_module.default_factory_executor()
+            self.assertIn(run_id, restarted._runs)
+            self.assertIsNotNone(
+                restarted._runs[run_id].task,
+                "the teardown-time loss must re-arm like a kill",
+            )
+        finally:
+            factory_module._DEFAULT_EXECUTOR = previous
+            factory_module._BOOT_ARM_TASK = None
+
+    @async_test
+    async def test_a_teardown_time_loss_never_neuters_an_explicit_stop(self) -> None:
+        # The paired control: the teardown branch only declines the
+        # INVARIANT write; an explicit stop() still owns its terminal
+        # state after a teardown-time bridge loss.
+        self.store_machine(
+            {
+                "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+            },
+            spec_id="teardown-stop",
+        )
+        self.host.outcomes["a"] = {"status": "running"}
+        result = await self.start("teardown-stop")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while not run.states["a"].entries[0].instances:
+            assert time.monotonic() < deadline, "the child never admitted"
+            await asyncio.sleep(0)
+
+        async def closed_bridge(*_args, **_kwargs):
+            raise RuntimeError(
+                "host connection closed; host_request cannot be answered"
+            )
+
+        with patch.object(repl_module, "_host_closed", True), patch.object(
+            rlm_module, "host_request", closed_bridge
+        ):
+            await self.wait_until(
+                lambda: any(
+                    event["kind"] == "executor_error" for event in run.events
+                )
+            )
+        stopped = await rlm_module.rlm.factory.stop(run_id)
+        self.assertEqual(stopped["state"], "stopped")
+
+
+class FactoryAdmissionIntentTest(_ExecutorTestCase):
+    """The journal's retry admission REPLACES the snapshot's failed attempt
+    (probe E), and a mid-spawn kernel death's intent line names a child the
+    rehydrate deletes before the re-admission (probe F) - no orphaned child,
+    no name-collision pause."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        artifact_temp = TemporaryDirectory()
+        self.addCleanup(artifact_temp.cleanup)
+        previous = os.environ.get("RLM_SESSION_DIR")
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("RLM_SESSION_DIR", None)
+            else:
+                os.environ["RLM_SESSION_DIR"] = previous
+
+        self.addCleanup(restore)
+        os.environ["RLM_SESSION_DIR"] = str(artifact_temp.name)
+
+    @async_test
+    async def test_a_retry_admission_replaces_the_snapshots_failed_attempt(self) -> None:
+        # Probe E: attempt 1's child is in the snapshot (it failed); the
+        # retry's admission (child-2, attempt 2) lands inside the persist
+        # throttle - the journal holds it, the snapshot does not.
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [{"id": "a", "entry": True, "subagent": "worker", "retries": 1}],
+            },
+            spec_id="retryadmit",
+        )
+        # Attempt 1: the child fails; the retry's spawn is GATED so the
+        # instance sits pending at attempt 1 while the snapshot is written
+        # (the snapshot predates the retry). Releasing the gate lets the
+        # retry admit (attempt 2, child-2, running) with only its
+        # journal line carrying it.
+        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
+        retry_gate = self.host.gate("rlm.run", 2)
+        result = await self.start("retryadmit")
+        run = self.executor._runs[result["run_id"]]
+        await self.host.gate_entered("rlm.run", 2).wait()
+        instance = run.states["a"].entries[0].instances[0]
+        self.assertEqual(instance.status, "pending")
+        # `_admit` increments the attempt before the spawn: the gated
+        # retry already carries attempt 2, still holding the failed
+        # attempt's child id.
+        self.assertEqual(instance.attempt, 2)
+        self.executor._persist_run(run)
+        retry_gate.set()
+        deadline = time.monotonic() + 30
+        while True:
+            instance = run.states["a"].entries[0].instances[0]
+            if instance.status == "running" and instance.attempt == 2:
+                break
+            assert time.monotonic() < deadline, "the retry never admitted"
+            await asyncio.sleep(0)
+        run.task.cancel()
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        instance = restarted._runs[result["run_id"]].states["a"].entries[0].instances[0]
+        self.assertEqual(instance.attempt, 2)
+        self.assertEqual(instance.child_id, "child-2")
+        self.assertEqual(instance.status, "running")
+
+    @async_test
+    async def test_a_mid_spawn_death_orphan_is_deleted_before_the_readmission(self) -> None:
+        # Probe F: an admitting intent line with no admission names a child
+        # the supervisor created while the kernel died before the reply.
+        # The rehydrate deletes it; the re-admission does not collide.
+        self.store_machine(
+            {
+                "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+            },
+            spec_id="midspawn",
+        )
+        self.host.outcomes["a"] = {"status": "running"}
+        result = await self.start("midspawn")
+        run = self.executor._runs[result["run_id"]]
+        deadline = time.monotonic() + 30
+        while not run.states["a"].entries[0].instances:
+            assert time.monotonic() < deadline, "the child never admitted"
+            await asyncio.sleep(0)
+        # The child admitted (the intent + the admission lines both
+        # journaled). Now simulate the mid-spawn death SHAPE: rewrite the
+        # journal with an intent line whose admission never landed.
+        import json as _json
+
+        from rlm.factory import ADMISSIONS_JOURNAL_SUFFIX, _runs_dir
+
+        directory = _runs_dir()
+        journal = directory / f"{result['run_id']}{ADMISSIONS_JOURNAL_SUFFIX}"
+        # Keep the batch line + the intent, DROP the admission line: the
+        # death-before-reply shape.
+        rows = [_json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
+        kept = [row for row in rows if row.get("kind") != "admission"]
+        kept.append(
+            {
+                "kind": "admitting",
+                "state": "a",
+                "entry": 0,
+                "index": 0,
+                "attempt": 2,
+                "label": "sw-midspawn-child-99",
+            }
+        )
+        # A live child carrying that label (the supervisor created it).
+        self.host.children["child-99"] = {"name": "sw-midspawn-child-99", "node": "a"}
+        run.task.cancel()
+        # The snapshot FIRST (the persist absorbs the journal), then the
+        # orphan intent rides a fresh journal — the death-before-reply
+        # shape: the snapshot predates the intent, the admission never
+        # landed.
+        self.executor._persist_run(run)
+        journal.write_text("\n".join(_json.dumps(row) for row in kept))
+        # The fresh kernel: the resolver deletes the orphan before the
+        # re-admission can collide with its name.
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        previous = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = restarted
+        try:
+            await restarted.arm_persisted_runs()
+            self.assertNotIn("child-99", self.host.children, "the orphan was not deleted")
+            events = await rlm_module.rlm.factory.status(result["run_id"])
+        finally:
+            factory_module._DEFAULT_EXECUTOR = previous
+        kinds = [e["kind"] for e in events["events"]]
+        self.assertIn("orphan_reclaimed", kinds)
+
+class PerAttemptHost(FakeHost):
+    """Every child's collect answer carries its attempt number, so stale
+    round-1 bindings are distinguishable from fresh round-2 ones."""
+
+    async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if request_type == "rlm.collect":
+            for target in (payload or {}).get("targets", []):
+                child = self.children.get(target)
+                if child is None:
+                    continue
+                suffix = child["name"].split("-", 1)[1]
+                node = _node_of_name(child["name"])
+                self.child_outcomes.setdefault(
+                    target, {"status": "done", "answer": f"answer-{node}+{suffix}"}
+                )
+        return await super().__call__(request_type, payload)
+
+
+class FactoryJoinQueuedArrivalTest(_ExecutorTestCase):
+    """Round-1 probe A3: a join source fed by TWO upstreams. In one
+    collect batch the second source settles before the arrival state,
+    so the join sees the source with no LIVE entry but a QUEUED
+    arrival — it must wait for the arrival's own round, not bind the
+    previous round's stale outputs."""
+
+    @async_test
+    async def test_a_join_waits_for_a_queued_arrival_into_its_source(self) -> None:
+        # The A3 machine: a join source (b) fed by TWO upstreams - the
+        # cycle's own a->z->b leg. In one collect batch c#2 settles
+        # before z#2 (the state that refreshes b), so the join sees b
+        # with no LIVE entry but a QUEUED arrival.
+        self.host = PerAttemptHost(clock=self.clock)
+        patcher = patch.object(rlm_module, "host_request", self.host)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.store_machine(
+            {
+                # state order matters: c before z, so one collect batch
+                # queues c's settle ahead of z's.
+                "states": [
+                    state("a", entry=True, max_entries=4),
+                    state("c", max_entries=4, outputs=[{"name": "answer", "type": "text"}]),
+                    state("z", max_entries=4),
+                    state("b", max_entries=4, outputs=[{"name": "answer", "type": "text"}]),
+                    state(
+                        "j",
+                        max_entries=4,
+                        inputs=[
+                            {"name": "rb", "type": "text", "from": "b.answer"},
+                            {"name": "rc", "type": "text", "from": "c.answer"},
+                        ],
+                    ),
+                ],
+                "transitions": [
+                    {"from": "a", "to": "c"},
+                    {"from": "a", "to": "z"},
+                    {"from": "z", "to": "b"},
+                    {"from": ["b", "c"], "to": "j"},
+                    {"from": "j", "to": "a"},
+                ],
+            },
+        )
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state in ("done", "failed", "paused", "stopped"):
+                break
+            assert time.monotonic() < deadline, f"the run never settled: {await rlm_module.rlm.factory.status(result['run_id'])}"
+            await asyncio.sleep(0)
+        j_spawns = self.host.spawn_calls("j")
+        # ONE j entry per round, every rb binding FRESH (the attempt
+        # suffix of the b child that round), never a stale round-1
+        # binding ahead of the fresh one.
+        for call in j_spawns:
+            body = call["prompt"]
+            rc_binding = re.findall(r"rc: (answer-c\+[^\n\s]+)", body)
+            self.assertTrue(rc_binding, f"a j entry must bind rc: {body[:200]}")
+            attempt = rc_binding[0].rsplit("-i", 1)[-1]
+            rb_binding = re.findall(r"rb: (answer-b\+[^\n\s]+)", body)
+            self.assertTrue(rb_binding, f"a j entry must bind rb: {body[:200]}")
+            self.assertEqual(
+                rb_binding[0].rsplit("-i", 1)[-1],
+                attempt,
+                f"rb must be round-{attempt}'s b answer (the queued arrival waited): {body[:200]}",
+            )
+
+
+def _instance_index(name: str) -> int:
+    m = re.search(r"-i(\d+)(?:-a\d+)?$", name)
+    return int(m.group(1)) if m else 0
+
+
+class GuardedSettlesHost(FakeHost):
+    """Per-instance tagged answers, a scripted z answer, and per-(node,
+    instance) first-collect delays, so one collect batch can split one
+    state's settle from another's (round-2 probe Q1's timing)."""
+
+    def __init__(self, clock=None, delays=None, z_answer="stay"):
+        super().__init__(clock=clock)
+        self.delays = dict(delays or {})
+        self.seen_collects = {}
+        self.z_answer = z_answer
 
     async def __call__(self, request_type, payload=None):
         payload = payload or {}
-        if request_type == "rlm.run":
-            self.counter += 1
-            child_id = f"child-{self.counter}"
-            name = payload["kwargs"]["name"]
-            self.children[child_id] = name
-            return {
-                "rlm_child_id": child_id,
-                "name": name,
-                "session_dir": f"/tmp/{child_id}",
-                "model": "test/worker",
-            }
         if request_type == "rlm.collect":
-            results = []
-            for target in payload["targets"]:
-                name = self.children.get(target)
-                if name is None:
+            for target in payload.get("targets", []):
+                child = self.children.get(target)
+                if child is None:
                     continue
-                results.append({
-                    "rlm_child_id": target,
-                    "session_name": name,
-                    "session_dir": f"/tmp/{target}",
-                    "status": "done",
-                    "settled": True,
-                    "answer_preview": self.answer_for(name),
-                    "tool_use_count": 1,
-                    "duration_ms": 5,
-                })
-            return {"results": results}
-        if request_type == "rlm.delete_subagent":
-            self.children.pop(payload["target"], None)
-            return {"outcome": "deleted"}
-        return {}
+                node = child["node"]
+                inst = _instance_index(child["name"])
+                n = self.seen_collects.get(target, 0)
+                if (node, inst) in self.delays and n < self.delays[(node, inst)]:
+                    self.seen_collects[target] = n + 1
+                    self.child_outcomes[target] = {"status": "running"}
+                elif node == "z":
+                    fence = "```json\n" + json.dumps({"reentry": self.z_answer}) + "\n```"
+                    self.child_outcomes[target] = {"status": "done", "answer": fence}
+                else:
+                    self.child_outcomes[target] = {
+                        "status": "done",
+                        "answer": "answer-" + node + "-i" + str(inst),
+                    }
+        return await super().__call__(request_type, payload)
 
 
-async def main():
-    import rlm as rlm_module
-    from rlm.factory import FactoryExecutor
+class FactoryJoinDeferredTest(_ExecutorTestCase):
+    """Round-2 probe Q1: a queued-arrival hold DEFERS, it does not skip.
+    The promise may never land (the guard fails, the target sits at
+    max_entries, a feeding join cannot complete) — the join re-runs once
+    the queue drains, so the machine runs its full rounds instead of
+    silently finalizing early."""
 
-    factory_module = importlib.import_module("rlm.factory")
+    def _install(self, host):
+        self.host = host
+        patcher = patch.object(rlm_module, "host_request", self.host)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    rlm_module.host_request = ScriptedHost()
+    async def _drive(self, run, settle_limit=25.0):
+        deadline = time.monotonic() + settle_limit
+        while True:
+            if run.state in ("done", "failed", "paused", "stopped"):
+                break
+            assert time.monotonic() < deadline, "the run never settled"
+            await asyncio.sleep(0)
+        return run.state
 
-    async def instant_sleep(_seconds):
-        await asyncio.sleep(0)
+    def _guarded_machine(self) -> dict:
+        return {
+            "states": [
+                state("a", entry=True, max_entries=8),
+                state("c", max_entries=8, outputs=[{"name": "answer", "type": "text"}]),
+                state("z", max_entries=8, outputs=[{"name": "reentry", "type": "json"}]),
+                state("b", max_entries=8, outputs=[{"name": "answer", "type": "text"}]),
+                state(
+                    "j",
+                    max_entries=8,
+                    inputs=[
+                        {"name": "rb", "type": "text", "from": "b.answer"},
+                        {"name": "rc", "type": "text", "from": "c.answer"},
+                    ],
+                ),
+            ],
+            "transitions": [
+                {"from": "a", "to": "c"},
+                {"from": "a", "to": "b"},
+                {"from": "b", "to": "z"},
+                {"from": "z", "to": "b", "when": {"output": "reentry", "op": "eq", "value": "go"}},
+                {"from": ["b", "c"], "to": "j"},
+                {"from": "j", "to": "a"},
+            ],
+        }
 
-    factory_module._DEFAULT_EXECUTOR = FactoryExecutor(sleep=instant_sleep)
-    factory = rlm_module.rlm.factory
-    result = await factory.run("review-sweep")
-    status = None
-    for _ in range(500):
-        status = await factory.status(result["run_id"])
-        if status["state"] != "running":
-            break
-        await asyncio.sleep(0.02)
-    print(json.dumps({
-        "state": status["state"],
-        "spec_id": result["spec_id"],
-        "machine": result["machine"],
-        "machine_path": result["machine_path"],
-        "nodes": sorted(node["id"] for node in status["nodes"]),
-        "events": status["events"][-8:],
-    }))
+
+    @async_test
+    async def test_a_pause_after_a_defer_still_escalates(self) -> None:
+        # Round-3 probe R3B: c's round-2 settle defers the join (z's
+        # queued settle promises z->b), then c->d's fire hits the
+        # max_transitions cap and pauses the pass. The deferred hold is
+        # no longer call-local: the resume re-collects it at the next
+        # pass's drain, so the join still fires and the machine runs its
+        # full rounds (the resume's replay of the paused settle starts
+        # at c->d's position — PAST the join — so the stash is the join's
+        # only re-entry).
+        self._install(GuardedSettlesHost(clock=self.clock, delays={("c", 1): 1}, z_answer="stay"))
+        machine = self._guarded_machine()
+        # c's settle list gains a second transition AFTER the join, so a
+        # defer at the join leaves it to fire in the same main pass.
+        machine["states"].append(
+            {"id": "d", "subagent": "worker", "max_entries": 8,
+             "outputs": [{"name": "answer", "type": "text"}]}
+        )
+        machine["transitions"].insert(5, {"from": "c", "to": "d"})
+        machine["run"] = {"max_transitions": 9}
+        self.store_machine(machine)
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        pauses = 0
+        state = await self._drive(run)
+        while state == "paused" and pauses < 4:
+            pauses += 1
+            await rlm_module.rlm.factory.resume(result["run_id"])
+            state = await self._drive(run)
+        # THE PIN: the full 8 rounds ran (the join fired every round —
+        # including the round whose defer straddled the pause).
+        self.assertEqual(state, "done")
+        self.assertEqual(len(run.states["a"].entries), 8)
+        self.assertEqual(len(self.host.spawn_calls("j")), 8)
+
+    @async_test
+    async def test_a_guard_that_never_passes_does_not_strand_the_join(self) -> None:
+        # z always answers reentry: "stay", so z->b never fires — but the
+        # queued z settle still "promises" an arrival into b at scan time.
+        # c's round-2 settle shares a batch with z's (c first via the
+        # one-collect delay), the exact probe-Q1 timing.
+        self._install(GuardedSettlesHost(clock=self.clock, delays={("c", 1): 1}, z_answer="stay"))
+        self.store_machine(self._guarded_machine())
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        final = await self._drive(run)
+        # THE PIN: the machine runs its FULL 8 rounds — the join fires
+        # every round with fresh bindings (the deferred hold re-runs after
+        # the queue drains; the dead promise does not strand it).
+        self.assertEqual(final, "done")
+        self.assertEqual(len(run.states["a"].entries), 8)
+        j_prompts = [c.get("prompt", "") for c in self.host.spawn_calls("j")]
+        self.assertEqual(len(j_prompts), 8)
+        for prompt in j_prompts:
+            rb = re.findall(r"rb: (answer-b-\S+)", prompt)
+            rc = re.findall(r"rc: (answer-c-\S+)", prompt)
+            self.assertTrue(rb and rc, f"a j entry must bind both sources: {prompt[:200]}")
+            self.assertEqual(rb[0][-2:], rc[0][-2:], f"rb and rc must be the same round: {prompt[:200]}")
+
+    @async_test
+    async def test_a_passing_guard_arrival_still_waits_for_the_fresh_source(self) -> None:
+        # The control: z answers reentry: "go" — the arrival really fires,
+        # b re-enters, and the join waits for the FRESH b round (the live
+        # rule; the defer must not weaken it).
+        self._install(GuardedSettlesHost(clock=self.clock, delays={("c", 1): 1}, z_answer="go"))
+        self.store_machine(self._guarded_machine())
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        final = await self._drive(run)
+        self.assertEqual(final, "done")
+        self.assertEqual(len(run.states["a"].entries), 8)
+        j_prompts = [c.get("prompt", "") for c in self.host.spawn_calls("j")]
+        self.assertEqual(len(j_prompts), 8)
+        for prompt in j_prompts:
+            rb = re.findall(r"rb: (answer-b-\S+)", prompt)
+            rc = re.findall(r"rc: (answer-c-\S+)", prompt)
+            self.assertTrue(rb and rc, f"a j entry must bind both sources: {prompt[:200]}")
 
 
-asyncio.run(main())
-"""
-
-
-class InstalledRuntimeLibraryTest(unittest.TestCase):
-    """A kernel venv built from a staged runtime runs the bundled machines.
-
-    The kernel installs prime-agent-runtime non-editably into its venv (the
-    bootstrap's ``uv pip install <staged runtime>`` builds the hatchling
-    wheel, whose target package is ``src/rlm``), so the machine library
-    must resolve from the installed package — ``site-packages/rlm/
-    machines`` — not from any source-checkout path. This stages the
-    runtime the way the release does, installs it into a fresh venv, and
-    runs ``rlm.factory.run("review-sweep")`` end-to-end in that interpreter
-    against a scripted host, asserting the machine came from the installed
-    wheel.
-    """
-
-    # Names the release staging drops from the runtime tree (the assemble
-    # script's RUNTIME_EXCLUDED_NAMES): the venv bootstrap installs the
-    # staged layout, so the test stages the same way.
-    STAGING_EXCLUDED = frozenset({"test", "uv.lock", ".venv", "__pycache__", ".pytest_cache"})
+class FactoryJoinDeferredRestartTest(_ExecutorTestCase):
+    """Round-4 probe R4-01: the deferred-join stash must ride the SNAPSHOT.
+    A restart inside a max_transitions pause window (the wifi-outage shape)
+    rehydrates the run with its pending replay — which starts PAST the join
+    position — so the stash is the join's only re-entry."""
 
     def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name).resolve()
+        super().setUp()
+        artifact_temp = TemporaryDirectory()
+        self.addCleanup(artifact_temp.cleanup)
+        previous = os.environ.get("RLM_SESSION_DIR")
 
-    def stage_runtime(self) -> Path:
-        """Copy the runtime tree the release-staging way, minus its excludes."""
-        runtime_dir = Path(__file__).resolve().parents[1]
-        staged = self.root / "payload" / "prime-agent-runtime"
-        for source in runtime_dir.rglob("*"):
-            relative = source.relative_to(runtime_dir)
-            if any(part in self.STAGING_EXCLUDED for part in relative.parts):
-                continue
-            target = staged / relative
-            if source.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("RLM_SESSION_DIR", None)
             else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(source.read_bytes())
-        return staged
+                os.environ["RLM_SESSION_DIR"] = previous
 
-    def test_kernel_venv_runs_review_sweep_from_the_installed_wheel(self) -> None:
-        if os.name != "posix":
-            self.skipTest("the staged kernel-venv path is POSIX-shaped")
-        uv = shutil.which("uv")
-        if uv is None:
-            self.skipTest("uv is not available to build the kernel venv")
-        staged = self.stage_runtime()
-        venv = self.root / "kernel-venv"
-        agent_home = self.root / "agent-home"
-        agent_home.mkdir(parents=True)
-        (agent_home / "settings.json").write_text(
-            json.dumps({"factory": {"enabled": True}}), encoding="utf-8"
-        )
-        for args in (
-            [uv, "venv", str(venv)],
-            [uv, "pip", "install", "--python", str(venv / "bin" / "python"), "--no-deps", str(staged)],
-        ):
-            install = subprocess.run(
-                args, capture_output=True, text=True, timeout=240, check=False
-            )
-            self.assertEqual(
-                install.returncode, 0,
-                f"{' '.join(args)} failed:\n{install.stdout}\n{install.stderr}",
-            )
-        run_result = subprocess.run(
-            [
-                str(venv / "bin" / "python"), "-I", "-c", _INSTALLED_LIBRARY_RUNNER,
+        self.addCleanup(restore)
+        os.environ["RLM_SESSION_DIR"] = str(artifact_temp.name)
+        self.artifacts = Path(artifact_temp.name)
+
+    async def _drive(self, run, settle_limit: float = 25.0) -> str:
+        deadline = time.monotonic() + settle_limit
+        while True:
+            if run.state in ("done", "failed", "paused", "stopped"):
+                return run.state
+            assert time.monotonic() < deadline, "the run never settled"
+            await asyncio.sleep(0)
+
+    def _deferred_machine(self) -> dict:
+        machine = {
+            "states": [
+                {"id": "a", "entry": True, "subagent": "worker", "max_entries": 8},
+                {"id": "c", "subagent": "worker", "max_entries": 8,
+                 "outputs": [{"name": "answer", "type": "text"}]},
+                {"id": "z", "subagent": "worker", "max_entries": 8,
+                 "outputs": [{"name": "reentry", "type": "json"}]},
+                {"id": "b", "subagent": "worker", "max_entries": 8,
+                 "outputs": [{"name": "answer", "type": "text"}]},
+                {"id": "d", "subagent": "worker", "max_entries": 8,
+                 "outputs": [{"name": "answer", "type": "text"}]},
+                {
+                    "id": "j", "subagent": "worker", "max_entries": 8,
+                    "inputs": [
+                        {"name": "rb", "type": "text", "from": "b.answer"},
+                        {"name": "rc", "type": "text", "from": "c.answer"},
+                    ],
+                },
             ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-            env={**os.environ, "PRIME_AGENT_CODING_AGENT_DIR": str(agent_home)},
-        )
+            "transitions": [
+                {"from": "a", "to": "c"},
+                {"from": "a", "to": "b"},
+                {"from": "b", "to": "z"},
+                {"from": "z", "to": "b", "when": {"output": "reentry", "op": "eq", "value": "go"}},
+                {"from": ["b", "c"], "to": "j"},
+                {"from": "c", "to": "d"},
+                {"from": "j", "to": "a"},
+            ],
+            "run": {"max_transitions": 9},
+        }
+        return machine
+
+    @async_test
+    async def test_the_restarted_resume_keeps_the_stashed_holds(self) -> None:
+        self.host = GuardedSettlesHost(clock=self.clock, delays={("c", 1): 1}, z_answer="stay")
+        patcher = patch.object(rlm_module, "host_request", self.host)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.store_machine(self._deferred_machine(), spec_id="r4r")
+        result = await self.start("r4r")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        first_state = await self._drive(run)
+        # THE PIN SHAPE: the pause lands with the stash non-empty (the
+        # defer preceded the max_transitions pause in the same pass).
+        self.assertEqual(first_state, "paused")
+        self.assertTrue(run.deferred_join_rechecks, "the pause must have stashed the join holds")
+        self.executor._persist_run(run)
+        snapshot = self.artifacts / "factory-runs" / f"{run_id}.json"
+        self.assertTrue(snapshot.exists())
+        # THE STASH RIDE: the snapshot carries the holds.
+        payload = json.loads(snapshot.read_text())
+        self.assertTrue(payload.get("deferred_join_rechecks"), "the stash did not ride the snapshot")
+        # The restart: a new executor against the same registry.
+        rebooted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        rebooted.rehydrate_registry()
+        reread = rebooted._runs[run_id]
+        self.assertEqual(reread.state, "paused")
+        self.assertTrue(reread.deferred_join_rechecks, "the stash did not survive the restart")
+        # Resume on the REBOOTED executor.
+        previous = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = rebooted
+        try:
+            pauses = 0
+            await rlm_module.rlm.factory.resume(run_id)
+            state_ = await self._drive(reread)
+            while state_ == "paused" and pauses < 4:
+                pauses += 1
+                await rlm_module.rlm.factory.resume(run_id)
+                state_ = await self._drive(reread)
+        finally:
+            factory_module._DEFAULT_EXECUTOR = previous
+        j_spawns = self.host.spawn_calls("j")
+        # THE PIN: 8 rounds, 8 escalations — the straddled round's join
+        # fired after the restart.
         self.assertEqual(
-            run_result.returncode, 0,
-            f"the installed-runtime run failed:\n{run_result.stdout}\n{run_result.stderr}",
+            (state_, len(reread.states["a"].entries), len(j_spawns)),
+            ("done", 8, 8),
+            "the restart lost the deferred-join stash: the straddled round's join never fired",
         )
-        payload = json.loads(run_result.stdout)
-        self.assertEqual(payload["state"], "done", payload)
-        self.assertEqual(payload["spec_id"], "review-sweep")
-        self.assertEqual(payload["machine"], "review-sweep")
-        machine_path = Path(payload["machine_path"])
-        self.assertTrue(machine_path.is_file(), machine_path)
-        self.assertIn("site-packages", str(machine_path), machine_path)
-        self.assertIn(os.path.join("rlm", "machines"), str(machine_path), machine_path)
-        # The installed package is the wheel copy, not this checkout's source.
-        self.assertNotIn("prime-agent-runtime", str(machine_path), machine_path)
-        self.assertEqual(payload["nodes"], ["files", "report", "review"])
+
+class FactoryForeachTruncationEventTest(_ExecutorTestCase):
+    """A foreach over more items than `max` spawns reports the drop (probe
+    H): one `foreach_truncated` ledger event with both counts — never a
+    silent 3-of-7."""
+
+    @async_test
+    async def test_a_foreach_over_max_items_emits_one_truncation_event(self) -> None:
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "src",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "items", "type": "json"}],
+                    },
+                    {
+                        "id": "fan",
+                        "subagent": "worker",
+                        "foreach": {"over": "item", "max": 3},
+                        "inputs": [{"name": "item", "type": "json", "from": "src.items"}],
+                    },
+                ],
+                "transitions": [{"from": "src", "to": "fan"}],
+            },
+            spec_id="trunc",
+        )
+        self.host.outcomes["src"] = {
+            "status": "done",
+            "answer": '```json\n{"items": [1, 2, 3, 4, 5, 6, 7]}\n```',
+        }
+        result = await self.start("trunc")
+        run = self.executor._runs[result["run_id"]]
+        deadline = time.monotonic() + 30
+        while run.state == "running":
+            assert time.monotonic() < deadline, f"the run never settled: {await rlm_module.rlm.factory.status(result['run_id'])}"
+            await asyncio.sleep(0)
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        truncated = [e for e in status["events"] if e["kind"] == "foreach_truncated"]
+        self.assertEqual(len(truncated), 1)
+        self.assertIn("over 7 items", truncated[0]["detail"])
+        self.assertIn("max 3", truncated[0]["detail"])
+        self.assertEqual(len(self.host.spawn_calls("fan")), 3)
+
+
+from rlm.factory import FactoryRun
+
+
+class FactoryLedgerBoundsTest(_ExecutorTestCase):
+    """The in-memory ledger is capped (F-12): no unbounded event growth
+    on long runs, seqs never reuse, and the registry evicts the oldest
+    terminal runs past its bound."""
+
+    async def settle(self, run_result: dict[str, Any], *, max_polls: int = 50_000) -> dict[str, Any]:
+        run_id = run_result["run_id"]
+        for _ in range(max_polls):
+            run = self.executor._runs[run_id]
+            if run.state != "running":
+                break
+            await asyncio.sleep(0)
+        else:
+            return await rlm_module.rlm.factory.status(run_id)
+        # Wait the loop task out: the finalize (its milestone) and the
+        # terminal-run eviction land after the state flips, inside the
+        # still-running task.
+        run = self.executor._runs[run_id]
+        if run.task is not None:
+            await run.task
+        return await rlm_module.rlm.factory.status(run_id)
+
+    @async_test
+    async def test_the_ledger_caps_and_never_reuses_a_seq(self) -> None:
+        run = FactoryRun(run_id="r", spec_id="sw", name=None, machine={"states": []})
+        for i in range(factory_module.PERSISTED_EVENTS_CAP + 120):
+            self.executor._event(run, "tick", detail=f"event {i}")
+        self.assertLessEqual(len(run.events), factory_module.PERSISTED_EVENTS_CAP)
+        seqs = [event["seq"] for event in run.events]
+        self.assertEqual(seqs, sorted(seqs), "the window stays in order")
+        self.assertEqual(len(set(seqs)), len(seqs), "no seq is ever reused")
+        self.assertEqual(seqs[-1], factory_module.PERSISTED_EVENTS_CAP + 120)
+        # The watermark moved with the trim: the next event numbers above
+        # every event that ever existed.
+        last_seq = seqs[-1]
+        self.executor._event(run, "tick", detail="after the cap")
+        self.assertEqual(run.events[-1]["seq"], last_seq + 1)
+        # The status window serves the trailing events with live stages.
+        self.assertEqual(run.events[0]["detail"], f"event {121}")
+
+    @async_test
+    async def test_terminal_runs_evict_past_the_bound_oldest_first(self) -> None:
+        limit = factory_module.RETAINED_RUNS_LIMIT
+        factory_module.RETAINED_RUNS_LIMIT = 2
+        try:
+            self.store_machine(
+                {
+                    "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+                },
+                spec_id="short",
+            )
+            ids = []
+            for _ in range(4):
+                result = await self.start("short")
+                status = await self.settle(result)
+                self.assertEqual(status["state"], "done")
+                ids.append(result["run_id"])
+                # Distinct started_at stamps: the eviction orders by start
+                # time, and the frozen clock would give every run the
+                # same stamp.
+                self.clock.advance(1.0)
+            # The registry keeps only the two newest terminal runs: the
+            # older two answer unknown, exactly like a previous boot's.
+            self.assertIn(ids[3], self.executor._runs)
+            self.assertIn(ids[2], self.executor._runs)
+            self.assertNotIn(ids[0], self.executor._runs)
+            self.assertNotIn(ids[1], self.executor._runs)
+        finally:
+            factory_module.RETAINED_RUNS_LIMIT = limit
+
+
+class FactoryRound1PinsTest(_ExecutorTestCase):
+    """The round-1 re-inspection pins: a suspend does not rebase onto
+    the wall clock (probe D3), status elapsed is the budget's active
+    clock (probe B2), and the boot arm runs where the loop lives (the
+    repl's main, not a module import hook)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        artifact_temp = TemporaryDirectory()
+        self.addCleanup(artifact_temp.cleanup)
+        previous = os.environ.get("RLM_SESSION_DIR")
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("RLM_SESSION_DIR", None)
+            else:
+                os.environ["RLM_SESSION_DIR"] = previous
+
+        self.addCleanup(restore)
+        os.environ["RLM_SESSION_DIR"] = str(artifact_temp.name)
+
+
+
+
+
+
+    @async_test
+    async def test_a_corrupt_marker_byte_costs_its_own_line_not_the_rehydrate(self) -> None:
+        # Round-7 probe R7-01: a marker with an invalid byte raised
+        # UnicodeDecodeError (a ValueError) past the recovery units — the
+        # corrupt run AND every run after it silently never loaded, and
+        # the boot arm armed nothing. errors='replace' costs the byte its
+        # own diagnostic; every run loads.
+        import sys
+        from io import StringIO
+
+        from rlm.factory import _runs_dir
+
+        runs = []
+        for spec_id, node in (("bootb1", "a"), ("bootb2", "b"), ("bootb3", "c")):
+            self.store_machine(
+                {"states": [{"id": node, "entry": True, "subagent": "worker"}]},
+                spec_id=spec_id,
+            )
+            self.host.outcomes[node] = {"status": "running"}
+            result = await self.start(spec_id)
+            run = self.executor._runs[result["run_id"]]
+            deadline = time.monotonic() + 30
+            while not run.states[node].entries[0].instances:
+                assert time.monotonic() < deadline, "the child never admitted"
+                await asyncio.sleep(0)
+            run.task.cancel()
+            self.executor._persist_run(run)
+            runs.append(result["run_id"])
+        self.host.outcomes = {}
+        names = sorted(p.name for p in _runs_dir().glob("*.json"))
+        self.assertEqual(len(names), 3)
+        middle_run = names[1][: -len(".json")]
+        marker = _runs_dir() / f"{middle_run}.persist-failed"
+        marker.write_bytes(b"the disk was full: \xff\xfe\n")
+        stderr = StringIO()
+        rebooted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        with patch.object(sys, "stderr", stderr):
+            rebooted.rehydrate_registry()
+        # EVERY run loads; the corrupt marker costs its own diagnostic.
+        self.assertEqual(set(rebooted._runs), set(runs))
+        self.assertIn("could not persist", stderr.getvalue())
+
+    @async_test
+    async def test_the_boot_arm_arms_everything_past_a_corrupt_marker(self) -> None:
+        # Round-7 probe R7-01's production shape (b2): the boot arm wired
+        # as the repl does, past a corrupt marker — the arm must survive
+        # and every run's registry entry must load (pre-fix: the arm died
+        # and later calls silently served a one-run partial registry
+        # forever).
+        from rlm.factory import _runs_dir
+
+        runs = []
+        for spec_id, node in (("bootc1", "a"), ("bootc2", "b"), ("bootc3", "c")):
+            self.store_machine(
+                {"states": [{"id": node, "entry": True, "subagent": "worker"}]},
+                spec_id=spec_id,
+            )
+            self.host.outcomes[node] = {"status": "running"}
+            result = await self.start(spec_id)
+            run = self.executor._runs[result["run_id"]]
+            deadline = time.monotonic() + 30
+            while not run.states[node].entries[0].instances:
+                assert time.monotonic() < deadline, "the child never admitted"
+                await asyncio.sleep(0)
+            run.task.cancel()
+            self.executor._persist_run(run)
+            runs.append(result["run_id"])
+        self.host.outcomes = {}
+        names = sorted(p.name for p in _runs_dir().glob("*.json"))
+        middle_run = names[1][: -len(".json")]
+        (_runs_dir() / f"{middle_run}.persist-failed").write_bytes(b"\xff\n")
+        factory_module._BOOT_ARM_TASK = None
+        previous = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = None
+        try:
+            self.assertTrue(factory_module.boot_arm_persisted_runs(), "the arm refused to schedule")
+            task = factory_module._BOOT_ARM_TASK
+            assert task is not None
+            await asyncio.wait([task], timeout=10)
+            executor = factory_module._DEFAULT_EXECUTOR
+            assert executor is not None
+            # The FULL registry loaded — the partial-registry shape is gone.
+            self.assertEqual(set(executor._runs), set(runs))
+        finally:
+            factory_module._DEFAULT_EXECUTOR = previous
+            factory_module._BOOT_ARM_TASK = None
+
+    @async_test
+    async def test_the_rehydrate_surfaces_a_stale_persist_failed_marker(self) -> None:
+        # Round-5 probe R5-01: the durable marker was write-only — nothing
+        # read it, so after a restart the loss was visible only to a human
+        # ls. The rehydrate path surfaces it loudly now.
+        import sys
+        from io import StringIO
+
+        from rlm.factory import _runs_dir
+
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="marker",
+        )
+        self.host.outcomes["a"] = {"status": "running"}
+        result = await self.start("marker")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while not run.states["a"].entries[0].instances:
+            assert time.monotonic() < deadline, "the child never admitted"
+            await asyncio.sleep(0)
+        run.task.cancel()
+        self.executor._persist_run(run)
+        marker = _runs_dir() / f"{run_id}.persist-failed"
+        marker.write_text("the disk was full\n", encoding="utf-8")
+        stderr = StringIO()
+        rebooted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        with patch.object(sys, "stderr", stderr):
+            rebooted.rehydrate_registry()
+        self.assertIn("could not persist", stderr.getvalue())
+        self.assertIn("the disk was full", stderr.getvalue())
+
+    @async_test
+    async def test_the_arm_door_survives_a_non_object_journal_line(self) -> None:
+        # Round-4 probe R4-02: the ARM reads the journal through
+        # _journal_lines (only ValueError skipped there), so a valid-JSON
+        # non-object line reached _resolve_admission_intents' line.get and
+        # killed the boot arm AND every later factory call (the raw
+        # AttributeError through _armed_executor). The hardening covers
+        # all three journal readers now.
+        from rlm.factory import ADMISSIONS_JOURNAL_SUFFIX, _runs_dir
+
+        runs = []
+        for spec_id, node in (("bootarm", "a"), ("bootarm2", "b")):
+            self.store_machine(
+                {"states": [{"id": node, "entry": True, "subagent": "worker"}]},
+                spec_id=spec_id,
+            )
+            self.host.outcomes[node] = {"status": "running"}
+            result = await self.start(spec_id)
+            run = self.executor._runs[result["run_id"]]
+            deadline = time.monotonic() + 30
+            while not run.states[node].entries[0].instances:
+                assert time.monotonic() < deadline, "the child never admitted"
+                await asyncio.sleep(0)
+            run.task.cancel()
+            self.executor._persist_run(run)
+            runs.append(result["run_id"])
+        self.host.outcomes = {}
+        names = sorted(p.name for p in _runs_dir().glob("*.json"))
+        self.assertEqual(len(names), 2)
+        first_run_file = names[0][: -len(".json")]
+        journal_path = _runs_dir() / f"{first_run_file}{ADMISSIONS_JOURNAL_SUFFIX}"
+        with open(journal_path, "a", encoding="utf-8") as handle:
+            handle.write("12345\n")
+        factory_module._BOOT_ARM_TASK = None
+        previous = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = None
+        try:
+            # THE DOOR: the lazy first-call path — _armed_executor
+            # constructs, rehydrates, and arms INSIDE the namespace call
+            # (no boot task first). The corrupt line in the journal is
+            # read by the arm's intent resolver; unhardened, it raises
+            # AttributeError THROUGH the call (the inspector's red);
+            # hardened, both runs load and the status answers.
+            status = await rlm_module.rlm.factory.status(runs[0])
+            self.assertEqual(status["run_id"], runs[0])
+            executor = factory_module._DEFAULT_EXECUTOR
+            assert executor is not None
+            loaded = [rid for rid in runs if rid in executor._runs]
+            self.assertEqual(len(loaded), 2, "the corrupt journal cost the OTHER run")
+        finally:
+            factory_module._DEFAULT_EXECUTOR = previous
+            factory_module._BOOT_ARM_TASK = None
+
+    @async_test
+    async def test_a_dead_disk_leaves_a_durable_persist_failed_marker(self) -> None:
+        # Round-4 probe R4-04: the in-memory persist_failed row warns "a
+        # kernel restart would lose it" and is itself lost to the restart
+        # it warns about. The marker survives it and names the loss — and a
+        # recovered write clears it.
+        from rlm.factory import _runs_dir
+
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="disk",
+        )
+        self.host.outcomes["a"] = {"status": "running"}
+        result = await self.start("disk")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while not run.states["a"].entries[0].instances:
+            assert time.monotonic() < deadline, "the child never admitted"
+            await asyncio.sleep(0)
+        run.task.cancel()
+        runs_dir = _runs_dir()
+        # Block ONLY the snapshot write (the staging path as a directory
+        # makes the open raise IsADirectoryError), so the runs dir stays
+        # writable for the durable marker — the real disk-fault shape.
+        blocker = runs_dir / f".{run_id}.json.tmp"
+        blocker.mkdir()
+        try:
+            run.revision += 1
+            self.executor._persist_run(run)
+            kinds = [e["kind"] for e in run.events]
+            self.assertIn("persist_failed", kinds, "the failure left no ledger row")
+            marker = runs_dir / f"{run_id}.persist-failed"
+            self.assertTrue(marker.exists(), "the failure left no durable marker")
+            # A recovered write clears the stale marker.
+            shutil.rmtree(blocker)
+            self.executor._persist_failed.discard((run_id, "snapshot"))
+            self.executor._persist_run(run)
+            self.assertFalse((runs_dir / f"{run_id}.persist-failed").exists(), "the marker outlived its failure")
+            self.assertTrue((runs_dir / f"{run_id}.json").exists(), "the recovered write did not land")
+        finally:
+            shutil.rmtree(blocker, ignore_errors=True)
+
+    @async_test
+    async def test_a_non_dict_journal_line_costs_one_run_not_the_arm(self) -> None:
+        # Round-3 probe R3D: a journal line that is valid JSON but NOT an
+        # object (`12345`) makes `row.get("kind")` raise AttributeError —
+        # in neither the per-line nor the per-run recovery tuple, so it
+        # escaped the widened try and killed the whole boot arm (the
+        # stderr guard named it, but no run loaded). The recovery boundary
+        # catches every exception a corrupt input file can raise now.
+        import sys
+        from io import StringIO
+
+        from rlm.factory import ADMISSIONS_JOURNAL_SUFFIX, _runs_dir
+
+        runs = []
+        for spec_id, node in (("bootd", "a"), ("bootd2", "b")):
+            self.store_machine(
+                {"states": [{"id": node, "entry": True, "subagent": "worker"}]},
+                spec_id=spec_id,
+            )
+            self.host.outcomes[node] = {"status": "running"}
+            result = await self.start(spec_id)
+            run = self.executor._runs[result["run_id"]]
+            deadline = time.monotonic() + 30
+            while not run.states[node].entries[0].instances:
+                assert time.monotonic() < deadline, "the child never admitted"
+                await asyncio.sleep(0)
+            run.task.cancel()
+            self.executor._persist_run(run)
+            runs.append(result["run_id"])
+        self.host.outcomes = {}
+        names = sorted(p.name for p in _runs_dir().glob("*.json"))
+        self.assertEqual(len(names), 2)
+        # Corrupt the FIRST-sorted run's journal with a non-object line.
+        first_run_file = names[0][: -len(".json")]
+        journal_path = _runs_dir() / f"{first_run_file}{ADMISSIONS_JOURNAL_SUFFIX}"
+        with open(journal_path, "a", encoding="utf-8") as handle:
+            handle.write("12345\n")
+        factory_module._BOOT_ARM_TASK = None
+        previous = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = None
+        stderr = StringIO()
+        try:
+            armed = factory_module.boot_arm_persisted_runs()
+            self.assertTrue(armed, "the boot arm refused to schedule")
+            task = factory_module._BOOT_ARM_TASK
+            assert task is not None
+            with patch.object(sys, "stderr", stderr):
+                await asyncio.wait([task], timeout=10)
+            executor = factory_module._DEFAULT_EXECUTOR
+            assert executor is not None
+            # The corrupt LINE is skipped per-line (the run's own
+            # mutations stand): BOTH runs load, and the arm survives —
+            # the probe's pre-fix behavior was the arm dying with
+            # 'int' object has no attribute 'get' and NOTHING loading.
+            loaded = [rid for rid in runs if rid in executor._runs]
+            self.assertEqual(len(loaded), 2)
+            for rid in loaded:
+                # Every loaded run got its arm outcome: a running run
+                # holds a loop task; a stopping run completed its stop.
+                rehydrated = executor._runs[rid]
+                self.assertIn(rehydrated.state, ("running", "stopped", "done"))
+        finally:
+            factory_module._DEFAULT_EXECUTOR = previous
+            factory_module._BOOT_ARM_TASK = None
+
+    @async_test
+    async def test_a_corrupt_journal_line_costs_one_run_not_the_arm(self) -> None:
+        # Round-2 probe Q5: one runs dir, TWO live runs, one journal with
+        # a valid-JSON but wrong-typed line. The boot arm must load the
+        # OTHER run and arm it (one run's corruption costs that run alone)
+        # instead of dying inside rehydrate_registry with the registry
+        # empty and nothing logged.
+        import sys
+        from io import StringIO
+
+        runs = []
+        for spec_id, node in (("bootarm", "a"), ("bootarm2", "b")):
+            self.store_machine(
+                {"states": [{"id": node, "entry": True, "subagent": "worker"}]},
+                spec_id=spec_id,
+            )
+            self.host.outcomes[node] = {"status": "running"}
+            result = await self.start(spec_id)
+            run = self.executor._runs[result["run_id"]]
+            deadline = time.monotonic() + 30
+            while not run.states[node].entries[0].instances:
+                assert time.monotonic() < deadline, "the child never admitted"
+                await asyncio.sleep(0)
+            run.task.cancel()
+            self.executor._persist_run(run)
+            runs.append(result["run_id"])
+        self.host.outcomes = {}
+        # Corrupt the FIRST run's journal: a parsed line whose counters
+        # are the wrong type (no legal writer emits it; a torn tail is
+        # already skipped as invalid JSON).
+        from rlm.factory import ADMISSIONS_JOURNAL_SUFFIX, _runs_dir
+
+        journal_path = _runs_dir() / f"{runs[0]}{ADMISSIONS_JOURNAL_SUFFIX}"
+        with open(journal_path, "a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "kind": "batch",
+                        "state": "a",
+                        "entry": 0,
+                        "instances": [],
+                        "entries_used": "not-an-int",
+                    }
+                )
+                + "\n"
+            )
+        # Boot the arm the way the repl wires it; the failure of the
+        # corrupt run must not take the healthy one down.
+        factory_module._BOOT_ARM_TASK = None
+        previous = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = None
+        stderr = StringIO()
+        try:
+            armed = factory_module.boot_arm_persisted_runs()
+            self.assertTrue(armed, "the boot arm refused to schedule")
+            task = factory_module._BOOT_ARM_TASK
+            assert task is not None
+            # The patch must span the AWAIT: the arm schedules a detached
+            # task, and the print happens inside it.
+            with patch.object(sys, "stderr", stderr):
+                await asyncio.wait([task], timeout=10)
+            executor = factory_module._DEFAULT_EXECUTOR
+            assert executor is not None
+            # The corrupt run is skipped LOUDLY; the healthy run loaded
+            # and armed (its loop task exists — the arm did not die at
+            # the corrupt journal).
+            self.assertIn(runs[1], executor._runs)
+            self.assertNotIn(runs[0], executor._runs)
+            self.assertIsNotNone(executor._runs[runs[1]].task)
+            self.assertIn("is unreadable", stderr.getvalue())
+        finally:
+            factory_module._DEFAULT_EXECUTOR = previous
+            factory_module._BOOT_ARM_TASK = None
+
+    @async_test
+    async def test_the_real_kernel_arms_persisted_runs_at_boot(self) -> None:
+        # R1-01 (probe I, round 1), reworked to the round-9 release
+        # contract: the arm NEVER fires at the boot of the REAL kernel
+        # process (`python -m rlm.repl`, no IPython, no factory call) —
+        # a persisted live run stays frozen through a quiet boot window,
+        # and the FIRST EXECUTED COMMAND releases the arm, so its
+        # children collect and the snapshot moves with no factory call.
+        import sys
+        import tempfile
+
+        from rlm.harness import HarnessState
+
+        agent_dir = Path(tempfile.mkdtemp(prefix="r1-boot-agent-"))
+        session_dir = Path(tempfile.mkdtemp(prefix="r1-boot-session-"))
+        (agent_dir / "settings.json").write_text(json.dumps({"factory": {"enabled": True}}))
+        # Phase 1 — write a live run snapshot the way a real kernel would:
+        # a->b with b's child still running, then the kernel dies.
+        os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = str(agent_dir)
+        os.environ["RLM_SESSION_DIR"] = str(session_dir)
+        harness = HarnessState(session_dir / "harness_state.json")
+        harness.create_subagent("Worker", "Do the work.", id="worker")
+        harness.create_factory(
+            "Factory", "content", id="sw",
+            machine={
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker"},
+                    {"id": "b", "subagent": "worker"},
+                ],
+                "transitions": [{"from": "a", "to": "b"}],
+            },
+        )
+        host = FakeHost(clock=self.clock)
+        host.advance_per_run = 0.0
+        host.outcomes["b"] = {"status": "running"}
+        rlm_module.host_request = host
+        executor = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=harness)
+        factory_module._DEFAULT_EXECUTOR = executor
+        try:
+            result = await executor.run("sw")
+            run_id = result["run_id"]
+            run = executor._runs[run_id]
+            deadline = time.monotonic() + 30
+            while True:
+                if run.states["b"].entries:
+                    break
+                assert time.monotonic() < deadline, "b never entered"
+                await asyncio.sleep(0)
+            snapshot = session_dir / "factory-runs" / f"{run_id}.json"
+            self.assertTrue(snapshot.exists(), "no snapshot persisted")
+            frozen = snapshot.read_text()
+            run.task.cancel()
+        finally:
+            factory_module._DEFAULT_EXECUTOR = None
+            rlm_module.host_request = self.host
+        # Phase 2 — boot the REAL kernel against the same session dir; the
+        # bridge answers the executor's collect with a done child. No
+        # factory call: the boot arm must do the collecting.
+        env = {
+            **{k: v for k, v in os.environ.items() if k.upper().startswith("RLM_")},
+            "PRIME_AGENT_CODING_AGENT_DIR": str(agent_dir),
+            "RLM_SESSION_DIR": str(session_dir),
+            # The kernel's harness state resolves through
+            # RLM_HARNESS_STATE_DIR FIRST (rlm.harness._state_file), so
+            # an outer session's value must never leak in: the run's
+            # machine resolves its subagent specs against the harness
+            # state beside the persisted run, in the session dir.
+            "RLM_HARNESS_STATE_DIR": str(session_dir),
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src"),
+        }
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "rlm.repl"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            cwd=str(session_dir),
+            text=True,
+            bufsize=1,
+        )
+
+        answered: list[str] = []
+
+        async def read_frame() -> dict[str, Any]:
+            while True:
+                line = await asyncio.to_thread(proc.stdout.readline)
+                if not line:
+                    raise RuntimeError(f"kernel stdout closed: {proc.stderr.read()[:500]}")
+                frame = json.loads(line)
+                if frame.get("event") == "host_request":
+                    data = frame.get("data") or {}
+                    answered.append(str(data.get("type")))
+                    reply_data: dict[str, Any] = {}
+                    if data.get("type") == "rlm.collect":
+                        # The collect envelope's row shape (FakeHost._entry):
+                        # the executor matches rows by rlm_child_id. The
+                        # frame spreads the payload at the top level
+                        # ({**payload, "type": ...}), not under "payload".
+                        targets = data.get("targets", [])
+                        reply_data = {
+                            "results": [
+                                {
+                                    "rlm_child_id": target,
+                                    "session_name": f"child-{target[-4:]}",
+                                    "session_dir": f"/tmp/{target}",
+                                    "status": "done",
+                                    "settled": True,
+                                    "tool_use_count": 1,
+                                    "duration_ms": 5,
+                                    "answer_text": "boot arm collected me",
+                                }
+                                for target in targets
+                            ]
+                        }
+                    elif data.get("type") == "rlm.list_subagents":
+                        reply_data = {"subagents": []}
+                    proc.stdin.write(
+                        json.dumps(
+                            {"type": "host_reply", "id": frame["id"],
+                             "data": {"status": "ok", "result": reply_data}}
+                        )
+                        + "\n"
+                    )
+                    proc.stdin.flush()
+                    continue
+                return frame
+
+        try:
+            ready = await read_frame()
+            self.assertEqual(ready.get("event"), "ready")
+
+            async def drain_frames() -> None:
+                while not drained.is_set():
+                    await read_frame()
+
+            # ONE drain lives for the whole phase: a cancelled drain leaves
+            # an orphaned `to_thread` reader that can swallow a frame
+            # nobody else can answer, so the quiet window and the execute
+            # window share this task (it is cancelled only after the
+            # movement polling ends, when no answer matters anymore).
+            drained = asyncio.Event()
+            drain_task = asyncio.get_running_loop().create_task(drain_frames())
+            # The boot NEVER arms (the round-9 release contract): a quiet
+            # window — no restore, no executed command, no factory call —
+            # leaves the persisted run exactly frozen. A boot-time arm
+            # (the reverted pattern) collects within this window and the
+            # frozen-snapshot assertion goes red.
+            await asyncio.sleep(4)
+            self.assertTrue(snapshot.exists(), "the run snapshot vanished before any release")
+            self.assertEqual(
+                snapshot.read_text(),
+                frozen,
+                "the boot armed the persisted run before any execute or proven restore",
+            )
+
+            # The FIRST EXECUTED COMMAND is the release: no factory API
+            # call, no restore — the arm fires from the execute and the
+            # run advances while the kernel idles. The snapshot MOVES (a
+            # re-persist) or RETIRES (a terminal run's file); either
+            # proves the execute-released arm collected the child. The
+            # drain keeps answering the executor's collect frames while
+            # this side only polls the file: nobody else reads the
+            # kernel's stdout, and an unanswered host request wedges the
+            # arm's control loop.
+            proc.stdin.write(json.dumps({"type": "execute", "id": "release", "code": "1 + 1"}) + "\n")
+            proc.stdin.flush()
+            moved = False
+            retired = False
+            try:
+                for _ in range(300):
+                    await asyncio.sleep(0.05)
+                    if not snapshot.exists():
+                        moved, retired = True, True
+                        break
+                    if snapshot.read_text() != frozen:
+                        moved = True
+                        break
+                    if proc.poll() is not None:
+                        break
+            finally:
+                drained.set()
+                drain_task.cancel()
+            # Shut the kernel down and read its stderr BEFORE the
+            # verdict: the arm's detached task prints its failures
+            # there ("factory boot arm failed: ..."), and an unread
+            # stderr pipe would block this read against a live kernel.
+            proc.stdin.write(json.dumps({"type": "shutdown", "id": "bye"}) + "\n")
+            proc.stdin.flush()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            kernel_stderr = proc.stderr.read()[-500:] if proc.stderr else ""
+            self.assertTrue(
+                moved,
+                f"the execute never released the persisted run's arm; answered: {answered}; kernel stderr: {kernel_stderr!r}",
+            )
+            if retired:
+                return  # the run finalized and retired its snapshot
+            arm_state = json.loads(snapshot.read_text())
+            self.assertNotEqual(arm_state["state"], "running", "the run never advanced after the execute released the arm")
+        finally:
+            pass
+
+    @async_test
+    async def test_a_suspend_does_not_charge_the_budget(self) -> None:
+        # Round-1 probe D3: a snapshot whose WALL clock reads 2h behind
+        # the real one while the monotonic reading barely advanced is a
+        # suspend (Linux pauses CLOCK_MONOTONIC through sleep; the wall
+        # clock walks) — NOT a restart. The budget keeps the snapshot's
+        # monotonic reading; only now < mono (a reboot/restore) shifts.
+        self.store_machine(
+            {
+                "run": {"budget_ms": 60_000},
+                "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+            },
+            spec_id="clock",
+        )
+        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
+        result = await self.start("clock")
+        run = self.executor._runs[result["run_id"]]
+        run_id = result["run_id"]
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state == "paused":
+                break
+            assert time.monotonic() < deadline, "the run never paused"
+            await asyncio.sleep(0)
+        # The paused run persisted its snapshot (with the clock pair).
+        self.executor._persist_run(run)
+        from rlm.factory import _runs_dir
+
+        snapshot_path = _runs_dir() / f"{run_id}.json"
+        snapshot = json.loads(snapshot_path.read_text())
+        snapshot_mono = snapshot["clock"]["mono"]
+        # The suspend shape at rehydrate: the wall clock reads 7200s
+        # ahead of the snapshot's wall, but the new monotonic base sits
+        # only 1s past the snapshot's mono (the clock paused through the
+        # sleep). The wall pair is crafted: the real wall walked 7200s
+        # since the snapshot moment.
+        snapshot["clock"]["wall"] = time.time() - 7200.0
+        snapshot_path.write_text(json.dumps(snapshot))
+        resumed = FactoryExecutor(
+            now=FakeClock(snapshot_mono + 1.0), sleep=self.sleeps, harness=self.harness
+        )
+        resumed.rehydrate_registry()
+        rehydrated = resumed._runs[run_id]
+        self.assertIsNotNone(rehydrated)
+        # THE PIN: the suspend shifted nothing — started_at keeps the
+        # snapshot's reading (the old drift guard moved it by the 7200s
+        # of wall time and blew the 60s budget).
+        self.assertAlmostEqual(rehydrated.started_at, snapshot["started_at"], delta=1.0)
+        self.assertFalse(resumed._run_budget_exceeded(rehydrated), "a suspend charged the run budget")
+
+    @async_test
+    async def test_status_elapsed_excludes_paused_time(self) -> None:
+        # Round-1 probe B2/R1-05: a 2h escalate pause must not read as
+        # elapsed budget. status()'s elapsed_ms is the budget's own
+        # active-time clock.
+        self.store_machine(
+            {
+                "run": {"budget_ms": 60_000},
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker", "failure_policy": "escalate"},
+                    {"id": "b", "subagent": "worker"},
+                ],
+                "transitions": [{"from": "a", "to": "b"}],
+            },
+        )
+        self.host.outcomes["a"] = {"status": "error", "error": "needs the owner"}
+        result = await self.start()
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state == "paused":
+                break
+            assert time.monotonic() < deadline, "the run never paused"
+            await asyncio.sleep(0)
+        self.clock.advance(7200.0)
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertLess(status["elapsed_ms"], 60_000, "a long pause reads as elapsed budget")
+
+
+class FactoryRegistryCorruptionTest(_ExecutorTestCase):
+    """Round-8 probes R8-01/R8-02 + their fixes: corruption that still
+    PARSES (a flipped bit, a stray copy, a hand-edited id) must cost its
+    own run one loud line at the shared surfaces — the arm loop, the
+    unscoped graph, the rehydrate — never the whole boot."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        artifact_temp = TemporaryDirectory()
+        self.addCleanup(artifact_temp.cleanup)
+        previous = os.environ.get("RLM_SESSION_DIR")
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("RLM_SESSION_DIR", None)
+            else:
+                os.environ["RLM_SESSION_DIR"] = previous
+
+        self.addCleanup(restore)
+        os.environ["RLM_SESSION_DIR"] = str(artifact_temp.name)
+        self.artifacts = Path(artifact_temp.name)
+
+    def _runs_dir(self) -> Path:
+        from rlm.factory import _runs_dir
+
+        directory = _runs_dir()
+        assert directory is not None
+        return directory
+
+    async def _three_paused_runs(self) -> tuple[str, str, str]:
+        runs = []
+        for spec_id, node in (("bootp1", "a"), ("bootp2", "b"), ("bootp3", "c")):
+            self.store_machine(
+                {"states": [{"id": node, "entry": True, "subagent": "worker"}]},
+                spec_id=spec_id,
+            )
+            self.host.outcomes[node] = {"status": "running"}
+            result = await self.start(spec_id)
+            run = self.executor._runs[result["run_id"]]
+            deadline = time.monotonic() + 30
+            while not run.states[node].entries[0].instances:
+                assert time.monotonic() < deadline, "the child never admitted"
+                await asyncio.sleep(0)
+            run.task.cancel()
+            self.executor._persist_run(run)
+            runs.append(result["run_id"])
+        self.host.outcomes = {}
+        return runs[0], runs[1], runs[2]
+
+    def _fresh(self) -> FactoryExecutor:
+        return FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+
+
+    @async_test
+    async def test_a_lone_lost_run_names_the_loss_at_boot(self) -> None:
+        # Round-9 probe R9-04: when the lost run is the session's ONLY
+        # run, the boot gate counted only *.json — no executor existed at
+        # boot and the loss line never printed (the R1-01 pattern small
+        # scale). The gate counts .persist-failed markers now.
+        import sys
+        from io import StringIO
+
+        from rlm.factory import _runs_dir_snapshots
+
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="lone",
+        )
+        self.host.outcomes["a"] = {"status": "running"}
+        result = await self.start("lone")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while not run.states["a"].entries[0].instances:
+            assert time.monotonic() < deadline, "the child never admitted"
+            await asyncio.sleep(0)
+        run.task.cancel()
+        blocker = self._runs_dir() / f".{run_id}.json.tmp"
+        blocker.mkdir()
+        for suffix in (".json", ".admissions.jsonl"):
+            (self._runs_dir() / f"{run_id}{suffix}").unlink(missing_ok=True)
+        run.revision += 1
+        self.executor._persist_run(run)
+        self.host.outcomes = {}
+        # The gate now opens on the marker alone.
+        self.assertTrue(_runs_dir_snapshots(), "the boot gate stayed closed on a lone marker")
+        factory_module._BOOT_ARM_TASK = None
+        previous = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = None
+        captured = StringIO()
+        try:
+            self.assertTrue(factory_module.boot_arm_persisted_runs(), "the arm refused to schedule")
+            task = factory_module._BOOT_ARM_TASK
+            assert task is not None
+            with patch.object(sys, "stderr", captured):
+                await asyncio.wait([task], timeout=10)
+            self.assertIn("could not write its first registry snapshot", captured.getvalue())
+        finally:
+            factory_module._DEFAULT_EXECUTOR = previous
+            factory_module._BOOT_ARM_TASK = None
+            shutil.rmtree(blocker, ignore_errors=True)
+
+    def test_the_loss_line_survives_an_undecodable_marker_name(self) -> None:
+        # Round-9 probe R9-01's sibling: every diagnostic the registry
+        # prints must ENCODE as UTF-8 — on Linux a flipped bit in a file
+        # NAME arrives as a lone surrogate (surrogateescape), and printing
+        # it raw put the escape into the kernel's stderr frame, which the
+        # host's serde_json rejects: "Kernel protocol error" for every
+        # cell, every boot. _shown renders the byte as printable text.
+        import sys
+        from io import StringIO
+
+        from rlm.factory import _shown
+
+        undecodable_name = "\udcb5 lone.json"  # a Linux listing's surrogateescape
+        # THE PIN: the printed diagnostic must ENCODE as UTF-8 — the raw
+        # name cannot (the exact mechanism: the kernel frame carries the
+        # lone-surrogate escape and the host's serde_json rejects it —
+        # "Kernel protocol error" for every cell of the session).
+        _shown(undecodable_name).encode("utf-8")
+        self.assertIn("lone.json", _shown(undecodable_name))
+        # The raw form really is undecodable (the flip the fix renders).
+        with self.assertRaises(UnicodeEncodeError):
+            undecodable_name.encode("utf-8")
+
+    @async_test
+    async def test_a_scan_stat_fault_costs_nothing(self) -> None:
+        # Round-9 probe R9-02: the load-end marker scan ran OUTSIDE every
+        # recovery unit — a stat fault on a snapshot path killed the
+        # rehydrate AFTER the registry loaded (the boot arm armed nothing;
+        # the first lazy call raised raw).
+        import errno
+
+        first, middle, last = await self._three_paused_runs()
+        (self._runs_dir() / f"{middle}.persist-failed").write_text("x\n", encoding="utf-8")
+        real_exists = Path.exists
+
+        def exists(path: Path) -> bool:
+            if path.name == f"{middle}.json":
+                # The scan stats the (absent) snapshot next to the marker.
+                raise OSError(errno.EIO, "Input/output error", str(path))
+            return real_exists(path)
+
+        import sys
+        from io import StringIO
+
+        captured = StringIO()
+        rebooted = self._fresh()
+        with patch.object(Path, "exists", exists), patch.object(sys, "stderr", captured):
+            rebooted.rehydrate_registry()
+        # All three runs load; the boot arm works afterwards.
+        self.assertEqual(set(rebooted._runs), {first, middle, last})
+
+    def test_an_unlistable_runs_dir_names_the_loss(self) -> None:
+        # Round-9 probe R9-08: a runs dir that cannot be listed read as
+        # "no runs" with no line — every run lost for the boot, nothing
+        # said so.
+        import sys
+        from io import StringIO
+
+        captured = StringIO()
+        rebooted = self._fresh()
+        with patch.object(sys.modules["os"], "listdir", side_effect=OSError(5, "Input/output error")), \
+                patch.object(sys, "stderr", captured):
+            rebooted.rehydrate_registry()
+        self.assertIn("could not be read", captured.getvalue())
+
+
+
+    @async_test
+    async def test_the_graph_guard_prints_once_per_run_per_boot(self) -> None:
+        # Round-9 probe R9-03: the guard printed one line per POLL — a 2s
+        # TUI poll filled the kernel's 64 KiB background buffer with one
+        # repeated line in about 12 minutes. Once per run per boot now.
+        import sys
+        from io import StringIO
+
+        first, _, last = await self._three_paused_runs()
+        # A chained run holds transition_fired events; the seq->sep flip
+        # is a parseable corruption that reaches the graph guard.
+        self.store_machine(
+            {
+                "states": [state("p", entry=True), state("q"), state("r")],
+                "transitions": [{"from": "p", "to": "q"}, {"from": "q", "to": "r"}],
+            },
+            spec_id="chainr3",
+        )
+        self.host.outcomes["r"] = {"status": "running"}
+        result = await self.start("chainr3")
+        chained = result["run_id"]
+        run = self.executor._runs[chained]
+        deadline = time.monotonic() + 30
+        while run.transitions_fired < 2 or not run.states["r"].entries:
+            assert time.monotonic() < deadline, "the chain never ran"
+            await asyncio.sleep(0)
+        run.task.cancel()
+        self.executor._persist_run(run)
+        self.host.outcomes = {}
+        snapshot = self._runs_dir() / f"{chained}.json"
+        raw = snapshot.read_bytes()
+        at = raw.index(b'"kind": "transition_fired"') if b'"kind": "transition_fired"' in raw else raw.index(b'"kind":"transition_fired"')
+        seq_at = raw.rindex(b'"seq"', 0, at)
+        snapshot.write_bytes(raw[:seq_at] + b'"sep"' + raw[seq_at + 5:])
+        captured = StringIO()
+        rebooted = self._fresh()
+        rebooted.rehydrate_registry()
+        with patch.object(sys, "stderr", captured):
+            for _ in range(5):
+                rebooted.graph()
+        line = "cannot render in the factory"
+        self.assertEqual(captured.getvalue().count(line), 1, "the guard printed per poll")
+
+
+
+
+    def test_the_lane_belt_refuses_a_lone_surrogate_frame(self) -> None:
+        # Round-11 R11-04 (MD): the belt had no pin. A frame carrying a
+        # lone surrogate — in a value OR a key — must trip the belt and
+        # refuse its result.
+        from rlm.factory import _cap_factory_frame
+
+        frame = {"status": "ok", "result": {"runs": [{"runId": "x", "label": "\udc55"}]}}
+        _cap_factory_frame(frame)
+        self.assertEqual(frame["status"], "error")
+        self.assertIn("lone surrogate", frame["reason"])
+        clean = {"status": "ok", "result": {"runs": [{"runId": "x", "label": "fine"}]}}
+        _cap_factory_frame(clean)
+        self.assertEqual(clean["status"], "ok")
+        key_frame = {"status": "ok", "result": {"runs": [{"\udc55key": "v"}]}}
+        _cap_factory_frame(key_frame)
+        self.assertEqual(key_frame["status"], "error", "the belt skipped a KEY")
+
+    def test_the_cleaner_survives_deep_legal_json(self) -> None:
+        # Round-11 probe R11-03: the recursive cleaner blew the stack on
+        # 500-level legal JSON. The shape-C cleaner carries the depth in C.
+        from rlm.factory import _clean_surrogates
+
+        deep = json.loads("[" * 500 + "1" + "]" * 500)
+        self.assertIs(_clean_surrogates(deep), deep)
+
+    def test_a_surrogate_snapshot_name_prints_safe_at_the_site(self) -> None:
+        # Round-11 R11-04 (M1): R9-01 had only a helper-level pin. The
+        # SITE: a rehydrate whose listing carries an undecodable name
+        # (a Linux surrogateescape) prints its skip line through _shown —
+        # the text is UTF-8 encodable (the protocol-safe shape).
+        import sys
+        from io import StringIO
+
+        undecodable = "\udcb5 lone.json"
+        captured = StringIO()
+        with patch.object(sys.modules["os"], "listdir", return_value=[undecodable]), \
+                patch.object(sys, "stderr", captured):
+            from rlm.factory import FactoryExecutor
+            executor = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+            executor.rehydrate_registry()
+        line = captured.getvalue()
+        self.assertIn("is unreadable", line)
+        line.encode("utf-8")  # the site's print is protocol-safe
+
+
+    @async_test
+    async def test_a_childs_surrogate_json_output_binds_clean_at_the_decode_point(self) -> None:
+        # Round-13 pin MB (the honest decode-point pin, the child's
+        # verified shape): a child's JSON output with a lone-surrogate
+        # KEY (R11-01's channel) — through the REAL _parse_json_output
+        # path — must bind as rendered text in the downstream spawn.
+        # (The earlier "child-output" pin tested the helper directly and
+        # its mutation left the suite green.)
+        # An EMIT-CONTRACT state: the input rides factoryContract.inputs
+        # in the rlm.run frame — the structured payload channel a lone
+        # surrogate KEY rides (R11-01's shape; a plain prompt-only
+        # binding renders through json.dumps and is dumps-safe).
+        machine = {
+            "states": [
+                {
+                    "id": "a",
+                    "entry": True,
+                    "subagent": "worker",
+                    "outputs": [{"name": "sizes", "type": "json"}],
+                },
+                {
+                    "id": "b",
+                    "subagent": {"prompt": "Summarize the sizes."},
+                    "inputs": [{"name": "sizes", "type": "json", "from": "a.sizes"}],
+                    "outputs": [{"name": "summary", "type": "text"}],
+                    "emit": {"outputs": [{"name": "summary", "type": "text"}], "records": {}},
+                },
+            ],
+            "transitions": [{"from": "a", "to": "b"}],
+        }
+        key_answer = (
+            "Sizes per file.\n```json\n"
+            + json.dumps({"sizes": {"report\udcb5.txt": 1234, "notes.txt": 7}})
+            + "\n```"
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": key_answer}
+        self.host.outcomes["b"] = {"status": "running"}
+        self.store_machine(machine, spec_id="decodepoint")
+        result = await self.start("decodepoint")
+        run = self.executor._runs[result["run_id"]]
+        deadline = time.monotonic() + 30
+        while not self.host.spawn_calls("b"):
+            assert time.monotonic() < deadline, "b never spawned"
+            await asyncio.sleep(0)
+        run.task.cancel()
+        from rlm.factory import _frame_has_lone_surrogate
+
+        b_payload = self.host.spawn_calls("b")[0]
+        self.assertFalse(
+            _frame_has_lone_surrogate(b_payload),
+            "a lone surrogate key rode the contract inputs into the rlm.run frame",
+        )
+
+    @async_test
+    async def test_a_flipped_emoji_bit_costs_its_own_line_not_the_protocol(self) -> None:
+        # Round-10 probe R10-01 (trigger 1): one flipped bit in a persisted
+        # emoji escape keeps the JSON valid and leaves a LONE SURROGATE in
+        # the decoded snapshot — the kernel frame then carried the escape
+        # and the host's serde_json rejected it: "Kernel protocol error"
+        # for the session, every boot. The decode point cleans it now:
+        # the run loads, the status answer renders safe.
+        import sys
+        from io import StringIO
+
+        first, middle, last = await self._three_paused_runs()
+        snapshot = self._runs_dir() / f"{middle}.json"
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        # Seed a rocket emoji into the run's name, persist, then flip one
+        # bit in its low escape (0x5c -> 0x7c breaks the pair).
+        payload["name"] = "review 🚀 sweep"
+        raw = json.dumps(payload)
+        flipped = raw.replace("\\ud83d\\ude80", "\\ud83d|\\ude80", 1)
+        snapshot.write_text(flipped, encoding="utf-8")
+        captured = StringIO()
+        rebooted = self._fresh()
+        with patch.object(sys, "stderr", captured):
+            rebooted.rehydrate_registry()
+        self.assertEqual(set(rebooted._runs), {first, middle, last})
+        status = await rebooted.status(middle)
+        # THE PIN: the decoded value carries no lone surrogate CODE POINT
+        # (the host's parser rejects the frame; the belt would trip, but
+        # the decode-point cleaner keeps the value itself safe).
+        def _has_lone(value: Any) -> bool:
+            if isinstance(value, str):
+                return any(0xD800 <= ord(ch) <= 0xDFFF for ch in value)
+            if isinstance(value, list):
+                return any(_has_lone(item) for item in value)
+            if isinstance(value, dict):
+                return any(_has_lone(item) for item in value.values())
+            return False
+
+        self.assertFalse(_has_lone(status), "a lone surrogate survived the decode point")
+
+    @async_test
+    async def test_a_childs_lone_surrogate_output_binds_safely(self) -> None:
+        # Round-10 probe R10-01 (trigger 2) + round-11 R11-01 (the KEY
+        # channel): a child's JSON output carrying a lone-surrogate escape
+        # — in a VALUE or a KEY — used to flow raw into the binding and
+        # every downstream spawn request. The decode point cleans both.
+        from rlm.factory import _clean_surrogates, _frame_has_lone_surrogate
+
+        dirty = {"\udc55finding": "cut mid \ud83d emoji"}
+        self.assertTrue(_frame_has_lone_surrogate(dirty), "the belt must see the dirty shape")
+        value = _clean_surrogates(dirty)
+        self.assertFalse(_frame_has_lone_surrogate(value), "a lone surrogate survived the decode point (key or value)")
+        self.assertIn("\\udc55finding", value, "the key rendered as escape text")
+
+    @async_test
+    async def test_an_unlistable_runs_dir_names_the_loss_at_boot(self) -> None:
+        # Round-10 probe R10-03: the boot gate mapped every listdir
+        # OSError to False, so the R9-08 line never printed at boot. The
+        # gate opens for a listing fault now (except the fresh-session
+        # FileNotFoundError).
+        import sys
+        from io import StringIO
+
+        from rlm.factory import _runs_dir_snapshots
+
+        captured = StringIO()
+        with patch.object(sys.modules["os"], "listdir", side_effect=OSError(5, "Input/output error")):
+            with patch.object(sys, "stderr", captured):
+                self.assertTrue(_runs_dir_snapshots(), "the gate stayed closed on a listing fault")
+
+    def test_the_arm_guard_row_reads_the_error_key(self) -> None:
+        # Round-10 probe R10-05: the arm-guard row stored its failure
+        # under `detail` while the control loop's three other
+        # executor_error rows use `error` — the lane and status read one
+        # shape now.
+        src_text = factory_module.__dict__.get("__file__") or __import__("inspect").getsourcefile(factory_module)
+        src_text = open(src_text, encoding="utf-8").read()
+        guard_at = src_text.find("could not be re-armed after a kernel")
+        self.assertNotEqual(guard_at, -1, "the arm guard's row is gone")
+        row_block = src_text[max(0, guard_at - 500):guard_at]
+        self.assertIn('"error":', row_block)
+        self.assertNotIn('"detail":', row_block)
+
+
+    @async_test
+    async def test_the_journal_replay_cleans_a_pending_batch(self) -> None:
+        # Round-12 probe J2: a settle's batch lives ONLY in the journal
+        # (the snapshot predates it). One bit flip in its persisted emoji
+        # escape left a lone surrogate that the replay carried into the
+        # rehydrated run — the boot arm's first act was the poisoned
+        # rlm.run frame, every boot (a mid-spawn SIGKILL leaves the
+        # journal the only record). The replay decode point cleans.
+        import sys
+        from io import StringIO
+
+        from rlm.factory import ADMISSIONS_JOURNAL_SUFFIX, _runs_dir
+
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="replay",
+        )
+        self.host.outcomes["a"] = {"status": "running"}
+        result = await self.start("replay")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while not run.states["a"].entries[0].instances:
+            assert time.monotonic() < deadline, "the child never admitted"
+            await asyncio.sleep(0)
+        run.task.cancel()
+        self.executor._persist_run(run)
+        # Seed the journal with a batch row whose content carries a lone
+        # surrogate (one flipped bit in an emoji escape).
+        journal = _runs_dir() / f"{run_id}{ADMISSIONS_JOURNAL_SUFFIX}"
+        row = json.dumps(
+            {
+                "kind": "batch",
+                "state": "a",
+                "entry": 0,
+                "instances": [
+                    {"index": 1, "status": "pending", "prompt": "plan \ud83d|\ude80 now"}
+                ],
+                "entries_used": 1,
+            }
+        )
+        with open(journal, "a", encoding="utf-8") as handle:
+            handle.write(row + "\n")
+        self.host.outcomes = {}
+        captured = StringIO()
+        rebooted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        with patch.object(sys, "stderr", captured):
+            rebooted.rehydrate_registry()
+        reread = rebooted._runs[run_id]
+        from rlm.factory import _frame_has_lone_surrogate
+
+        for st in reread.states.values():
+            for entry in st.entries:
+                for inst in entry.instances:
+                    self.assertFalse(
+                        _frame_has_lone_surrogate(inst.prompt),
+                        "a lone surrogate rode the replayed batch",
+                    )
+
+    def test_a_python_states_surrogate_output_binds_clean(self) -> None:
+        # Round-12 pin MP: the _python_outputs cleaner had no pin. A
+        # python state's stdout JSON carrying a lone surrogate (a key or a
+        # value) renders safe at the decode point.
+        from rlm.factory import _frame_has_lone_surrogate, _python_outputs
+
+        spec = {"outputs": [{"name": "plan", "type": "text"}]}
+        stdout = json.dumps({"plan": "go \ud83d|\ude80 now"})
+        outputs = _python_outputs(spec, stdout)
+        self.assertIsInstance(outputs, dict)
+        self.assertFalse(_frame_has_lone_surrogate(outputs), "the python outputs rode the surrogate")
+
+    @async_test
+    async def test_a_marker_stat_error_costs_its_own_line(self) -> None:
+        # R8-02/F1: on the repo floor (3.11), Path.exists() re-raises
+        # every OSError outside ENOENT/ENOTDIR/EBADF/ELOOP — a metadata
+        # read error on exactly the marker's inode escaped the loop one
+        # line above the r7 read fix, killing the whole rehydrate.
+        import errno
+        import pathlib
+
+        first, middle, last = await self._three_paused_runs()
+        marker = self._runs_dir() / f"{middle}.persist-failed"
+        marker.write_text("x\n", encoding="utf-8")
+
+        real_exists = pathlib.Path.exists
+
+        def exists(path: pathlib.Path) -> bool:
+            if path.name == f"{middle}.persist-failed":
+                # The repo floor's shape (3.11): Path.exists() re-raises
+                # OSError outside its ENOENT/ENOTDIR/EBADF/ELOOP set — a
+                # metadata read error on exactly the marker's inode. (On
+                # 3.13+ pathlib swallows it, so the raise is injected at
+                # the seam the guard actually owns.)
+                raise OSError(errno.EIO, "Input/output error", str(path))
+            return real_exists(path)
+
+        import sys
+        from io import StringIO
+
+        captured = StringIO()
+        rebooted = self._fresh()
+        with patch.object(pathlib.Path, "exists", exists), patch.object(sys, "stderr", captured):
+            rebooted.rehydrate_registry()
+        self.assertEqual(set(rebooted._runs), {first, middle, last})
+        self.assertIn("(the marker's text is unreadable)", captured.getvalue())
+
+    @async_test
+    async def test_an_unhashable_run_id_costs_its_run_alone(self) -> None:
+        # R8-02/F2: a payload run_id that is not a string raised TypeError
+        # at the registry insert, OUTSIDE every recovery unit.
+        import sys
+        from io import StringIO
+
+        first, middle, last = await self._three_paused_runs()
+        snapshot = self._runs_dir() / f"{middle}.json"
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["run_id"] = ["x"]
+        snapshot.write_text(json.dumps(payload), encoding="utf-8")
+        captured = StringIO()
+        rebooted = self._fresh()
+        with patch.object(sys, "stderr", captured):
+            rebooted.rehydrate_registry()
+        self.assertEqual(set(rebooted._runs), {first, last})
+        self.assertIn(f"factory run snapshot {middle}.json is unreadable", captured.getvalue())
+
+    @async_test
+    async def test_a_flipped_order_bit_costs_its_run_alone(self) -> None:
+        # R8-01/F3: a snapshot whose JSON stays valid but whose order
+        # names a state that does not exist loads with no skip line and
+        # then raised a raw KeyError in the arm loop and the unscoped
+        # graph — the boot arm died arming NOTHING and the factory page
+        # errored for every run, all boot.
+        import sys
+        from io import StringIO
+
+        first, middle, last = await self._three_paused_runs()
+        snapshot = self._runs_dir() / f"{middle}.json"
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["order"] = ["not-a-state"]
+        snapshot.write_text(json.dumps(payload), encoding="utf-8")
+        captured = StringIO()
+        factory_module._BOOT_ARM_TASK = None
+        previous = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = None
+        try:
+            with patch.object(sys, "stderr", captured):
+                self.assertTrue(factory_module.boot_arm_persisted_runs())
+                await factory_module._BOOT_ARM_TASK
+            armed = factory_module._DEFAULT_EXECUTOR
+            assert armed is not None
+            self.assertNotIn("factory boot arm failed", captured.getvalue())
+            # The corrupt run was REFUSED AT LOAD (the order/states check
+            # fires inside the recovery unit — a louder, earlier outcome
+            # than the arm-loop guard); the healthy runs still armed.
+            self.assertNotIn(middle, armed._runs)
+            self.assertIn(f"factory run snapshot {middle}.json is unreadable", captured.getvalue())
+            for rid in (first, last):
+                self.assertIsNotNone(armed._runs[rid].task, f"{rid} not armed")
+            # The unscoped graph and the view lane answer the healthy runs.
+            graph = armed.graph()
+            self.assertTrue({first, last} <= {row["run_id"] for row in graph["runs"]})
+            lane = await armed.activity({"action": "graph"})
+            self.assertTrue({first, last} <= {row["runId"] for row in lane["runs"]})
+        finally:
+            for run in (factory_module._DEFAULT_EXECUTOR or self.executor)._runs.values():
+                if run.task is not None:
+                    run.task.cancel()
+            factory_module._DEFAULT_EXECUTOR = previous
+            factory_module._BOOT_ARM_TASK = None
+
+    @async_test
+    async def test_a_flipped_event_key_bit_costs_its_run_alone(self) -> None:
+        # R8-01/F4: a "seq" -> "sep" flip in one event makes the unscoped
+        # graph's edge sort raise TypeError for the WHOLE poll; with the
+        # per-run guard the healthy run still answers.
+        import sys
+        from io import StringIO
+
+        # A healthy paused run on both sides.
+        first, _, last = await self._three_paused_runs()
+        # A chained run in the middle (it holds transition_fired events).
+        self.store_machine(
+            {
+                "states": [state("p", entry=True), state("q"), state("r")],
+                "transitions": [{"from": "p", "to": "q"}, {"from": "q", "to": "r"}],
+            },
+            spec_id="chain",
+        )
+        self.host.outcomes["r"] = {"status": "running"}
+        result = await self.start("chain")
+        chained = result["run_id"]
+        run = self.executor._runs[chained]
+        deadline = time.monotonic() + 30
+        while run.transitions_fired < 2 or not run.states["r"].entries:
+            assert time.monotonic() < deadline, "the chain never ran"
+            await asyncio.sleep(0)
+        run.task.cancel()
+        self.executor._persist_run(run)
+        self.host.outcomes = {}
+        snapshot = self._runs_dir() / f"{chained}.json"
+        raw = snapshot.read_bytes()
+        at = raw.index(b'"kind": "transition_fired"') if b'"kind": "transition_fired"' in raw else raw.index(b'"kind":"transition_fired"')
+        seq_at = raw.rindex(b'"seq"', 0, at)
+        snapshot.write_bytes(raw[:seq_at] + b'"sep"' + raw[seq_at + 5:])
+        captured = StringIO()
+        rebooted = self._fresh()
+        rebooted.rehydrate_registry()
+        with patch.object(sys, "stderr", captured):
+            graph = rebooted.graph()
+        self.assertIn(first, {row["run_id"] for row in graph["runs"]})
+        self.assertIn(last, {row["run_id"] for row in graph["runs"]})
+
+    @async_test
+    async def test_a_stray_json_copy_does_not_shadow_the_live_snapshot(self) -> None:
+        # R8-04/C4: an operator backup left in the runs dir under a
+        # .json name used to silently REPLACE the live run (the registry
+        # keys by the payload id, not the file name). The stem check
+        # refuses it loudly.
+        import sys
+        from io import StringIO
+
+        first, middle, last = await self._three_paused_runs()
+        snapshot = self._runs_dir() / f"{middle}.json"
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["name"] = "STALE-COPY"
+        (self._runs_dir() / "zz-backup.json").write_text(json.dumps(payload), encoding="utf-8")
+        captured = StringIO()
+        rebooted = self._fresh()
+        with patch.object(sys, "stderr", captured):
+            rebooted.rehydrate_registry()
+        self.assertEqual(set(rebooted._runs), {first, middle, last})
+        self.assertNotEqual(rebooted._runs[middle].name, "STALE-COPY")
+        self.assertIn("zz-backup.json is unreadable", captured.getvalue())
+
+    @async_test
+    async def test_the_belt_names_an_unreadable_marker(self) -> None:
+        # R8-05/a2: the belt (the existence line) had no test — removing
+        # it kept the suite green. chmod 000 must print the exact line
+        # and never block the load.
+        import sys
+        from io import StringIO
+
+        first, middle, last = await self._three_paused_runs()
+        # A marker that cannot be read (a directory at the path raises
+        # IsADirectoryError for ANY user — chmod 000 alone does not stop
+        # a root-owned container kernel).
+        marker = self._runs_dir() / f"{middle}.persist-failed"
+        marker.mkdir()
+        self.addCleanup(lambda: shutil.rmtree(marker, ignore_errors=True))
+        captured = StringIO()
+        rebooted = self._fresh()
+        with patch.object(sys, "stderr", captured):
+            rebooted.rehydrate_registry()
+        self.assertEqual(set(rebooted._runs), {first, middle, last})
+        self.assertIn("(the marker's text is unreadable)", captured.getvalue())
+
+    @async_test
+    async def test_a_first_write_failure_names_the_lost_run(self) -> None:
+        # R8-03/C3: when the failed write is the run's FIRST, there is
+        # no snapshot to walk — the marker was read only by a human ls
+        # and the run was lost entirely (its children under the
+        # supervisor, no owner). The load-end scan names every such loss.
+        import sys
+        from io import StringIO
+
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="firstwrite",
+        )
+        self.host.outcomes["a"] = {"status": "running"}
+        result = await self.start("firstwrite")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while not run.states["a"].entries[0].instances:
+            assert time.monotonic() < deadline, "the child never admitted"
+            await asyncio.sleep(0)
+        run.task.cancel()
+        # The FIRST write fails: the staging path is a directory.
+        blocker = self._runs_dir() / f".{run_id}.json.tmp"
+        blocker.mkdir()
+        # Remove the run's earlier snapshots/journals so this persist is
+        # the FIRST (the marker then names a run with no snapshot at all).
+        for suffix in (".json", ".admissions.jsonl"):
+            path = self._runs_dir() / f"{run_id}{suffix}"
+            path.unlink(missing_ok=True)
+        run.revision += 1
+        self.executor._persist_run(run)
+        self.host.outcomes = {}
+        captured = StringIO()
+        rebooted = self._fresh()
+        with patch.object(sys, "stderr", captured):
+            rebooted.rehydrate_registry()
+        self.assertNotIn(run_id, rebooted._runs)
+        self.assertIn("could not write its first registry snapshot", captured.getvalue())
+        shutil.rmtree(blocker, ignore_errors=True)
+
+
+class FactoryCrossLanePauseBudgetTest(_ExecutorTestCase):
+    """Round-3 probe R3A: the join refactor moved the max_transitions
+    pause into _fire_transition and silently dropped the budget layer's
+    _mark_paused call — a cross-lane regression only the merged shape
+    exposes (the join lane's base predates the budget layer)."""
+
+    @async_test
+    async def test_a_max_transitions_pause_excludes_its_wait_from_the_budget(self) -> None:
+        self.store_machine(
+            {
+                "run": {"max_transitions": 1, "budget_ms": 60_000},
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker"},
+                    {"id": "b", "subagent": "worker"},
+                    {"id": "c", "subagent": "worker"},
+                ],
+                "transitions": [{"from": "a", "to": "b"}, {"from": "a", "to": "c"}],
+            },
+            spec_id="r3a",
+        )
+        result = await self.start("r3a")
+        run = self.executor._runs[result["run_id"]]
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state == "paused":
+                break
+            assert time.monotonic() < deadline, "the run never paused"
+            await asyncio.sleep(0)
+        self.assertEqual(run.pause_reason, "max_transitions exceeded")
+        self.assertIsNotNone(run.pause_started_at, "the pause was never marked")
+        # The operator waits 2 hours.
+        self.clock.advance(7_200.0)
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state in ("done", "failed", "paused", "stopped"):
+                break
+            assert time.monotonic() < deadline, "the run never settled"
+            await asyncio.sleep(0)
+        # THE PIN: the 2h pause never folded into the budget — the run
+        # completes, not re-paused on the budget.
+        self.assertEqual(run.state, "done")
+
+
+class FactoryRunTombstoneTest(_ExecutorTestCase):
+    """Round-4 probe R4-03: a terminal run leaves a durable tombstone —
+    after any restart, status answers the retirement record instead of
+    'unknown factory run', so an owner can tell by-design retirement from
+    a lost registry (the incident that steered the false 'Part B failed'
+    verdict)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        artifact_temp = TemporaryDirectory()
+        self.addCleanup(artifact_temp.cleanup)
+        previous = os.environ.get("RLM_SESSION_DIR")
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("RLM_SESSION_DIR", None)
+            else:
+                os.environ["RLM_SESSION_DIR"] = previous
+
+        self.addCleanup(restore)
+        os.environ["RLM_SESSION_DIR"] = str(artifact_temp.name)
+        self.artifacts = Path(artifact_temp.name)
+
+    def _runs_dir(self) -> Path:
+        from rlm.factory import _runs_dir
+
+        directory = _runs_dir()
+        assert directory is not None
+        return directory
+
+    @async_test
+    async def test_a_terminal_run_answers_its_tombstone_after_a_restart(self) -> None:
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="tomb",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "ok"}
+        result = await self.start("tomb")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state == "done":
+                break
+            assert time.monotonic() < deadline, "the run never finished"
+            await asyncio.sleep(0)
+        # The runs dir holds no live snapshot (terminal runs retire) —
+        # but the tombstone ledger holds the record.
+        runs_dir = self.artifacts / "factory-runs"
+        self.assertFalse((runs_dir / f"{run_id}.json").exists())
+        ledger = runs_dir / "retired.jsonl"
+        self.assertTrue(ledger.exists(), "the terminal run left no tombstone")
+        # The restart: a new executor; status must answer the RECORD, not
+        # 'unknown factory run'.
+        rebooted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        rebooted.rehydrate_registry()
+        self.assertNotIn(run_id, rebooted._runs)
+        status = await rebooted.status(run_id)
+        self.assertEqual(status["run_id"], run_id)
+        self.assertEqual(status["state"], "done")
+        self.assertTrue(status["retired"], "status did not answer the tombstone")
+        # A genuinely unknown id still raises.
+        with self.assertRaises(ValueError):
+            await rebooted.status("no-such-run")
+
+    @async_test
+    async def test_a_stopped_run_tombstones_its_reason(self) -> None:
+        # A run stopped MID-flight (the runner-t0013 shape: an owner stops
+        # a live run): the stop's terminal retire tombstones the state and
+        # the reason, so a post-restart status can answer it.
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="tomb2",
+        )
+        self.host.outcomes["a"] = {"status": "running"}
+        result = await self.start("tomb2")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while not run.states["a"].entries:
+            assert time.monotonic() < deadline, "the run never started"
+            await asyncio.sleep(0)
+        await rlm_module.rlm.factory.stop(run_id)
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state == "stopped":
+                break
+            assert time.monotonic() < deadline, "the run never stopped"
+            await asyncio.sleep(0)
+        rebooted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        rebooted.rehydrate_registry()
+        status = await rebooted.status(run_id)
+        self.assertEqual(status["state"], "stopped")
+        self.assertTrue(status["retired"])
+
+    @async_test
+    async def test_the_retired_ledger_stays_bounded_and_answers_the_latest(self) -> None:
+        # Round-5 probes R5-02 + R5-03: the ledger compacts to its read
+        # window (no unbounded growth, no whole-file reads past the
+        # window), and the LAST tombstone line wins (a done -> stop()
+        # re-tombstone answers 'stopped' after the restart, matching the
+        # in-boot answer).
+        from rlm.factory import RETIRED_RUNS_READ_LIMIT
+
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="ledger",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "ok"}
+        result = await self.start("ledger")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state == "done":
+                break
+            assert time.monotonic() < deadline, "the run never finished"
+            await asyncio.sleep(0)
+        # THE BOUND: retire more runs than the read window; the ledger
+        # keeps only its trailing lines.
+        for i in range(RETIRED_RUNS_READ_LIMIT + 50):
+            self.executor._retire_run_files(run, self.artifacts / "factory-runs")
+        ledger = (self.artifacts / "factory-runs" / "retired.jsonl").read_text(encoding="utf-8")
+        line_count = len([line for line in ledger.splitlines() if line.strip()])
+        self.assertLessEqual(line_count, RETIRED_RUNS_READ_LIMIT, "the ledger grew past its window")
+        # THE LATEST WINS: stop() on the done run re-tombstones 'stopped';
+        # a post-restart status answers the trailing record.
+        await rlm_module.rlm.factory.stop(run_id)
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state == "stopped":
+                break
+            assert time.monotonic() < deadline, "the run never stopped"
+            await asyncio.sleep(0)
+        rebooted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        status = await rebooted.status(run_id)
+        self.assertEqual(status["state"], "stopped", "the trailing tombstone must win")
+        self.assertTrue(status["retired"])
+
+    @async_test
+    async def test_a_corrupt_ledger_byte_never_kills_the_retire_path(self) -> None:
+        # Round-6 finding 1: one invalid-UTF-8 byte in retired.jsonl
+        # escaped the compaction's except OSError (UnicodeDecodeError is a
+        # ValueError) — every FUTURE terminal transition crashed with the
+        # snapshot already unlinked: no milestone, no tombstone, NO
+        # durable trace. The read decodes with replacement now.
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="utf8",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "ok"}
+        result = await self.start("utf8")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state == "done":
+                break
+            assert time.monotonic() < deadline, "the run never finished"
+            await asyncio.sleep(0)
+        # Seed the ledger with an invalid byte, then retire AGAIN: the
+        # retire must survive and tombstone.
+        ledger = self.artifacts / "factory-runs" / "retired.jsonl"
+        ledger.write_bytes(b'{"run_id": "seed", "state": "done"}\n\xff\xfe\n')
+        self.executor._retire_run_files(run, self.artifacts / "factory-runs")
+        text = ledger.read_text(encoding="utf-8", errors="replace")
+        self.assertIn(run_id, text, "the retire crashed or lost the tombstone")
+
+    def test_a_midwrite_fault_keeps_the_prior_tombstones(self) -> None:
+        # Round-6 finding 2: the ledger rewrite was an in-place
+        # truncate+write — a mid-write fault wiped prior tombstones and a
+        # mid-window reader saw an empty ledger. The rewrite stages and
+        # os.replace's now, atomic like the snapshot path.
+        import unittest.mock as mock_mod
+
+        ledger = self.artifacts / "factory-runs" / "retired.jsonl"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(
+            "\n".join(json.dumps({"run_id": f"r{i}", "state": "done"}) for i in range(5)) + "\n",
+            encoding="utf-8",
+        )
+        run = FactoryRun(run_id="r9", spec_id="s", name=None, machine={"states": [], "transitions": []})
+        # A write that faults mid-rewrite: os.replace raises.
+        with mock_mod.patch("rlm.factory.os.replace", side_effect=OSError("disk full")):
+            self.executor._retire_run_files(run, self.artifacts / "factory-runs")
+        # The prior ledger stands (the staging file was the only victim).
+        text = ledger.read_text(encoding="utf-8")
+        self.assertEqual(len([l for l in text.splitlines() if l.strip()]), 5,
+                         "the mid-write fault wiped the prior tombstones")
+
+    @async_test
+    async def test_a_finished_run_whose_marker_outlived_it_is_not_called_lost(self) -> None:
+        # Round-9 probe R9-05: a run FINISHED but its marker unlink
+        # failed (a crash between the retire's unlinks, or a directory at
+        # the marker path). The next boot must not call a finished run
+        # lost — status answers its tombstone.
+        import sys
+        from io import StringIO
+
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="outlived",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "ok"}
+        result = await self.start("outlived")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state == "done":
+                break
+            assert time.monotonic() < deadline, "the run never finished"
+            await asyncio.sleep(0)
+        # The retire tombstoned the run; the marker unlink "failed" (a
+        # directory at the marker path).
+        marker = self._runs_dir() / f"{run_id}.persist-failed"
+        marker.mkdir()
+        self.addCleanup(lambda: shutil.rmtree(marker, ignore_errors=True))
+        captured = StringIO()
+        rebooted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        with patch.object(sys, "stderr", captured):
+            rebooted.rehydrate_registry()
+        self.assertNotIn("is lost", captured.getvalue())
+        status = await rebooted.status(run_id)
+        self.assertEqual((status["state"], status["retired"]), ("done", True))
+
+    def _runs_dir(self) -> Path:
+        from rlm.factory import _runs_dir
+
+        directory = _runs_dir()
+        assert directory is not None
+        return directory
+
+    @async_test
+    async def test_a_crashed_unlink_keeps_the_tombstone(self) -> None:
+        # Round-10 probe R10-04: the tombstone used to write AFTER the
+        # unlinks — a crash between them left a FINISHED run with no
+        # durable record, and the load-end loss line called it lost at
+        # every boot. The tombstone writes FIRST now: a crashed unlink
+        # leaves it standing, and status answers the retirement.
+        import sys
+        from io import StringIO
+
+        self.store_machine(
+            {"states": [{"id": "a", "entry": True, "subagent": "worker"}]},
+            spec_id="crashunlink",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "ok"}
+        result = await self.start("crashunlink")
+        run_id = result["run_id"]
+        run = self.executor._runs[run_id]
+        deadline = time.monotonic() + 30
+        while True:
+            if run.state == "done":
+                break
+            assert time.monotonic() < deadline, "the run never finished"
+            await asyncio.sleep(0)
+        # A retire whose unlinks all crash (the tombstone must have
+        # written FIRST): mock the unlink to raise.
+        runs_dir = self._runs_dir()
+        runs_dir_leg = runs_dir / "retired.jsonl"
+        # The finalize's own retire already tombstoned the run; clear the
+        # ledger so the pinned retire is the ONLY writer.
+        runs_dir_leg.unlink(missing_ok=True)
+        captured = StringIO()
+        # A process crash mid-retire (the power-loss shape): an
+        # UNcaught interruption between the first unlink and the rest.
+        # Tombstone-first keeps the record; unlinks-first loses it.
+        os_module = __import__("os")
+
+        def crashing_unlink(path, *args, **kwargs):
+            raise KeyboardInterrupt
+
+        with patch.object(sys, "stderr", captured), patch.object(
+            os_module, "unlink", side_effect=crashing_unlink
+        ):
+            try:
+                self.executor._retire_run_files(run, runs_dir)
+            except KeyboardInterrupt:
+                pass  # the crash the retire must survive in its ORDERING
+        self.assertTrue(runs_dir_leg.exists(), "the crashed unlinks lost the tombstone")
+        rebooted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        status = await rebooted.status(run_id)
+        self.assertEqual((status["state"], status["retired"]), ("done", True))
+
+    @async_test
+    async def test_a_lone_surrogate_in_a_tombstone_answers_safe(self) -> None:
+        # Round-11 probe R11-02 (the ledger decode point): a lone
+        # surrogate in a tombstone's name returned through status — a
+        # model print of it was rejected on the real kernel. The scan
+        # cleans its rows.
+        from rlm.factory import RETIRED_RUNS_FILE, _runs_dir
+
+        ledger = _runs_dir() / RETIRED_RUNS_FILE
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(
+            json.dumps({"run_id": "lead", "spec_id": "s", "state": "done"}) + "\n"
+            + json.dumps({"run_id": "lead", "spec_id": "s\udc55", "state": "done"}) + "\n",
+            encoding="utf-8",
+        )
+        record = self.executor._retired_record("lead")
+        assert record is not None
+        from rlm.factory import _frame_has_lone_surrogate
+
+        self.assertFalse(_frame_has_lone_surrogate(record), "a lone surrogate rode the status answer")
+
+
+class FactoryPrintDurabilityTest(_ExecutorTestCase):
+    """A daemonless (``--print``) host keeps its children in its own process,
+    so ``resume`` refuses any run that process did not start and names the
+    daemon as the durable path."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        artifact_temp = TemporaryDirectory()
+        self.addCleanup(artifact_temp.cleanup)
+        previous = {name: os.environ.get(name) for name in ("RLM_SESSION_DIR", "RLM_DAEMONLESS")}
+
+        def restore() -> None:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        self.addCleanup(restore)
+        os.environ["RLM_SESSION_DIR"] = str(artifact_temp.name)
+        os.environ["RLM_DAEMONLESS"] = "1"
+
+    async def paused_run(self) -> str:
+        self.host.outcomes["implement"] = {"status": "error", "error": "boom"}
+        self.store_machine({"states": [{"id": "implement", "entry": True, "subagent": "worker"}]})
+        run_id = (await self.start())["run_id"]
+        run = self.executor._runs[run_id]
+        await self.wait_until(lambda: run.state != "running")
+        self.assertEqual(run.state, "paused")
+        self.executor._persist_run(run)
+        return run_id
+
+    @async_test
+    async def test_a_print_run_is_never_saved_and_a_later_process_refuses_it(self) -> None:
+        run_id = await self.paused_run()
+        self.assertFalse((Path(os.environ["RLM_SESSION_DIR"]) / factory_module.RUNS_DIR_NAME).exists())
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        self.assertNotIn(run_id, restarted._runs)
+        with self.assertRaises(ValueError) as raised:
+            await rlm_module.rlm.factory.resume(run_id)
+        self.assertIn("run machines under the daemon", str(raised.exception))
+
+    @async_test
+    async def test_resume_continues_a_run_this_print_process_started(self) -> None:
+        run_id = await self.paused_run()
+        resumed = await rlm_module.rlm.factory.resume(run_id)
+        self.assertEqual(resumed["state"], "running")
+
+    @async_test
+    async def test_daemon_resume_of_an_unknown_run_is_not_a_print_refusal(self) -> None:
+        os.environ["RLM_DAEMONLESS"] = ""
+        with self.assertRaisesRegex(ValueError, "unknown factory run 'never-started'"):
+            await rlm_module.rlm.factory.resume("never-started")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -115,6 +115,10 @@ pub struct RlmChildResult {
     /// `queued` | `running` | `done` | `error` | `cancelled`.
     pub status: &'static str,
     pub settled: bool,
+    /// Optional factory task-background observation: true means busy, false
+    /// confirms idle, and absent means unobserved (or an ordinary child).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub factory_task_busy: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer_preview: Option<String>,
     /// The full final-answer text (the settle-binding lane; the roster
@@ -133,6 +137,22 @@ pub struct RlmChildResult {
 
 // Requests into the host
 
+/// The child kind a spawn selects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RlmSpawnKind {
+    /// An ordinary agent subagent (the default).
+    #[default]
+    Subagent,
+    /// The Decision API child (`kind="decision"`): the settings
+    /// `decisionModel` serves it, and its intake answers every message
+    /// with one decision.
+    Decision,
+    /// The refinement child: the daemon's refine command spawns it to
+    /// run one planning pass instead of the agent engine. The kernel
+    /// surface never selects it.
+    Refine,
+}
+
 /// Validated `rlm.spawn` request handed to the child-session host.
 #[derive(Debug, Clone)]
 pub struct RlmSpawnRequest {
@@ -143,6 +163,9 @@ pub struct RlmSpawnRequest {
     pub model: Option<String>,
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
+    /// The child kind the spawn selects: the default subagent or a
+    /// dedicated child engine. One enum field, not a bool per kind.
+    pub kind: RlmSpawnKind,
     /// Working directory; the host resolves relative paths against the session cwd.
     pub cwd: Option<String>,
     /// The parent's in-flight turn request the spawn anchors to (TS
@@ -161,6 +184,12 @@ pub struct RlmFactoryTag {
     pub run_id: String,
     pub spec_id: String,
     pub state_id: String,
+    /// The state's output contract (a `pa_factory::Contract` plus the
+    /// bound `inputs`), handed to the child's `factory.emit` through its
+    /// create's runtime metadata. It is never part of the ledger's spawn
+    /// edge.
+    #[serde(skip)]
+    pub contract: Option<Value>,
 }
 
 /// Validated `rlm.create_session` request handed to the host.
@@ -501,9 +530,6 @@ pub struct RlmHostBridge {
     /// Fires on every accepted note; `None` keeps the store the only surface.
     note_emit: Option<RlmProgressNoteEmit>,
     host: Arc<dyn RlmSubagentHost>,
-    /// The child-usage attribution producer `rlm.spawn` registers into
-    /// and the daemon's child observation drives.
-    pub usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
     /// The spawn anchor [`register_run`] reads the in-flight turn from
     /// (`None` until the engine built the session's agent).
     pub(crate) semantic_spawn: std::sync::OnceLock<SemanticSpawnAnchor>,
@@ -516,7 +542,6 @@ impl RlmHostBridge {
     pub fn new(
         registry: Arc<ModelRegistry>,
         host: Arc<dyn RlmSubagentHost>,
-        usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
         note_emit: Option<RlmProgressNoteEmit>,
     ) -> Self {
         Self {
@@ -524,7 +549,6 @@ impl RlmHostBridge {
             notes: Arc::new(RlmProgressNotes::default()),
             note_emit,
             host,
-            usage,
             semantic_spawn: std::sync::OnceLock::new(),
         }
     }
@@ -656,11 +680,6 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
                     None => None,
                 };
                 let handle = bridge.host.spawn(request).await?;
-                // TS `_findLastAssistantMessage` at spawn: the spawning
-                // assistant row (persisted at `message_end` before tool
-                // execution) is the target every child-usage attribution
-                // folds into.
-                bridge.usage.register_spawn(&handle.rlm_child_id).await;
                 serde_json::to_value(&handle).map_err(anyhow::Error::new)
             })
         }),
@@ -675,20 +694,47 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     reject_unsupported_kwargs(
         &kwargs,
         OPERATION,
-        &["name", "model", "thinking", "cwd", "factory"],
+        &[
+            "name",
+            "model",
+            "thinking",
+            "cwd",
+            "factory",
+            "factoryContract",
+            "kind",
+        ],
     )?;
+    let kind = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
+        None => RlmSpawnKind::Subagent,
+        Some("decision") => RlmSpawnKind::Decision,
+        Some(other) => {
+            anyhow::bail!(
+                "rlm.spawn kind must be \"decision\" when given, not {other:?}. Only the Decision \
+                 API child has a kind."
+            )
+        }
+    };
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
         assert_direct_agent_message_target(name)?;
     }
     let model = optional_string_kwarg(&kwargs, "model", OPERATION)?;
+    // A decision child's model comes from the `decisionModel` setting —
+    // the same refusal the decision request path serves — so the pair is
+    // refused here instead of silently dropping the model.
+    if model.is_some() && kind == RlmSpawnKind::Decision {
+        anyhow::bail!(
+            "The decision child's model comes from the decisionModel setting; the spawn carries no \
+             model (got {model:?})."
+        );
+    }
     let model = normalize_requested_rlm_subagent_model(model, OPERATION)?;
     let thinking = optional_string_kwarg(&kwargs, "thinking", OPERATION)?;
     let thinking =
         normalize_requested_rlm_subagent_thinking_level(thinking, OPERATION)?.map(String::from);
     let cwd = cwd_kwarg(&kwargs, OPERATION)?;
-    let factory = match kwargs.get("factory") {
+    let mut factory: Option<RlmFactoryTag> = match kwargs.get("factory") {
         None | Some(Value::Null) => None,
         Some(tag) => Some(serde_json::from_value(tag.clone()).map_err(|_| {
             anyhow::anyhow!(
@@ -696,11 +742,20 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
             )
         })?),
     };
+    match (kwargs.get("factoryContract"), factory.as_mut()) {
+        (None | Some(Value::Null), _) => {}
+        (Some(contract @ Value::Object(_)), Some(tag)) => tag.contract = Some(contract.clone()),
+        (Some(Value::Object(_)), None) => {
+            anyhow::bail!("{OPERATION} factoryContract needs the factory run tag")
+        }
+        (Some(_), _) => anyhow::bail!("{OPERATION} factoryContract must be an object"),
+    }
     Ok(RlmSpawnRequest {
         prompt: prompt.to_string(),
         name,
         model,
         thinking,
+        kind,
         cwd,
         spawned_by_request_id: None,
         factory,
@@ -1063,6 +1118,7 @@ mod tests {
                     session_dir: Some("/tmp/sub-1".into()),
                     status: "done",
                     settled: true,
+                    factory_task_busy: None,
                     answer_preview: Some("all done".into()),
                     answer_text: Some("all done".into()),
                     error: None,
@@ -1372,6 +1428,7 @@ mod tests {
                 "kwargs": {
                     "name": "worker", "model": "p/m", "thinking": "High", "cwd": "lanes/a",
                     "factory": { "runId": "r1", "specId": "sw", "stateId": "build" },
+                    "factoryContract": { "outputs": [{ "name": "verdict", "type": "text" }], "records": {}, "inputs": {} },
                 }
             }),
         )
@@ -1392,6 +1449,7 @@ mod tests {
         assert_eq!(requests[0].name.as_deref(), Some("worker"));
         assert_eq!(requests[0].model.as_deref(), Some("p/m"));
         assert_eq!(requests[0].thinking.as_deref(), Some("high"));
+        assert_eq!(requests[0].kind, RlmSpawnKind::Subagent);
         assert_eq!(requests[0].cwd.as_deref(), Some("lanes/a"));
         assert_eq!(
             requests[0].factory,
@@ -1399,9 +1457,53 @@ mod tests {
                 run_id: "r1".to_string(),
                 spec_id: "sw".to_string(),
                 state_id: "build".to_string(),
+                contract: Some(
+                    json!({ "outputs": [{ "name": "verdict", "type": "text" }], "records": {}, "inputs": {} })
+                ),
             })
         );
         drop(requests);
+
+        // The decision-child kind parses into the spawn request; unknown
+        // kinds refuse.
+        let response = call(
+            &wiring,
+            "rlm.run",
+            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "decision" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["name"], "worker");
+        let requests = spawn_requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].kind, RlmSpawnKind::Decision);
+        drop(requests);
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "oracle" } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.spawn kind must be \"decision\" when given, not \"oracle\". Only the Decision API \
+             child has a kind."
+        );
+        // A decision child's model comes from the `decisionModel` setting:
+        // the pair is refused instead of silently dropping the model.
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "decision", "model": "p/m" } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "The decision child's model comes from the decisionModel setting; the spawn carries no \
+             model (got Some(\"p/m\"))."
+        );
 
         // Validation: prompt type, unsupported kwargs, name rules.
         let error = call(&wiring, "rlm.run", json!({ "kwargs": {} }))

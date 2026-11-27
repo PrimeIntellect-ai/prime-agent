@@ -101,6 +101,16 @@ pub(crate) fn summary_identity_keys(summary: &Value) -> Vec<String> {
 /// Whether a summary is a spawned subagent (TS `isSubagentSummary`): the
 /// runtime kind decides when present; summaries from daemons that predate
 /// it still carry subagent linkage and never surface as top-level agents.
+/// Whether a summary belongs to a Decision API child (`decisionChild`):
+/// the agents view hides these System 1 children from the user; their
+/// spend still rolls into the parent's cost.
+pub(crate) fn is_decision_child_summary(summary: &Value) -> bool {
+    summary
+        .get("decisionChild")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub(crate) fn is_subagent_summary(summary: &Value) -> bool {
     match summary.get("runtimeKind").and_then(Value::as_str) {
         Some(kind) => kind == "subagent",
@@ -285,6 +295,12 @@ pub fn entry_status(entry: &Value) -> AgentRosterStatus {
 pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> SubagentCounts {
     let mut counts = SubagentCounts::default();
     for (entry, depth) in descendant_entries_with_depth(roster, parent) {
+        // The Decision API child's summary (`decisionChild`): a System 1
+        // server, not an interactive agent — the user never sees or
+        // manages it, so it never counts in the user-facing readout.
+        if entry.get("summary").is_some_and(is_decision_child_summary) {
+            continue;
+        }
         counts.total += 1;
         match entry_status(entry) {
             AgentRosterStatus::Running => {
@@ -302,22 +318,26 @@ pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> Subagent
     counts
 }
 
-/// The session's whole-family spend: the `compute_rollups` total the
-/// agents view bills the session's row. `None` when the roster holds no
-/// record for the session.
+/// The session's whole-family spend: its roster row's published
+/// `totalUsage` (own plus every descendant's), the same number the agents
+/// view bills the row. `None` when the roster holds no row for the session.
 pub(crate) fn family_cost(roster: &[Value], session: &SessionIdentity) -> Option<f64> {
-    let records = crate::agents_view_state::reconcile_unified_sessions(roster, &[], None);
-    let rollups = crate::agents_view_forest::compute_rollups(&records);
     let keys = session.keys();
-    records
+    roster
         .iter()
-        .find(|record| {
-            summary_identity_keys(&crate::agents_view_state::summary_for_record(record))
+        .filter_map(|entry| entry.get("summary"))
+        .find(|summary| {
+            summary_identity_keys(summary)
                 .iter()
                 .any(|key| keys.contains(key))
         })
-        .and_then(|record| rollups.get(&record.identity))
-        .map(|rollup| rollup.cost)
+        .map(|summary| {
+            summary
+                .get("totalUsage")
+                .and_then(|usage| usage.get("cost"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+        })
 }
 
 #[cfg(test)]
@@ -380,6 +400,27 @@ mod tests {
     }
 
     #[test]
+    fn decision_children_never_count() {
+        let mut decision = child_summary("dc", "p1", "subagent");
+        decision["decisionChild"] = json!(true);
+        let roster = vec![
+            entry("parent", &parent_summary("p1"), "idle"),
+            entry("c1", &child_summary("c1", "p1", "subagent"), "running"),
+            entry("dc", &decision, "running"),
+        ];
+        let counts = count_descendants(
+            &roster,
+            &SessionIdentity::new(
+                Some("p1-live".to_string()),
+                Some("p1".to_string()),
+                Some("/sessions/p1.jsonl".to_string()),
+            ),
+        );
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.running, 1);
+    }
+
+    #[test]
     fn running_split_counts_direct_and_nested() {
         let mut roster = vec![
             entry("parent", &parent_summary("p1"), "idle"),
@@ -409,8 +450,8 @@ mod tests {
     }
 
     #[test]
-    fn family_cost_is_the_agents_view_row_rollup() {
-        let summary = |id: &str, depth: u32, usage_cost: f64| {
+    fn family_cost_is_the_rows_published_total() {
+        let summary = |id: &str, depth: u32, usage_cost: f64, total_cost: f64| {
             json!({
                 "sessionId": id,
                 "lifecycle": "live",
@@ -419,17 +460,18 @@ mod tests {
                 "runtimeKind": "top-level",
                 "rlmDepth": depth,
                 "usage": { "cost": usage_cost },
+                "totalUsage": { "cost": total_cost },
             })
         };
-        let root = summary("root", 0, 1.75);
-        let mut child = summary("child", 1, 0.30);
+        let root = summary("root", 0, 1.75, 2.30);
+        let mut child = summary("child", 1, 0.30, 0.55);
         child["runtimeKind"] = json!("subagent");
         child["rlmChildId"] = json!("child-a");
         child["parentActiveSessionId"] = json!("root-live");
         child["parentSessionId"] = json!("root");
         // The grandchild links by its durable session id alone (its
         // parent is no longer live), the shape a ledger-seeded row has.
-        let mut grandchild = summary("grand", 2, 0.25);
+        let mut grandchild = summary("grand", 2, 0.25, 0.25);
         grandchild["runtimeKind"] = json!("subagent");
         grandchild["rlmChildId"] = json!("child-b");
         grandchild["parentSessionId"] = json!("child");
@@ -467,6 +509,8 @@ mod tests {
             Some(row.cost),
             "the title and the agents-view row agree"
         );
+        // The total never depends on which descendant rows the roster holds.
+        assert_eq!(family_cost(&roster[..1], &identity), Some(2.30));
         assert_eq!(
             family_cost(
                 &roster,

@@ -29,10 +29,10 @@ use crate::kernel::shared::{
     DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SNAPSHOT_DEBOUNCE_MS, DIFF_DISPLAY_MIME,
     END_TURN_REQUEST_TYPE, FACTIVITY_SETTLE_TIMEOUT_MS, FACTIVITY_WATCH_TIMEOUT_MS_CAP,
     HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, INBOX_MESSAGE_DISPLAY_MIME, KERNEL_ABORT_GRACE_MS,
-    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
-    KERNEL_BUSY_REUSE_WAIT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS, KERNEL_STDERR_LOG_BUDGET_MARKER,
-    MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_KERNEL_STDERR_CHARS,
-    MAX_KERNEL_STDERR_LOG_BYTES, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_BACKGROUND_CELL_MESSAGE,
+    KERNEL_BUSY_INTERRUPT_INTERVAL_MS, KERNEL_BUSY_REUSE_WAIT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS,
+    KERNEL_STDERR_LOG_BUDGET_MARKER, MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS,
+    MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
     RESTORE_EXECUTION_TIMEOUT_MS, SNAPSHOT_EXECUTION_TIMEOUT_MS, TRANSCRIPT_READ_DISPLAY_MIME,
 };
 use crate::kernel::state_snapshot::{
@@ -74,6 +74,16 @@ struct ExitInfo {
     signal: Option<i32>,
 }
 
+/// Which running requests a new request must wait out before it starts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// Internal ops and state requests: every running request.
+    Exclusive,
+    /// A user cell: attached requests only, so it runs beside backgrounded
+    /// cells (the kernel refuses it while one runs synchronous code).
+    BesideDetached,
+}
+
 /// Fields of a settled execution shared with the stdout reader task.
 #[allow(clippy::struct_excessive_bools)] // independent settlement flags, not a state machine
 #[derive(Default)]
@@ -97,8 +107,6 @@ struct ExecBuffers {
     ended_turn: bool,
     done_fields: Option<Value>,
     settled: bool,
-    /// The time limit the cell outlived and was interrupted for.
-    timed_out_after_ms: Option<u64>,
 }
 
 pub(crate) struct ActiveExecution {
@@ -106,6 +114,15 @@ pub(crate) struct ActiveExecution {
     started: Instant,
     max_chars: usize,
     opts: ExecuteOptions,
+    /// The call detached from this execution (a wake or the wait budget): its
+    /// result now goes to the background-completion sink. A detached cell is
+    /// never interrupted by a new cell's reuse wait.
+    detached: AtomicBool,
+    /// The execution-local stop signal: a child of the caller's cancellation
+    /// token (or fresh when absent), so a run abort, a manager-targeted user
+    /// cancel, and the hard deadline all reach THIS execution's stop path —
+    /// and stopping it never cancels the provider run or a later cell.
+    stop_signal: crate::kernel::cancellation::AbortSignal,
     /// The request runs user-namespace code (an execute — the bootstrap class
     /// included, internal or not): its settle can rebind or mutate names.
     namespace_code: bool,
@@ -113,6 +130,39 @@ pub(crate) struct ActiveExecution {
     restores_namespace: bool,
     buffers: Mutex<ExecBuffers>,
     result_tx: Mutex<Option<oneshot::Sender<anyhow::Result<InternalExecuteResult>>>>,
+    /// The execution's terminal watch: `true` once the execution settled,
+    /// was rejected by a teardown, or was retired — every watcher
+    /// (out-of-band stop, deadline) selects on it so a terminal execution
+    /// leaves no task awaiting a signal that will never fire.
+    settled_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl ActiveExecution {
+    /// Mark the execution terminal and wake its watchers: they exit
+    /// instead of awaiting a stop signal that will never fire.
+    pub(crate) fn notify_terminated(&self) {
+        let _ = self.settled_tx.send_if_modified(|settled| {
+            if *settled {
+                false
+            } else {
+                *settled = true;
+                true
+            }
+        });
+    }
+}
+
+/// The kernel error of a user cancel whose interrupt was ignored: the cell
+/// did not stop within the grace, so the kernel was retired — the outcome
+/// names the retirement and the unsnapshotted state it may have lost.
+pub(crate) fn user_cancel_retirement_error() -> crate::kernel::shared::KernelError {
+    crate::kernel::shared::KernelError {
+        ename: "CellUserCancelRetired".to_string(),
+        evalue: "The cell did not stop on its cancel interrupt, so the kernel was retired; \
+unsnapshotted state may be lost."
+            .to_string(),
+        traceback: Vec::new(),
+    }
 }
 
 /// `ExecuteResult` plus the raw fields of the request's `done` event (state ops).
@@ -139,7 +189,75 @@ impl InternalExecuteResult {
                 status: ExecuteStatus::Aborted,
                 error: None,
                 duration_ms: started.elapsed().as_millis() as u64,
-                timed_out_after_ms: None,
+                detached: None,
+            },
+            done_fields: None,
+        }
+    }
+
+    /// The early return of a detached call: the cell keeps running; the
+    /// result carries the partial output so far and the detach marker.
+    fn detached(
+        started: Instant,
+        reason: crate::kernel::shared::DetachReason,
+        cell_id: String,
+        stdout: String,
+        stderr: String,
+    ) -> Self {
+        Self {
+            result: ExecuteResult {
+                stdout,
+                stderr,
+                result: None,
+                diffs: None,
+                attachments: None,
+                sent_agent_messages: None,
+                bash_commands: None,
+                transcript_reads: None,
+                inbox_messages: None,
+                background_output: None,
+                ended_turn: false,
+                status: ExecuteStatus::Ok,
+                error: None,
+                duration_ms: started.elapsed().as_millis() as u64,
+                detached: Some(crate::kernel::shared::DetachedCell { reason, cell_id }),
+            },
+            done_fields: None,
+        }
+    }
+
+    /// The forced-stop completion of a captured execution whose kernel was
+    /// just retired: the partial output so far, and an abort whose error
+    /// names the ignored cancel and the retirement's possible state loss.
+    fn forced_stop(execution: &ActiveExecution) -> Self {
+        let max_chars = execution.max_chars;
+        let (stdout, stderr) = {
+            let buffers = lock(&execution.buffers);
+            (
+                buffers.stdout.snapshot(max_chars),
+                buffers.stderr.snapshot(max_chars),
+            )
+        };
+        Self {
+            result: ExecuteResult {
+                stdout,
+                stderr,
+                result: None,
+                diffs: None,
+                attachments: None,
+                sent_agent_messages: None,
+                bash_commands: None,
+                transcript_reads: None,
+                inbox_messages: None,
+                background_output: None,
+                ended_turn: false,
+                status: ExecuteStatus::Aborted,
+                error: Some(user_cancel_retirement_error()),
+                duration_ms: execution.started.elapsed().as_millis() as u64,
+                // No detach marker: an attached caller sees the forced stop as
+                // its own tool result, and a detached call's continuation
+                // stamps the marker (the original reason and cell id) itself.
+                detached: None,
             },
             done_fields: None,
         }
@@ -313,7 +431,9 @@ struct Guarded {
     /// never hold the execution queue a python cell needs).
     mcp_status_waiters: HashMap<String, oneshot::Sender<Value>>,
     host_inflight: Vec<tokio::task::JoinHandle<()>>,
-    active_execution: Option<Arc<ActiveExecution>>,
+    /// Every physically running request, oldest first. More than one only
+    /// when user cells run beside backgrounded (detached) ones.
+    active_executions: Vec<Arc<ActiveExecution>>,
 }
 
 struct ChildHandle {
@@ -346,16 +466,31 @@ pub(crate) struct Inner {
     guarded: Mutex<Guarded>,
     child: Mutex<Option<ChildHandle>>,
     busy_notify: Notify,
-    /// Serializes `execute()` calls — the runtime runs one request at a time.
+    /// Serializes `execute()` calls. A call that detached has released it, so
+    /// a user cell can run beside the backgrounded one.
     execution_queue: tokio::sync::Mutex<()>,
     shutdown_memo: Mutex<Option<Arc<MemoSlot>>>,
     rebootstrap_memo: Mutex<Option<Arc<MemoSlot>>>,
     flush_memo: Mutex<Option<Arc<MemoSlot>>>,
     snapshot_timer: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// A capture that failed stays owed (the usual cause is a detached
+    /// cell holding the kernel): the cell's settle (any status, kernel
+    /// alive) retries it, so the last settled namespace cannot stay
+    /// unsnapshotted behind a backgrounded cell.
+    snapshot_owed: std::sync::atomic::AtomicBool,
     stderr_closed: Notify,
     stderr_closed_flag: AtomicBool,
     /// File receiving pre-ready kernel stderr, with its remaining write budget.
     stderr_log: Mutex<Option<Arc<Mutex<StderrLog>>>>,
+    /// The session-scoped count of detached cells awaiting their terminal
+    /// admission; the session provisioner shares its own counter with every
+    /// manager it creates, and a directly constructed manager owns a
+    /// private default.
+    pending_detached_completions: Arc<crate::kernel::shared::PendingDetachedCompletions>,
+    /// This manager retired its kernel because a cell ignored its stop
+    /// interrupt: the provisioner turns the flag into the next foreground
+    /// result's kernel-restart note when it revives a replacement.
+    retired_for_ignored_interrupt: AtomicBool,
 }
 
 struct StderrLog {
@@ -363,10 +498,54 @@ struct StderrLog {
     budget: u64,
 }
 
+impl Guarded {
+    /// Whether `execution` is one of the physically running requests.
+    fn holds(&self, execution: &Arc<ActiveExecution>) -> bool {
+        self.active_executions
+            .iter()
+            .any(|active| Arc::ptr_eq(active, execution))
+    }
+
+    /// The running request that owns protocol id `id`.
+    fn active_execution(&self, id: &str) -> Option<Arc<ActiveExecution>> {
+        self.active_executions
+            .iter()
+            .find(|active| active.request_id == id)
+            .cloned()
+    }
+}
+
 impl Inner {
+    /// Fire the stop of every running execution `filter` selects, returning
+    /// the executions it stopped.
+    fn stop_active_executions(
+        &self,
+        filter: impl Fn(&ActiveExecution) -> bool,
+    ) -> Vec<Arc<ActiveExecution>> {
+        let executions: Vec<_> = lock(&self.guarded)
+            .active_executions
+            .iter()
+            .filter(|execution| filter(execution))
+            .cloned()
+            .collect();
+        for execution in &executions {
+            execution.stop_signal.abort();
+        }
+        executions
+    }
+
+    /// Whether a detached (backgrounded) execution is physically active:
+    /// internal ops queued behind it cannot run until the cell settles.
+    pub(crate) fn has_detached_active_execution(&self) -> bool {
+        lock(&self.guarded)
+            .active_executions
+            .iter()
+            .any(|execution| execution.detached.load(Ordering::SeqCst))
+    }
+
     /// Fire the embedding's background-work settlement notice: the settlement is already recorded,
     /// so a host-callback panic neither breaks the kernel event path nor aborts the teardown.
-    fn notify_background_work_settled(&self) {
+    pub(crate) fn notify_background_work_settled(&self) {
         let Some(callback) = self.options.on_background_work_settled.clone() else {
             return;
         };
@@ -414,6 +593,12 @@ use requests::{append_truncated, describe_failure, HeadTailBuffer, Signal};
 impl ReplKernelManager {
     #[must_use]
     pub fn new(options: KernelManagerOptions) -> Self {
+        let pending_detached_completions = options
+            .pending_detached_completions
+            .clone()
+            .unwrap_or_else(|| {
+                Arc::new(crate::kernel::shared::PendingDetachedCompletions::default())
+            });
         let inner = Arc::new(Inner {
             options,
             freshness_stat_probe: std::sync::atomic::AtomicBool::new(false),
@@ -445,7 +630,7 @@ impl ReplKernelManager {
                 factory_activity_waiters: HashMap::new(),
                 mcp_status_waiters: HashMap::new(),
                 host_inflight: Vec::new(),
-                active_execution: None,
+                active_executions: Vec::new(),
             }),
             child: Mutex::new(None),
             busy_notify: Notify::new(),
@@ -454,9 +639,12 @@ impl ReplKernelManager {
             rebootstrap_memo: Mutex::new(None),
             flush_memo: Mutex::new(None),
             snapshot_timer: Mutex::new(None),
+            snapshot_owed: std::sync::atomic::AtomicBool::new(false),
             stderr_closed: Notify::new(),
             stderr_closed_flag: AtomicBool::new(false),
             stderr_log: Mutex::new(None),
+            pending_detached_completions,
+            retired_for_ignored_interrupt: AtomicBool::new(false),
         });
         Self { inner }
     }
@@ -472,6 +660,58 @@ impl ReplKernelManager {
     #[must_use]
     pub fn has_background_work(&self) -> bool {
         self.background_bash_handle_count() > 0
+    }
+
+    /// The number of detached cells whose terminal outcome is not yet
+    /// admitted (the count is released only after the terminal sink call):
+    /// a cell stays outstanding until its notice lands, not just until the
+    /// physical execution clears. Shared with the session provisioner, so a
+    /// replacement manager cannot hide an older pending notice.
+    #[must_use]
+    pub fn pending_detached_completions(&self) -> usize {
+        self.inner.pending_detached_completions.count()
+    }
+
+    /// Stop the kernel's current USER executions out-of-band (attached and
+    /// detached): an interrupt now; when the interrupt is ignored, an
+    /// attached cell is force-aborted and a detached one retires the
+    /// kernel. `false` when no user execution is active —
+    /// internal ops (bootstrap, restore, snapshot) are never targeted.
+    #[must_use]
+    pub fn abort_user_execution(&self) -> bool {
+        !self
+            .inner
+            .stop_active_executions(|execution| !execution.opts.internal)
+            .is_empty()
+    }
+
+    /// Stop only detached (backgrounded) executions — the scoped idle
+    /// cancel's target; attached work is never touched. `false` when no
+    /// detached execution is running.
+    #[must_use]
+    pub fn abort_detached_execution(&self) -> bool {
+        !self
+            .inner
+            .stop_active_executions(|execution| execution.detached.load(Ordering::SeqCst))
+            .is_empty()
+    }
+
+    /// Stop the detached (backgrounded) execution `request_id` and wait
+    /// until it settled or its kernel was retired for ignoring the
+    /// interrupt. `false` when no detached execution with that id is running.
+    pub async fn stop_detached_execution(&self, request_id: &str) -> bool {
+        let stopped = self.inner.stop_active_executions(|execution| {
+            execution.request_id == request_id && execution.detached.load(Ordering::SeqCst)
+        });
+        for execution in &stopped {
+            // The execution holds the sender, so the wait cannot fail.
+            let _ = execution
+                .settled_tx
+                .subscribe()
+                .wait_for(|settled| *settled)
+                .await;
+        }
+        !stopped.is_empty()
     }
 
     /// The number of live background `bash()` handles (the count behind
@@ -504,6 +744,16 @@ impl ReplKernelManager {
             | Lifecycle::Running
             | Lifecycle::Discarding => false,
         }
+    }
+
+    /// Whether this manager's kernel was retired because its cell ignored
+    /// a stop interrupt: the provisioner's revival reads it so the next
+    /// foreground result carries the kernel-restart note.
+    #[must_use]
+    pub fn retired_for_ignored_interrupt(&self) -> bool {
+        self.inner
+            .retired_for_ignored_interrupt
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Diagnostics tail (kernel stderr, at most the last 8 KiB).
@@ -609,9 +859,11 @@ impl ReplKernelManager {
         let result = self
             .enqueue_execute(code, opts, execution_timeout_ms)
             .await?;
-        // An ok cell committed its namespace changes: refresh the snapshot,
-        // or a crash would revive a namespace missing the cell.
-        if result.result.status == ExecuteStatus::Ok {
+        // An ok cell that settled committed its namespace changes: refresh
+        // the snapshot, or a crash would revive a namespace missing the cell.
+        // A detached call's cell is still running: its continuation schedules
+        // the snapshot at its own settlement.
+        if result.result.status == ExecuteStatus::Ok && result.result.detached.is_none() {
             self.schedule_snapshot();
         }
         Ok(result.result)
@@ -627,6 +879,7 @@ impl ReplKernelManager {
         self.enqueue_request(
             Request::Execute {
                 code: code.to_string(),
+                runtime_bootstrap: opts.runtime_bootstrap,
             },
             opts,
             execution_timeout_ms,
@@ -699,8 +952,12 @@ impl ReplKernelManager {
     /// [`Self::bash_activity`] this bypasses the cell FIFO (a running turn
     /// must never delay the live view) and never boots an idle kernel.
     ///
-    /// `action` is one of `graph`/`status`/`watch`/`run`/`stop`/`resume`;
-    /// `run_id`/`spec_id` carry the target and `timeout_ms` bounds a watch.
+    /// `action` is one of `graph`/`status`/`watch`/`run`/`stop`/`resume`/
+    /// `library` (the machine library's list/graph reads), `node` (one run
+    /// state's detail) and `peek` (the all-session overview's arming-free
+    /// live list, which takes no target); `run_id`/`spec_id` carry the
+    /// target, `selector` picks a node's `(entry, instance)`, and
+    /// `timeout_ms` bounds a watch.
     /// The kernel owns the run registry, so the reply is the kernel's
     /// result payload verbatim.
     ///
@@ -716,6 +973,7 @@ impl ReplKernelManager {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        selector: Option<(u64, u64)>,
     ) -> anyhow::Result<Value> {
         if !self.is_running() {
             return Err(anyhow!("Kernel is not running"));
@@ -736,6 +994,8 @@ impl ReplKernelManager {
             "runId": run_id,
             "specId": spec_id,
             "timeoutMs": timeout_ms,
+            "entry": selector.map(|(entry, _)| entry),
+            "instance": selector.map(|(_, instance)| instance),
         });
         if let Err(error) = self.inner.write_line(&frame).await {
             lock(&self.inner.guarded)

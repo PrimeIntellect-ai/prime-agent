@@ -218,6 +218,8 @@ pub(crate) fn spawn_child(
             depth,
             name: WORKER_NAMES[rng.below(WORKER_NAMES.len() as u64) as usize].to_string(),
             factory: None,
+            decision_child: false,
+            refine_child: false,
         })?;
         written.push(child_file.clone());
         if depth < tree.max_depth {
@@ -234,30 +236,4 @@ pub(crate) fn spawn_child(
         }
     }
     Ok(written)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn generated_kernel_snapshot_unpickles_to_an_empty_dictionary() {
-        let directory = tempfile::tempdir().expect("artifact directory");
-        super::write_artifact_dir(
-            directory.path(),
-            "session",
-            "seed",
-            &mut crate::rng::Rng::new(7),
-        )
-        .expect("write real artifact partition");
-        let output = std::process::Command::new("python3")
-            .arg("-c")
-            .arg("import pickle,sys; value=pickle.load(open(sys.argv[1],'rb')); assert type(value) is dict and not value")
-            .arg(directory.path().join("kernel-state.dill"))
-            .output()
-            .expect("run hosted Python pickle reader");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
 }

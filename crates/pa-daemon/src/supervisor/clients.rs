@@ -143,7 +143,10 @@ impl Supervisor {
         write_line(&mut writer, &serde_json::to_value(&hello)?).await?;
 
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        // The partial line survives a cancelled read: another arm can win the
+        // select while a command is half-received, and `read_until` keeps the
+        // bytes it already took (`read_line` drops them).
+        let mut line = Vec::new();
         let mut events = self.events.subscribe();
         // Session events ride this per-connection queue (the subscriber
         // registry resolves delivery at publish time, TS `handleWorkerFrame`
@@ -174,14 +177,19 @@ impl Supervisor {
         // The loop yields the connection's result; a write failure parks the
         // error and falls through the shared exit tail below.
         let served: Result<()> = 'serve: loop {
-            line.clear();
             tokio::select! {
                 biased;
-                read = reader.read_line(&mut line), if dispatch_slots.available_permits() > 0 => {
+                read = reader.read_until(b'\n', &mut line), if dispatch_slots.available_permits() > 0 => {
                     let Ok(read) = read else { break 'serve Ok(()) };
-                    if read == 0 {
+                    // At end of stream, bytes a cancelled read took are still
+                    // buffered: they are the client's last command, even
+                    // without its newline. The next read finds `line` empty.
+                    if read == 0 && line.is_empty() {
                         break 'serve Ok(());
                     }
+                    let Ok(line) = String::from_utf8(std::mem::take(&mut line)) else {
+                        break 'serve Ok(());
+                    };
                     let trimmed = line.trim().to_string();
                     if trimmed.is_empty() {
                         continue;
@@ -723,6 +731,25 @@ impl Supervisor {
                     .await;
                 (vec![response_line(&response)], false)
             }
+            DaemonCommand::WorkerUsage {
+                worker_token,
+                session_id,
+                entry_id,
+                usage,
+                ..
+            } => {
+                let response = self
+                    .handle_worker_usage(
+                        &command_id,
+                        &type_name,
+                        worker_token,
+                        session_id,
+                        entry_id,
+                        *usage,
+                    )
+                    .await;
+                (vec![response_line(&response)], false)
+            }
             DaemonCommand::Create { .. } => {
                 let client_id = effective_client_id.lock().unwrap().clone();
                 match self.handle_create(command, client_id).await {
@@ -1145,6 +1172,55 @@ impl Supervisor {
                 )
                 .await
             }
+            // `factory_activity` with `overview`: the supervisor-owned,
+            // read-only all-session assembly. The normal route below
+            // would forward it to one session's worker, so the command is
+            // intercepted here and `overview` itself never reaches a
+            // kernel; the supervisor's live half reads each owner's
+            // kernel through the non-arming `peek` action instead, and
+            // every other factory action keeps its session-scoped route.
+            DaemonCommand::FactoryActivity {
+                action,
+                run_id,
+                spec_id,
+                ..
+            } if action == "overview" => {
+                // The lane's opt-in gate, on the one factory arm that
+                // never reaches a kernel: the hello advertisement only
+                // hides the capability, so a stale client that connected
+                // while enabled — and a hand-written request — must meet
+                // the same refusal the kernel-side lane raises while
+                // `factory.enabled` is off, before any catalog scan or
+                // live peek read. The settings read stays fresh per
+                // request (the same spawn_blocking posture as the hello
+                // gate) and a failed read refuses.
+                let agent_dir = self.options.agent_dir.clone();
+                let lane_enabled = tokio::task::spawn_blocking(move || {
+                    crate::factory_activity::factory_lane_enabled(&agent_dir)
+                })
+                .await
+                .unwrap_or(false);
+                if !lane_enabled {
+                    let response = response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        pa_core::refinement::FACTORY_DISABLED_MESSAGE,
+                        None,
+                    );
+                    return (vec![response_line(&response)], false);
+                }
+                if run_id.is_some() || spec_id.is_some() {
+                    let response = response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        "factory activity overview takes no runId or specId",
+                        None,
+                    );
+                    return (vec![response_line(&response)], false);
+                }
+                let response = self.factory_overview(&command_id, &type_name).await;
+                (vec![response_line(&response)], false)
+            }
             command => {
                 let client_id = effective_client_id.lock().unwrap().clone();
                 self.route_client_command(
@@ -1388,6 +1464,138 @@ mod tests {
             "the log names the dropped count: {line}"
         );
         connection.abort();
+    }
+
+    /// A command whose bytes arrive in two reads must survive the select
+    /// arm that wins in between: here the response to the command sent just
+    /// before it, which cancels the read holding the first half.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_half_received_command_survives_a_response_between_its_reads() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        let (client_read, mut client_write) = client_side.into_split();
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        let unsubscribe = |id: &str| {
+            json!({
+                "type": "command",
+                "id": id,
+                "protocol": {"name": "prime-agent.daemon", "version": 7},
+                "command": {"type": "roster_unsubscribe"},
+            })
+            .to_string()
+        };
+        let split = unsubscribe("split");
+        let (head, tail) = split.split_at(split.len() / 2);
+        // One write, so one socket read takes the first command and the
+        // second one's head: the loop dispatches the first, its next read
+        // holds the head while waiting for the rest, and the first response
+        // then wins the select.
+        client_write
+            .write_all(format!("{}\n{head}", unsubscribe("first")).as_bytes())
+            .await
+            .expect("send the first command and the head");
+        let expected =
+            |id: &str| response_line(&response_success(Some(id), "roster_unsubscribe", None));
+        let mut first = String::new();
+        client
+            .read_line(&mut first)
+            .await
+            .expect("the first response");
+        assert_eq!(
+            serde_json::from_str::<Value>(&first).unwrap(),
+            expected("first")
+        );
+        client_write
+            .write_all(format!("{tail}\n").as_bytes())
+            .await
+            .expect("send the tail");
+        let mut second = String::new();
+        client
+            .read_line(&mut second)
+            .await
+            .expect("the second response");
+        assert_eq!(
+            serde_json::from_str::<Value>(&second).unwrap(),
+            expected("split")
+        );
+        connection.abort();
+    }
+
+    /// A last command without its newline, whose bytes a cancelled read took,
+    /// must still run when the client closes its write half.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_half_received_last_command_runs_at_end_of_stream() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let mut events = supervisor.events.subscribe();
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        let (client_read, mut client_write) = client_side.into_split();
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        let first = json!({
+            "type": "command",
+            "id": "first",
+            "protocol": {"name": "prime-agent.daemon", "version": 7},
+            "command": {"type": "roster_unsubscribe"},
+        });
+        let last = json!({
+            "type": "command",
+            "id": "last",
+            "protocol": {"name": "prime-agent.daemon", "version": 7},
+            "command": {"type": "shutdown", "force": true},
+        });
+        // One write, so one socket read takes both commands: the loop
+        // dispatches the first, its next read holds the whole last command
+        // while waiting for a newline, and the first response wins the select.
+        client_write
+            .write_all(format!("{first}\n{last}").as_bytes())
+            .await
+            .expect("send both commands");
+        let mut response = String::new();
+        client
+            .read_line(&mut response)
+            .await
+            .expect("the first response");
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).unwrap(),
+            response_line(&response_success(Some("first"), "roster_unsubscribe", None))
+        );
+        client_write.shutdown().await.expect("close the write half");
+        connection.await.expect("connection task").unwrap();
+        // The shutdown command's broadcast proves it ran.
+        let (_, closing) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("the last command ran")
+            .expect("the event ring");
+        assert_eq!(*closing, daemon_closing_shutdown_event());
     }
 
     // One real connection speaking for `client_id`, driven through its

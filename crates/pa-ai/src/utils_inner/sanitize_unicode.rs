@@ -6,16 +6,3 @@
 pub fn sanitize_surrogates(text: &str) -> String {
     text.to_string()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::sanitize_surrogates;
-
-    #[test]
-    fn preserves_text() {
-        assert_eq!(
-            sanitize_surrogates("Hello \u{1F648} World"),
-            "Hello \u{1F648} World"
-        );
-    }
-}

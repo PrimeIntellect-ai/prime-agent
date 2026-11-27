@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Session engine: tools, skills, prompts, kernel, subagents, settings."
 
+[lib]
+doctest = false
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
@@ -14,6 +17,7 @@ futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 pa-types.workspace = true
+pa-factory.workspace = true
 pa-ai.workspace = true
 pa-models = { path = "../pa-models" }
 pa-agent.workspace = true

@@ -1,0 +1,1 @@
+- The heartbeat row under a python_repl card that read the inbox no longer brings an extra blank line above it.

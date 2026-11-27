@@ -48,14 +48,14 @@ fn bash_done_notice(pid: u32, command: &str) -> pa_core::session_engine::inbox::
 
 /// One test's routing state: a journal-backed worker core plus a fresh
 /// inbox store (the session dir the worker's journal lives under).
-type InboxRoutingState = (
+pub(super) type InboxRoutingState = (
     Arc<Worker>,
     Arc<SessionInbox>,
     Arc<Mutex<Vec<pa_core::session_engine::inbox::InboxMessage>>>,
-    Arc<Notify>,
+    Arc<crate::worker::WorkNotify>,
 );
 
-fn routing_state() -> InboxRoutingState {
+pub(super) fn routing_state() -> InboxRoutingState {
     let worker = worker_with_journal();
     let session_dir = worker
         .config
@@ -63,7 +63,7 @@ fn routing_state() -> InboxRoutingState {
         .parent()
         .unwrap()
         .to_path_buf();
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(crate::worker::WorkNotify::new(Arc::default()));
     (
         worker,
         Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(
@@ -74,7 +74,7 @@ fn routing_state() -> InboxRoutingState {
     )
 }
 
-fn steering_rows(worker: &Worker) -> Vec<(String, Option<String>, bool)> {
+pub(super) fn steering_rows(worker: &Worker) -> Vec<(String, Option<String>, bool)> {
     worker
         .core
         .lock()
@@ -137,8 +137,7 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
     // model-visible notice text, byte-identical (the class the TUI renders
     // as its own row). Whole-object equality against the builder: every
     // field at once, no extra keys, the admission timestamp read back.
-    let (_, expected_text) =
-        pa_core::session_engine::inbox::arrival_notice(&arrivals.lock().unwrap(), 1);
+    let (_, expected_text) = super::inbox_router::notice_text(&arrivals.lock().unwrap(), 1);
     let row = custom_message
         .as_ref()
         .expect("the notice row carries its custom twin");
@@ -151,6 +150,8 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
             &expected_text,
             pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
             1,
+            true,
+            false,
             admitted_at,
         ),
         "the arrival twin is exactly the builder's row"
@@ -281,13 +282,18 @@ async fn a_delivered_row_starts_a_fresh_batch() {
 async fn the_reminder_repeats_while_the_inbox_stays_unread() {
     let (worker, inbox, _arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
-    admit_inbox_reminder(
-        &worker.recovery,
-        &worker.core,
-        &notify,
-        &inbox,
-        || false,
-        None,
+    // The admission verdict gates the reminder's cell wake: a cycle that
+    // queues nothing must not end a running cell's wait.
+    assert!(
+        !admit_inbox_reminder(
+            &worker.recovery,
+            &worker.core,
+            &notify,
+            &inbox,
+            || false,
+            None,
+        ),
+        "an empty inbox admits no reminder"
     );
     assert!(
         steering_rows(&worker).is_empty(),
@@ -297,14 +303,14 @@ async fn the_reminder_repeats_while_the_inbox_stays_unread() {
         inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "waiting"),
         1_000,
     );
-    admit_inbox_reminder(
+    assert!(admit_inbox_reminder(
         &worker.recovery,
         &worker.core,
         &notify,
         &inbox,
         || false,
         None,
-    );
+    ));
     admit_inbox_reminder(
         &worker.recovery,
         &worker.core,
@@ -347,6 +353,8 @@ async fn the_reminder_repeats_while_the_inbox_stays_unread() {
             message,
             pa_types::inbox_notice::INBOX_NOTICE_CLASS_REMINDER,
             1,
+            true,
+            false,
             admitted_at,
         ),
         "the reminder twin is exactly the builder's row"
@@ -571,6 +579,8 @@ async fn a_refill_inside_the_drain_window_rerenders_the_queued_reminder() {
                 &reminder.message,
                 pa_types::inbox_notice::INBOX_NOTICE_CLASS_REMINDER,
                 1,
+                true,
+                false,
                 SENTINEL_TIMESTAMP,
             ),
             "the re-rendered twin keeps its identity and only its content moved: {row}"
@@ -912,7 +922,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         "the arrival row and the reminder row: {rows:?}"
     );
     let (expected_preview, expected_text) =
-        pa_core::session_engine::inbox::arrival_notice(std::slice::from_ref(&milestone), 1);
+        super::inbox_router::notice_text(std::slice::from_ref(&milestone), 1);
     assert_eq!(
         rows[0],
         (expected_text.clone(), Some(expected_preview), true),
@@ -955,6 +965,8 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
                     &item.message,
                     class,
                     1,
+                    true,
+                    false,
                     SENTINEL_TIMESTAMP,
                 ),
                 "the re-rendered twin keeps its identity and only its content moved: {row}"
@@ -1233,6 +1245,10 @@ async fn a_withdrawal_from_a_replaced_store_leaves_the_successors_rows_alone() {
 async fn a_withdrawal_racing_an_arrival_settles_both() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
+    // The admission stamps `inbox_wake_due` from the runtime clock
+    // (`tokio::time::Instant::now`), like every production caller; the
+    // racing threads enter the runtime so they read that clock.
+    let runtime = tokio::runtime::Handle::current();
     for i in 0..200u32 {
         let _ = admit_inbox_notice(
             &worker.recovery,
@@ -1248,15 +1264,17 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let admit = {
-            let (worker, inbox, arrivals, notify, barrier, done_tx) = (
+            let (worker, inbox, arrivals, notify, barrier, done_tx, runtime) = (
                 Arc::clone(&worker),
                 Arc::clone(&inbox),
                 Arc::clone(&arrivals),
                 Arc::clone(&notify),
                 Arc::clone(&barrier),
                 done_tx.clone(),
+                runtime.clone(),
             );
             std::thread::spawn(move || {
+                let _runtime = runtime.enter();
                 barrier.wait();
                 let _ = admit_inbox_notice(
                     &worker.recovery,
@@ -1483,7 +1501,7 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
         "the re-rendered arrival row and reminder row: {rows:?}"
     );
     let (expected_preview, expected_text) =
-        pa_core::session_engine::inbox::arrival_notice(std::slice::from_ref(&milestone), 1);
+        super::inbox_router::notice_text(std::slice::from_ref(&milestone), 1);
     let expected_text = inbox.with_persistence_error_clause(expected_text);
     assert_eq!(
         rows[0],
@@ -1530,7 +1548,221 @@ async fn a_closed_session_refuses_the_arrival() {
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
-/// The reminder rows across both lanes (the coalescing key counts).
+/// One cell-completion arrival (a `[cell-done]` message the
+/// backgrounded cell's terminal notice pushed).
+fn cell_done_notice(cell_id: &str) -> pa_core::session_engine::inbox::InboxNotice {
+    pa_core::session_engine::inbox::InboxNotice {
+        class: pa_types::inbox_notice::INBOX_CLASS_CELL_DONE,
+        sender: Some(cell_id.to_string()),
+        text: format!("[cell-done id:{cell_id} status:ok duration:1.0s]"),
+        meta: serde_json::json!({ "cellId": cell_id, "status": "ok" }),
+    }
+}
+
+/// The arrival row's stored bits: the wake eligibility and the pending
+/// cell-delivery flag.
+fn arrival_row_bits(worker: &Worker) -> Option<(bool, bool)> {
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .steering
+        .iter()
+        .find_map(|item| {
+            let row = item.custom_message.as_ref()?;
+            if row.get("customType").and_then(|v| v.as_str())
+                != Some(pa_types::inbox_notice::INBOX_NOTICE_CUSTOM_TYPE)
+            {
+                return None;
+            }
+            let details = row.get("details")?;
+            Some((
+                details.get("wakesCell").and_then(Value::as_bool)?,
+                details.get("coversCellDone").and_then(Value::as_bool)?,
+            ))
+        })
+}
+
+/// A cell-done-only batch never marks its row wakeable (its delivery waits
+/// for its own turn boundary), but it IS the covered cell's pending
+/// delivery: the quiescence observation must count it.
+#[tokio::test]
+async fn a_cell_done_only_batch_is_unwakeable_but_counts_as_a_pending_delivery() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        cell_done_notice("cell-1"),
+        Lane::Steering,
+        || false,
+        None,
+    );
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        cell_done_notice("cell-2"),
+        Lane::Steering,
+        || false,
+        None,
+    );
+    let rows = steering_rows(&worker);
+    assert_eq!(rows.len(), 1, "the cell-done arrivals coalesce: {rows:?}");
+    let (wakes_cell, covers_cell_done) =
+        arrival_row_bits(&worker).expect("the coalesced arrival row");
+    assert!(
+        !wakes_cell,
+        "a cell-done-only batch never ends a running cell's wait"
+    );
+    assert!(
+        covers_cell_done,
+        "the arrival row covers the pending cell deliveries"
+    );
+    assert_eq!(
+        worker.outstanding_background_jobs(),
+        1,
+        "the coalesced cell-done delivery reports as outstanding work until it delivers"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// Withdrawing the only wakeable message from a mixed batch flips the
+/// stored eligibility bit with the row: the batch's cell completion stays
+/// covered, the row stops being wakeable input.
+#[tokio::test]
+async fn a_withdrawal_of_the_only_wakeable_message_flips_the_rows_eligibility() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4242, "sleep 2; echo done"),
+        Lane::Steering,
+        || false,
+        None,
+    );
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        cell_done_notice("cell-1"),
+        Lane::Steering,
+        || false,
+        None,
+    );
+    let (wakes_cell, covers_cell_done) =
+        arrival_row_bits(&worker).expect("the coalesced arrival row");
+    assert!(wakes_cell, "the bash-done made the batch wakeable");
+    assert!(covers_cell_done, "the cell completion is covered");
+    withdraw_bash_completion_notice(
+        &worker.recovery,
+        &worker.core,
+        Some((&inbox, &arrivals)),
+        &crate::engine::BashConsumedNotice {
+            pid: 4242,
+            command: "sleep 2; echo done".to_string(),
+        },
+        None,
+    );
+    let (wakes_cell, covers_cell_done) =
+        arrival_row_bits(&worker).expect("the row survives the trimmed batch");
+    assert!(
+        !wakes_cell,
+        "the withdrawn bash-done left a cell-done-only batch"
+    );
+    assert!(
+        covers_cell_done,
+        "the cell completion is still the row's pending delivery"
+    );
+    assert_eq!(
+        worker.outstanding_background_jobs(),
+        1,
+        "the cell-done delivery still counts as outstanding work"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// A full `[cell-done]` row queued on the steering lane counts as a
+/// pending delivery too (the inbox-disabled lane), and a delivered or
+/// swept row stops counting: the observation follows the rows, never
+/// every historical unread inbox entry.
+#[tokio::test]
+async fn the_full_row_and_bash_only_counts_pin_the_quiescence_observation() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    // A bash-only batch is wakeable but nobody's cell delivery.
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(7777, "echo only"),
+        Lane::Steering,
+        || false,
+        None,
+    );
+    let (wakes_cell, covers_cell_done) =
+        arrival_row_bits(&worker).expect("the coalesced arrival row");
+    assert!(wakes_cell, "a bash-done is wakeable input");
+    assert!(!covers_cell_done, "no cell completion is covered");
+    assert_eq!(
+        worker.outstanding_background_jobs(),
+        0,
+        "a bash-only inbox arrival is the bash lane's own count, not a cell delivery"
+    );
+    // The full-row lane: one queued `[cell-done]` row counts.
+    let mut core = worker.core.lock().unwrap();
+    core.steering.push_back(QueuedItem {
+        priority: QueuePriority::Background,
+        preview: Some("[cell-done]".to_string()),
+        message: "[cell-done id:cell-9 status:ok duration:1.0s]".to_string(),
+        custom_message: Some(
+            serde_json::to_value(
+                pa_core::session_engine::messages::create_background_cell_completion_message(
+                    "cell-9",
+                    "ok",
+                    1_000,
+                    "wait-budget:1000",
+                    "done",
+                    &[],
+                    0,
+                ),
+            )
+            .expect("the full cell-done row"),
+        ),
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    });
+    drop(core);
+    assert_eq!(
+        worker.outstanding_background_jobs(),
+        1,
+        "the full cell-done row counts as one pending delivery"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
 fn reminder_rows(worker: &Worker) -> usize {
     let core = worker.core.lock().unwrap();
     core.steering
@@ -2210,11 +2442,10 @@ async fn a_closed_session_refuses_the_delivery_with_or_without_a_store() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A clear takes only the not-yet-announced batch (the records the
-/// queued arrival row covers); a pause takes no inbox record at all.
-/// Announced mail stays readable through both.
+/// A clear takes every waiting agent message, announced or not; a pause
+/// takes no inbox record at all.
 #[tokio::test]
-async fn a_clear_takes_only_the_unannounced_batch_and_a_pause_takes_none() {
+async fn a_clear_takes_every_waiting_agent_message_and_a_pause_takes_none() {
     let (worker, inbox, dir) = faux_worker_with_inbox();
     worker.dispatch("clear_queue", &json!({})).await;
     worker.core.lock().unwrap().busy = true;
@@ -2230,40 +2461,17 @@ async fn a_clear_takes_only_the_unannounced_batch_and_a_pause_takes_none() {
     let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
     assert_eq!(
         cleared.data,
-        Some(json!({ "steering": ["[agent-message from peer-1]\n\nunannounced"], "followUp": [] })),
-        "the clear takes the unannounced batch only"
+        Some(json!({
+            "steering": [
+                "[agent-message from peer-1]\n\nannounced",
+                "[agent-message from peer-1]\n\nunannounced"
+            ],
+            "followUp": []
+        })),
+        "the clear takes every waiting agent message"
     );
-    let waiting: Vec<String> = inbox
-        .waiting_messages()
-        .into_iter()
-        .map(|message| message.text)
-        .collect();
-    assert_eq!(waiting, ["[agent-message from peer-1]\n\nannounced"]);
-    assert_eq!(arrival_rows(&worker), 0, "the emptied batch drops its row");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A restored arrival row arrives without its batch: a clear right after
-/// the restart cannot tell which waiting records it covers, so it takes
-/// none (older announced mail must never go).
-#[tokio::test]
-async fn a_clear_over_a_restored_arrival_row_takes_nothing() {
-    let (worker, inbox, dir) = faux_worker_with_inbox();
-    worker.dispatch("clear_queue", &json!({})).await;
-    worker.core.lock().unwrap().busy = true;
-    assert!(
-        deliver_agent_message(&worker, "before the restart")
-            .await
-            .success
-    );
-    // The restart: the queued row survives, the process-local batch not.
-    worker.inbox_arrivals.lock().unwrap().clear();
-    let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
-    assert_eq!(
-        cleared.data,
-        Some(json!({ "steering": [], "followUp": [] }))
-    );
-    assert_eq!(inbox.count().0, 1, "the waiting record stays");
+    assert_eq!(inbox.count().0, 0);
+    assert_eq!(arrival_rows(&worker), 0, "the emptied inbox drops its row");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2573,8 +2781,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         "the twin's content is the row's model-visible text: {twin:?}"
     );
     let (count, _, _) = inbox.count();
-    let (_, expected_text) =
-        pa_core::session_engine::inbox::arrival_notice(&arrivals.lock().unwrap(), count);
+    let (_, expected_text) = super::inbox_router::notice_text(&arrivals.lock().unwrap(), count);
     let expected_text = inbox.with_persistence_error_clause(expected_text);
     assert_eq!(
         twin,
@@ -2582,6 +2789,8 @@ async fn the_wake_row_refresh_follows_the_live_store() {
             &expected_text,
             pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
             arrivals.lock().unwrap().len(),
+            true,
+            false,
             admitted_at,
         ),
         "the twin re-rendered its content and kept its admission identity"
@@ -2802,7 +3011,7 @@ async fn a_recovered_empty_arrivals_batch_keeps_the_remaining_wake_after_bash_co
     );
     assert_eq!(
         persisted_steering[0].message,
-        pa_core::session_engine::inbox::arrival_notice(&initial_waiting, 2).1
+        super::inbox_router::notice_text(&initial_waiting, 2).1
     );
 
     // Restore the durable queue and a freshly opened inbox, while the
@@ -2854,12 +3063,88 @@ async fn a_recovered_empty_arrivals_batch_keeps_the_remaining_wake_after_bash_co
         json!({ "text": "recovery survivor full body" })
     );
     assert_eq!(arrivals.lock().unwrap().as_slice(), remaining.as_slice());
-    let (expected_preview, expected_text) =
-        pa_core::session_engine::inbox::arrival_notice(&remaining, 1);
+    let (expected_preview, expected_text) = super::inbox_router::notice_text(&remaining, 1);
     assert_eq!(
         steering_rows(&worker),
         vec![(expected_text, Some(expected_preview), true)],
         "the persisted wake is re-rendered for the surviving unread message"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// The wake predicate classifies the queued rows: a bash-done arrival row
+/// is wakeable input, a cell-done-only arrival row is not (its own turn
+/// boundary delivers it), a backgrounded cell's full completion row is
+/// not, and a restored arrival row without the stored bit stays
+/// conservatively wakeable.
+#[test]
+fn the_wake_predicate_classifies_the_queued_rows() {
+    fn item(custom_message: Option<serde_json::Value>) -> QueuedItem {
+        QueuedItem {
+            priority: crate::worker::QueuePriority::Background,
+            preview: None,
+            message: "row".to_string(),
+            custom_message,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: crate::worker::TurnPolicy::Injected,
+            forced_batch: false,
+        }
+    }
+    // A plain user row (no custom twin) is wakeable.
+    assert!(row_wakes_a_cell(&item(None)));
+    // A bash-done arrival row (the stored bit from a wakeable batch) is wakeable.
+    let bash_arrival = pa_core::session_engine::inbox::create_inbox_notice_row(
+        "[inbox 12:00 UTC] 1 new message (bash-done)",
+        pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+        1,
+        true,
+        false,
+        1_730_000_000_000,
+    );
+    assert!(row_wakes_a_cell(&item(Some(bash_arrival))));
+    // A cell-done-only arrival batch never ends a running cell's wait.
+    let cell_only_arrival = pa_core::session_engine::inbox::create_inbox_notice_row(
+        "[inbox 12:00 UTC] 1 new message (cell-done)",
+        pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+        1,
+        false,
+        false,
+        1_730_000_000_000,
+    );
+    assert!(!row_wakes_a_cell(&item(Some(cell_only_arrival))));
+    // A backgrounded cell's own completion row never wakes a later cell.
+    let cell_done_row = serde_json::to_value(
+        pa_core::session_engine::messages::create_background_cell_completion_message(
+            "cell-1",
+            "ok",
+            1_200,
+            "wait-budget:200",
+            "done",
+            &[],
+            1_730_000_000_000,
+        ),
+    )
+    .unwrap();
+    assert!(!row_wakes_a_cell(&item(Some(cell_done_row))));
+    // A restored arrival row without the eligibility bit is conservatively
+    // wakeable: one extra detach, never a lost steer.
+    let mut restored = pa_core::session_engine::inbox::create_inbox_notice_row(
+        "[inbox 12:00 UTC] 1 new message (cell-done)",
+        pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+        1,
+        true,
+        false,
+        1_730_000_000_000,
+    );
+    restored
+        .get_mut("details")
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap()
+        .remove("wakesCell");
+    assert!(row_wakes_a_cell(&item(Some(restored))));
 }
