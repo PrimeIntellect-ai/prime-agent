@@ -515,20 +515,22 @@ fn contexts_run_in_parallel_and_tasks_in_one_context_in_order() {
         .as_str()
         .unwrap()
         .to_string();
-    let queued = server.send("two", Some("ctx-a"), &config)["result"]["task"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let other = server.send("three", Some("ctx-b"), &config)["result"]["task"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
     server.wait_task(&first, |frame| frame_state(frame) == "TASK_STATE_WORKING");
-    server.wait_task(&other, |frame| frame_state(frame) == "TASK_STATE_WORKING");
-    assert_eq!(
-        state(&server.rpc("GetTask", &json!({ "id": queued }))["result"]),
-        "TASK_STATE_SUBMITTED"
-    );
+    // A second task on the same context, streamed: its frames show when it
+    // started working.
+    let (queued_frames, other) = std::thread::scope(|scope| {
+        let queued = scope.spawn(|| {
+            server.sse(
+                "SendStreamingMessage",
+                &send_params("two", Some("ctx-a"), &json!({})),
+            )
+        });
+        let other = server.send("three", Some("ctx-b"), &config)["result"]["task"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (queued.join().unwrap(), other)
+    });
     let a = server.wait_task(&first, |frame| frame_state(frame) == "TASK_STATE_COMPLETED");
     let b = server.wait_task(&other, |frame| frame_state(frame) == "TASK_STATE_COMPLETED");
     assert_eq!(
@@ -536,9 +538,24 @@ fn contexts_run_in_parallel_and_tasks_in_one_context_in_order() {
         artifact_text(&b),
         "each context has its own session"
     );
-    let second = server.wait_task(&queued, |frame| {
-        frame_state(frame) == "TASK_STATE_COMPLETED"
-    });
+    assert_eq!(state(&queued_frames[0]["task"]), "TASK_STATE_SUBMITTED");
+    let working_at = queued_frames
+        .iter()
+        .find(|frame| frame["statusUpdate"]["status"]["state"] == "TASK_STATE_WORKING")
+        .and_then(|frame| frame["statusUpdate"]["status"]["timestamp"].as_str())
+        .expect("the queued task worked");
+    let first_done_at = a["status"]["timestamp"].as_str().unwrap();
+    assert!(
+        working_at >= first_done_at,
+        "the queued task started ({working_at}) only after the first settled ({first_done_at})"
+    );
+    let last = queued_frames.last().unwrap();
+    assert_eq!(
+        last["statusUpdate"]["status"]["state"],
+        "TASK_STATE_COMPLETED"
+    );
+    let queued_id = last["statusUpdate"]["taskId"].as_str().unwrap();
+    let second = server.rpc("GetTask", &json!({ "id": queued_id }))["result"].clone();
     assert_eq!(artifact_text(&second), "next");
     assert_eq!(server.sessions().len(), 2, "one daemon session per context");
 }
