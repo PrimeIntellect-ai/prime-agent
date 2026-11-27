@@ -66,6 +66,17 @@ impl RunState {
                     others_in_flight: true,
                 },
             )
+            // A definitive failure with nothing else in flight means no run is
+            // coming, so it clears an admitted submit too: a delayed `Admitted`
+            // that acknowledged an OLDER submission can otherwise hold a newer
+            // one in `Admitted` after its own failure, leaving the loader up
+            // forever. If that run does start, `Started` sets `Running` anyway.
+            | (
+                Admitted,
+                RunEvent::SubmitFailed {
+                    others_in_flight: false,
+                },
+            )
             | (
                 Admitted,
                 RunEvent::Submitted | RunEvent::SubmitFailed { .. } | RunEvent::Admitted,
@@ -155,6 +166,35 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_admission_cannot_strand_a_later_failed_submit() {
+        // A delayed `Admitted` for an OLDER submission lands while a newer one
+        // is `Submitted`; the newer one's own definitive failure must still
+        // return to idle instead of leaving the loader up forever.
+        assert_eq!(
+            after(&[
+                RunEvent::Submitted,
+                RunEvent::Admitted,
+                RunEvent::SubmitFailed {
+                    others_in_flight: false,
+                },
+            ]),
+            RunState::Idle,
+            "a definitive failure clears an admitted state too"
+        );
+        assert_eq!(
+            after(&[
+                RunEvent::Submitted,
+                RunEvent::Admitted,
+                RunEvent::SubmitFailed {
+                    others_in_flight: false,
+                },
+                RunEvent::Started,
+            ]),
+            RunState::Running,
+            "the run the daemon did start still shows after the reset"
+        );
+    }
+
     fn a_failed_or_lost_submit_never_strands_the_loader() {
         assert_eq!(
             after(&[RunEvent::Submitted, FAILED]),
