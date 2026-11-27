@@ -32,6 +32,10 @@ pub struct DaemonResponse {
 /// [`DaemonErrorInfo::UpdateRestarting`] rides alongside.
 pub const UPDATE_RESTART_PREPARING_MESSAGE: &str = "Daemon is preparing an update restart";
 
+/// The refusal for commands that reach a supervisor in its terminal stop pass; the plain string
+/// stays for old clients, [`DaemonErrorInfo::SupervisorShuttingDown`] rides alongside.
+pub const SUPERVISOR_SHUTTING_DOWN_MESSAGE: &str = "Supervisor is shutting down";
+
 /// The session-addressed lanes' refusal when the session's kernel is not
 /// running (the lane never builds one: `factory_activity` answers without
 /// booting an idle kernel). A definitive answer, not a transient failure —
@@ -66,6 +70,9 @@ pub enum DaemonErrorInfo {
     /// coordinator drains and checkpoints; a transient state - clients wait and retry, never a hard
     /// failure.
     UpdateRestarting,
+    /// The supervisor is in its terminal stop pass: it still greets, but refuses every command
+    /// until it exits; clients that wait for a daemon retry against the next one.
+    SupervisorShuttingDown,
     CommandResultUncertain {
         client_id: DaemonClientId,
         command_id: DaemonCommandId,

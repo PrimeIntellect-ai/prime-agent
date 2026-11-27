@@ -548,8 +548,8 @@ impl Supervisor {
                 vec![Outbound::Line(response_line(&response_failure(
                     Some(&command_id),
                     &type_name,
-                    "Supervisor is shutting down",
-                    None,
+                    pa_types::daemon::SUPERVISOR_SHUTTING_DOWN_MESSAGE,
+                    Some(pa_types::daemon::DaemonErrorInfo::SupervisorShuttingDown),
                 )))],
                 false,
             );

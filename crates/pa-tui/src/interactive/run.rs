@@ -1592,6 +1592,16 @@ async fn run_interactive_surface(
                             Ok(crate::session_ui::ReattachOutcome::AttachBudgetExceeded) => {
                                 session.connection_event(ConnectionEvent::RestoreRetry, &mut view);
                             }
+                            // A supervisor still in its stop pass refuses the attach: like a
+                            // failed connect, the daemon is not up yet, so the driver backs off
+                            // quietly until the next supervisor answers or the window ends.
+                            Err(error)
+                                if crate::daemon_client::is_supervisor_shutting_down_rejection(
+                                    &error,
+                                ) =>
+                            {
+                                session.connection_event(ConnectionEvent::ConnectFailed, &mut view);
+                            }
                             Err(error) => {
                                 if let ConnectionEffect::Exit { .. } = session.connection_event(
                                     ConnectionEvent::ReattachFailed(format!("{error:#}")),

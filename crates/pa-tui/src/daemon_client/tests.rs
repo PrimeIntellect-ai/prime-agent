@@ -350,6 +350,20 @@ fn update_restarting_rejection_round_trips_the_wire() {
     assert!(!is_update_restarting_rejection(&error));
 }
 
+/// A stop-pass refusal classifies by its typed info and, from older daemons, by its message.
+#[test]
+fn supervisor_shutting_down_rejection_round_trips_the_wire() {
+    for wire in [
+        r#"{"type":"response","command":"attach","success":false,"error":"Supervisor is shutting down","errorInfo":{"code":"supervisor_shutting_down"}}"#,
+        r#"{"type":"response","command":"attach","success":false,"error":"Supervisor is shutting down"}"#,
+    ] {
+        let line = serde_json::from_str::<DaemonResponse>(wire).expect("refusal parses");
+        let error = response_data_or_error("attach", line).unwrap_err();
+        assert!(is_supervisor_shutting_down_rejection(&error), "{wire}");
+        assert!(!is_update_restarting_rejection(&error), "{wire}");
+    }
+}
+
 /// The session-addressed lanes' kernel-not-running refusal (the
 /// `/factory off` guard's definitive-zero class): the exact wire string
 /// classifies through the plain-message predicate, and no other refusal
