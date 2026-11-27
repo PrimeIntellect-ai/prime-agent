@@ -49,16 +49,10 @@ impl RunState {
                 Idle | Submitted | Admitted | Running,
                 RunEvent::Ended | RunEvent::Attached { streaming: false },
             )
-            // A definitive failure with nothing else in flight means no run is
-            // coming, so it returns to idle from `Submitted` AND from `Admitted`:
-            // a delayed `Admitted` that acknowledged an OLDER submission can
-            // otherwise hold a newer one in `Admitted` after its own failure and
-            // leave the loader up forever. If that run does start, `Started`
-            // sets `Running` anyway.
+            | (Submitted | Admitted, RunEvent::Interrupted)
             | (
-                Submitted | Admitted,
-                RunEvent::Interrupted
-                | RunEvent::SubmitFailed {
+                Submitted,
+                RunEvent::SubmitFailed {
                     others_in_flight: false,
                 },
             ) => Idle,
@@ -161,10 +155,10 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_admission_cannot_strand_a_later_failed_submit() {
-        // A delayed `Admitted` for an OLDER submission lands while a newer one
-        // is `Submitted`; the newer one's own definitive failure must still
-        // return to idle instead of leaving the loader up forever.
+    fn an_admitted_prompt_survives_another_submits_failure() {
+        // The invariant the state machine keeps on purpose: an admitted prompt's
+        // run has not started yet, so a DIFFERENT submit's failure must not clear
+        // it (the daemon will still start it, and `Started` follows).
         assert_eq!(
             after(&[
                 RunEvent::Submitted,
@@ -173,23 +167,10 @@ mod tests {
                     others_in_flight: false,
                 },
             ]),
-            RunState::Idle,
-            "a definitive failure clears an admitted state too"
-        );
-        assert_eq!(
-            after(&[
-                RunEvent::Submitted,
-                RunEvent::Admitted,
-                RunEvent::SubmitFailed {
-                    others_in_flight: false,
-                },
-                RunEvent::Started,
-            ]),
-            RunState::Running,
-            "the run the daemon did start still shows after the reset"
+            RunState::Admitted,
+            "admission outranks another submit's failure"
         );
     }
-
     #[test]
     fn a_failed_or_lost_submit_never_strands_the_loader() {
         assert_eq!(
