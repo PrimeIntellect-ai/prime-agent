@@ -72,19 +72,9 @@ impl AgentSessionEngine {
         if !due {
             return AutoCompactionRun::NotDue;
         }
-        // TS `_runAutoCompaction` emits the start event before the
-        // summarizer runs, so attached surfaces see the loader.
-        if !emit(EngineEvent::CompactionStart {
-            event: crate::compaction::compaction_start_event("threshold", None),
-        }) {
-            return AutoCompactionRun::Cancelled;
-        }
-        pa_core::session_engine::compaction_trace::trace(
-            "auto.threshold_start_emitted",
-            &serde_json::Value::Null,
-        );
         // TS assigns `_autoCompactionAbortController` for the run's duration: an
         // `abort_compaction` command lands in the slot and cancels the in-flight summarizer.
+        // The slot is set before the start event, so an abort sent on that event lands.
         let controller = std::sync::Arc::new(AbortController::new());
         let signal = controller.signal();
         {
@@ -93,6 +83,18 @@ impl AgentSessionEngine {
                 .lock()
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
+        // TS `_runAutoCompaction` emits the start event before the
+        // summarizer runs, so attached surfaces see the loader.
+        if !emit(EngineEvent::CompactionStart {
+            event: crate::compaction::compaction_start_event("threshold", None),
+        }) {
+            self.clear_auto_compaction_abort(&controller);
+            return AutoCompactionRun::Cancelled;
+        }
+        pa_core::session_engine::compaction_trace::trace(
+            "auto.threshold_start_emitted",
+            &serde_json::Value::Null,
+        );
         let (model, api_key) = self.resolve_request_target(model);
         // The lock covers the clone only; the summarizer call below must not ride it.
         let engine = self.session.blocking_lock().clone();

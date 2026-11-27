@@ -238,16 +238,16 @@ impl super::SessionUi {
                     timeout_ms: None,
                     rest: Map::default(),
                 };
-                let fetched = tokio::time::timeout(
-                    Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                    client.request_ok(request),
-                )
-                .await;
-                let result = match fetched {
-                    Ok(Ok(data)) => Ok(data),
-                    Ok(Err(error)) => Err(format!("{error:#}")),
-                    Err(_) => Err("the library request timed out".to_string()),
-                };
+                // The read may boot the session's kernel, which can outlast
+                // the UI request bound; it runs off the key loop, so it takes
+                // the long-running class like the machines page's drill-in.
+                let result = client
+                    .request_ok_with_timeout(
+                        request,
+                        crate::daemon_client::LONG_RUNNING_REQUEST_TIMEOUT_MS,
+                    )
+                    .await
+                    .map_err(|error| format!("{error:#}"));
                 let _ = tx.send(FactoryUpdate::NodeFiles {
                     session,
                     run_id,

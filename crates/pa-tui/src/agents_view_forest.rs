@@ -139,13 +139,10 @@ pub struct ActivityCounts {
 }
 
 /// One recursive rollup over the record hierarchy (TS
-/// `AgentsViewRecursiveRollup`).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// `AgentsViewRecursiveRollup`): the descendant count. Spend is each row's
+/// own published `totalUsage`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rollup {
-    pub cost: f64,
-    /// Every descendant subagent's spend: each child's recursive rollup plus this record's
-    /// deleted-descendant bucket. Status-independent — all descendants bill.
-    pub descendants: f64,
     pub descendant_count: usize,
 }
 

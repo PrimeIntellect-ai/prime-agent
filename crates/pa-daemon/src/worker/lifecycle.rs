@@ -804,7 +804,7 @@ impl Worker {
     }
 
     /// Detached cells whose terminal notice is not yet admitted.
-    fn pending_detached_completions(&self) -> usize {
+    pub(crate) fn pending_detached_completions(&self) -> usize {
         self.agent_engine
             .as_ref()
             .and_then(|engine| engine.live_handles())

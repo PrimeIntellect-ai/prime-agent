@@ -247,19 +247,6 @@ fn the_depth_two_chain_reports_the_folded_aggregate() {
         json!(1_500),
         "the end-of-load fold installed the cumulative aggregate"
     );
-    // The observer walk reads the FOLDED store: the depth-2 batch carries the
-    // grandchild's spend (input 1,500 — the raw 1,000 would mean it vanished at depth 2).
-    let (batches, next) = crate::rlm_child_usage::child_usage_batches(store.entries(), 0);
-    assert_eq!(next, store.entries().len(), "the walk consumes the file");
-    let spawn = batches
-        .iter()
-        .find(|(origin, _)| matches!(origin, pa_types::session::ChildUsageOrigin::SpawnTask))
-        .expect("the spawning turn's batch");
-    assert_eq!(
-        spawn.1.input, 1_500,
-        "the folded aggregate rides the report"
-    );
-    assert_eq!(spawn.1.cost.total, pa_types::JsNumber(0.15));
 }
 
 /// The Anthropic subscription warning's once-per-session-lifecycle gate
