@@ -17,7 +17,7 @@ use crate::kernel::shared::HostRequestHandlers;
 use crate::session::manager::SessionManager;
 use crate::skills::{get_python_skill_runtime_info, Skill};
 use crate::tools::ipython::{
-    IpythonKernelProvisioner, IpythonToolOptions, KernelAttachment, KernelErrorInfo,
+    CellStop, IpythonKernelProvisioner, IpythonToolOptions, KernelAttachment, KernelErrorInfo,
     KernelExecuteOptions, KernelExecutor,
 };
 
@@ -391,6 +391,24 @@ impl IpythonKernelProvisioner for KernelProvisioner {
     fn kill(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let this = self.clone();
         Box::pin(async move { this.kill_and_wait().await })
+    }
+
+    fn stop_cell(&self, cell_id: &str) -> Pin<Box<dyn Future<Output = CellStop> + Send>> {
+        let manager = self.manager();
+        let cell_id = cell_id.to_string();
+        Box::pin(async move {
+            let Some(manager) = manager else {
+                return CellStop::NotRunning;
+            };
+            if !manager.stop_detached_execution(&cell_id).await {
+                return CellStop::NotRunning;
+            }
+            if manager.retired_for_ignored_interrupt() {
+                CellStop::KernelRetired
+            } else {
+                CellStop::Stopped
+            }
+        })
     }
 
     fn take_kernel_restart_note(&self) -> bool {

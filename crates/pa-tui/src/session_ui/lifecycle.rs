@@ -1295,6 +1295,29 @@ mod backfill_tests {
         .expect("mock session open and reload outcome complete within ten seconds");
     }
 
+    /// The open `/heartbeats` view paints its next-run column from the clock at paint time, so
+    /// the 2s countdown tick repaints it.
+    #[tokio::test]
+    async fn the_countdown_tick_repaints_the_open_heartbeats_view() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("countdown.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_heartbeats_view(&mut view);
+            session.dirty = false;
+            session.refresh_heartbeat_countdowns(&mut view);
+            assert!(session.dirty);
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open completes within ten seconds");
+    }
+
     /// Every successful attach clears an expired re-attach window's failure: the flag is
     /// per-connection, so a recovered connection must not keep refusing submits.
     #[tokio::test]
