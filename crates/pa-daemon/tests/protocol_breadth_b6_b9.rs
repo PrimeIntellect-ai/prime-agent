@@ -356,6 +356,39 @@ fn wave_b7_agent_messages_wire_shapes() {
 }
 
 #[test]
+fn an_attach_after_a_detach_lets_the_session_pause_again() {
+    let _serial = serial_lock();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
+    for (id, command) in [
+        (
+            "at-1",
+            json!({ "type": "attach", "activeSessionId": session_id }),
+        ),
+        (
+            "dt-1",
+            json!({ "type": "detach", "activeSessionId": session_id }),
+        ),
+        (
+            "at-2",
+            json!({ "type": "attach", "activeSessionId": session_id }),
+        ),
+    ] {
+        client.send_command(id, &command);
+        let response = client.read_response(id);
+        assert_eq!(response["success"], true, "{id}: {response}");
+    }
+    client.send_command(
+        "pa-1",
+        &json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "k" }),
+    );
+    let response = client.read_response("pa-1");
+    assert_eq!(response["success"], true, "{response}");
+}
+
+#[test]
 fn wave_b8_session_input_pause_wire_shapes() {
     let _serial = serial_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");

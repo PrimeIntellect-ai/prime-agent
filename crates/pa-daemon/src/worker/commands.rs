@@ -110,6 +110,7 @@ impl Worker {
             "set_follow_up_mode" => self.handle_set_queue_mode("set_follow_up_mode", payload),
             "set_auto_retry" => self.handle_set_auto_retry(payload),
             "abort_retry" => self.handle_abort_retry(),
+            "retire_continuations" => self.handle_retire_continuations().await,
             "get_session_tree" => self.tree_navigation.get_session_tree(),
             "get_user_messages_for_forking" => self.tree_navigation.get_user_messages_for_forking(),
             "set_session_entry_label" => self.tree_navigation.set_session_entry_label(payload),
@@ -746,6 +747,28 @@ impl Worker {
         // And the same eager agent abort.
         self.engine.abort_in_flight_turn();
         response_success(None, "abort_and_clear_queue", cleared.data)
+    }
+
+    /// The A2A cancel sends it so a stopped task's loop does not resume on
+    /// the context's next task.
+    async fn handle_retire_continuations(&self) -> DaemonResponse {
+        if let Err(response) = self.require_created("retire_continuations") {
+            return response;
+        }
+        let goal = match &self.agent_engine {
+            Some(engine) => engine.retire_continuations().await,
+            None => Ok(None),
+        };
+        let goal = match goal {
+            Ok(goal) => goal,
+            Err(error) => {
+                return response_failure(None, "retire_continuations", &format!("{error:#}"), None)
+            }
+        };
+        if let Some(goal) = goal {
+            super::persist_and_emit_goal_update(&self.core, &self.events, &goal);
+        }
+        response_success(None, "retire_continuations", None)
     }
 
     fn handle_get_last_assistant_text(&self) -> DaemonResponse {
