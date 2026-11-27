@@ -1,0 +1,1 @@
+- CI runs for a pull request based on any branch, so a stacked PR gets the trust gates and the suite instead of waiting for its base to merge.
