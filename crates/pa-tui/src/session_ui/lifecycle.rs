@@ -294,10 +294,16 @@ impl SessionUi {
                     text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
                     kind: crate::chat::StatusKind::Info,
                 }),
+                // A supervisor that kept serving (an abandoned update) names no update.
                 _ => view.push_entry(crate::chat::ChatEntry::Status {
-                    text: format!(
-                        "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
-                    ),
+                    text: if update_id.is_empty() {
+                        "Reconnected to Prime Agent — your session and queued work resumed."
+                            .to_string()
+                    } else {
+                        format!(
+                            "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
+                        )
+                    },
                     kind: crate::chat::StatusKind::Info,
                 }),
             },
@@ -1287,6 +1293,29 @@ mod backfill_tests {
         })
         .await
         .expect("mock session open and reload outcome complete within ten seconds");
+    }
+
+    /// The open `/heartbeats` view paints its next-run column from the clock at paint time, so
+    /// the 2s countdown tick repaints it.
+    #[tokio::test]
+    async fn the_countdown_tick_repaints_the_open_heartbeats_view() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("countdown.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_heartbeats_view(&mut view);
+            session.dirty = false;
+            session.refresh_heartbeat_countdowns(&mut view);
+            assert!(session.dirty);
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open completes within ten seconds");
     }
 
     /// Every successful attach clears an expired re-attach window's failure: the flag is

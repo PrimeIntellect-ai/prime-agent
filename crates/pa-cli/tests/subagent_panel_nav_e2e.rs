@@ -16,12 +16,15 @@
 //! child, and the agents-back key returns.
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
 use pa_tui::interactive::SessionSelection;
@@ -109,14 +112,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor { child, socket };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(15));
+    Supervisor { child, socket }
 }
 
 /// One saved-session fixture: a header with the subagent linkage
@@ -285,6 +282,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
             name: "panel nav worker".to_string(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .expect("append spawn edge");
 
@@ -470,8 +468,8 @@ async fn the_title_bills_a_passive_subagents_spend() {
         append_billed_turn(path, id, input, output, cost);
     }
 
-    // The durable spawn edge: the title rolls the child's spend up from
-    // the real daemon's seeded row.
+    // The durable spawn edge: the parent's total folds the child's spend
+    // from the supervisor's usage ledger.
     let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &session_dir, |_m| {});
     ledger
         .append_spawn(&pa_daemon::rlm_ledger::RlmSpawnInput {
@@ -482,6 +480,7 @@ async fn the_title_bills_a_passive_subagents_spend() {
             name: "title bill worker".to_string(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .expect("append spawn edge");
 
@@ -519,11 +518,9 @@ async fn the_title_bills_a_passive_subagents_spend() {
 }
 
 /// The attached parent's top bar bills a deleted subagent's spend: the
-/// RLM-deleted child keeps its transcript under session-artifacts (no
-/// catalog row exists for it), so its captured spend rides the parent's
-/// roster row through the deleted-descendant bucket. This test asserts
-/// the top bar; the agents-view row reads the same row through the same
-/// `compute_rollups`, so it bills the same number.
+/// RLM-deleted child has no row anywhere, and its spend stays in the
+/// supervisor's usage ledger, folded into the parent's total over the
+/// tombstoned spawn edge. The agents-view row reads the same published total.
 #[tokio::test]
 async fn the_title_bills_a_deleted_subagents_spend() {
     // The daemon reports canonical session paths; macOS temp dirs sit behind
@@ -563,9 +560,8 @@ async fn the_title_bills_a_deleted_subagents_spend() {
     append_billed_turn(&parent_path, "dm1a", 100, 10, 1.0);
     append_billed_turn(&child_path, "dm1c", 50, 5, 0.3);
 
-    // The durable spawn edge plus the RLM delete's tombstone carrying
-    // the captured usage (the amendment the stop finalize appends after
-    // the flush barrier): the child's spend survives the deletion.
+    // The durable spawn edge plus the RLM delete's tombstone (the RLM
+    // delete keeps the child's transcript).
     let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &session_dir, |_m| {});
     ledger
         .append_spawn(&pa_daemon::rlm_ledger::RlmSpawnInput {
@@ -576,19 +572,14 @@ async fn the_title_bills_a_deleted_subagents_spend() {
             name: "title del worker".to_string(),
             factory: None,
             decision_child: false,
+            refine_child: false,
         })
         .expect("append spawn edge");
     ledger
-        .append_delete_with_usage(
+        .append_delete(
             "title-del-child",
             &child_path.to_string_lossy(),
             pa_daemon::rlm_ledger::RlmLedgerDeleteReason::User,
-            &pa_daemon::session_usage::SessionUsageSummary {
-                input_tokens: 50,
-                output_tokens: 5,
-                cost: 0.3,
-            },
-            None,
         )
         .expect("append delete tombstone");
 
@@ -614,8 +605,8 @@ async fn the_title_bills_a_deleted_subagents_spend() {
         .await
         .expect("parent session run");
     // The top bar row (render_top_bar): the parent's own $1.00 plus the
-    // deleted child's $0.30, the family rollup - the child's spend
-    // bills through the bucket even though no row exists for it.
+    // deleted child's $0.30 - the child's spend bills through the usage
+    // ledger even though no row exists for it.
     let top_bar = frame_of(&run.frames, "$1.30")
         .lines()
         .next()

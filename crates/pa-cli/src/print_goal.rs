@@ -828,7 +828,7 @@ mod tests {
                     additional_prompt_paths: Vec::new(),
                     extra_builtin_skill_overrides: Vec::new(),
                     rlm_subagent_host: None,
-                    rlm_usage_store: None,
+                    usage_store: None,
 
                     inbox: None,
                     progress_note_emit: None,
@@ -1434,7 +1434,7 @@ mod tests {
                     additional_prompt_paths: Vec::new(),
                     extra_builtin_skill_overrides: Vec::new(),
                     rlm_subagent_host: None,
-                    rlm_usage_store: None,
+                    usage_store: None,
 
                     inbox: None,
                     progress_note_emit: None,

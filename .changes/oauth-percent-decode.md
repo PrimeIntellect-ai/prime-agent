@@ -1,0 +1,1 @@
+- Fixed OAuth login callbacks crashing when a query parameter has a `%` followed by a non-ASCII character.

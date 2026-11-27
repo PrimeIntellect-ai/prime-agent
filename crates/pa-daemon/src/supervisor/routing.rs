@@ -407,7 +407,18 @@ impl Supervisor {
                                 | DaemonCommand::Rename { .. }
                                 | DaemonCommand::WaitForIdle { .. }
                         ) {
-                            match self.wake_saved_session(&selector).await {
+                            // An attaching client's telemetry opt-out rides the wake: the
+                            // attach gate admits it only to a worker that kept the opt-out.
+                            let telemetry_disabled = match command {
+                                DaemonCommand::Attach {
+                                    telemetry_disabled, ..
+                                }
+                                | DaemonCommand::Reattach {
+                                    telemetry_disabled, ..
+                                } => telemetry_disabled.filter(|disabled| *disabled),
+                                _ => None,
+                            };
+                            match self.wake_saved_session(&selector, telemetry_disabled).await {
                                 WakeRoute::Woken(resident) => {
                                     rebound_to = Some(
                                         self.rebind_connection(&selector, &resident, attached)
@@ -968,14 +979,21 @@ impl Supervisor {
 
     /// The saved-session wake for a passivated session (TS's tier-2 relaunch); a selector
     /// that resolves to no saved session falls through to the unknown-session error.
-    pub(super) async fn wake_saved_session(self: &Arc<Self>, selector: &str) -> WakeRoute {
+    pub(super) async fn wake_saved_session(
+        self: &Arc<Self>,
+        selector: &str,
+        telemetry_disabled: Option<bool>,
+    ) -> WakeRoute {
         let resolve_error = anyhow!("Unknown active session: {selector}");
-        match self.wake_saved_target(&resolve_error, selector, None).await {
+        match self
+            .wake_saved_target(&resolve_error, selector, None, telemetry_disabled)
+            .await
+        {
             crate::messaging::WakeOutcome::Woken(resident) => WakeRoute::Woken(resident),
             crate::messaging::WakeOutcome::Unknown => {
                 // The routing selector is the session's ACTIVE id (the registry key), which
                 // the catalog and ledger edges do not carry — the ROSTER row does.
-                match self.wake_roster_session(selector).await {
+                match self.wake_roster_session(selector, telemetry_disabled).await {
                     Some(crate::messaging::WakeOutcome::Woken(resident)) => {
                         WakeRoute::Woken(resident)
                     }
@@ -999,6 +1017,7 @@ impl Supervisor {
     async fn wake_roster_session(
         self: &Arc<Self>,
         selector: &str,
+        telemetry_disabled: Option<bool>,
     ) -> Option<crate::messaging::WakeOutcome> {
         let mut files: Vec<String> = {
             let roster = self.roster.lock().unwrap();
@@ -1089,7 +1108,7 @@ impl Supervisor {
             no_session: None,
             name: None,
             config: Some(config),
-            telemetry_disabled: None,
+            telemetry_disabled,
             runtime_metadata: Some(runtime_metadata),
             lifecycle: None,
             env: None,
@@ -1158,13 +1177,13 @@ impl Supervisor {
         let edges = ledger
             .live_edges()
             .with_context(|| "read the spawn ledger edges".to_string())?;
-        let (child_id, session_file) = if let Some(resolved) =
+        let session_file = if let Some((child_id, session_file)) =
             resolve_ledger_child(&edges, selector, child_id)
         {
             ledger
-                .append_delete(&resolved.0, &resolved.1, reason)
-                .with_context(|| format!("tombstone RLM subagent {}", resolved.0))?;
-            resolved
+                .append_delete(&child_id, &session_file, reason)
+                .with_context(|| format!("tombstone RLM subagent {child_id}"))?;
+            session_file
         } else {
             // A retry after the boundary already stands: an earlier attempt tombstoned the
             // edge and ran its finalize, so only a still-running worker blocks the delete.
@@ -1174,8 +1193,7 @@ impl Supervisor {
                 .into_iter()
                 .filter(|edge| edge.deleted.is_some())
                 .collect();
-            let Some((deleted_child_id, session_file)) =
-                resolve_ledger_child(&tombstoned, selector, child_id)
+            let Some((_, session_file)) = resolve_ledger_child(&tombstoned, selector, child_id)
             else {
                 anyhow::bail!("stopped RLM subagent \"{selector}\" is not in the spawn ledger");
             };
@@ -1203,10 +1221,10 @@ impl Supervisor {
             }
             // The first attempt may have stopped after appending its tombstone.
             // Reuse the same finalization without writing a second boundary.
-            (deleted_child_id, session_file)
+            session_file
         };
-        // The stopped child's teardown mirrors the resident delete's end state: the usage
-        // capture, archived state, and artifact sweep land as a live child's kill leaves them.
+        // The stopped child's teardown mirrors the resident delete's end state: the archived
+        // state and artifact sweep land as a live child's kill leaves them.
         // Live coverage captured AFTER the tombstone append: a wake that registered a resident
         // between the two must be visible here (the archive/sweep skips its tree).
         let live = self.live_session_files().await;
@@ -1225,21 +1243,21 @@ impl Supervisor {
             std::path::Path::new(&session_file),
             &live,
         );
-        self.capture_deleted_child_usage(&session_file, &child_id, "rlm_delete")
+        // The sweep unlinks the descendants' transcripts: their spend must be
+        // in the usage ledger first.
+        let moved = self
+            .reconcile_usage(std::path::Path::new(&session_file))
             .await;
         crate::saved_session_commands::remove_session_artifacts(std::path::Path::new(
             &session_file,
         ));
-        // The resident delete's end state, continued: no stop ran for
-        // this child (its worker was already passivated), so the
-        // passivation's row lingers unowned while the bucket bills the
-        // captured spend on the parent - the same settle the resident
-        // delete's pass performs, in one push.
-        let changed = self.refresh_deleted_descendant_usage().await;
+        // The resident delete's end state, continued: no stop ran for this
+        // child (its worker was already passivated), so its lingering row goes.
         let canonical = crate::lease::canonical_session_path(std::path::Path::new(&session_file))
             .to_string_lossy()
             .to_string();
-        let removed: Vec<String> = {
+        // The rows whose totals the reconcile moved ride the same push.
+        let (changed, removed): (Vec<_>, Vec<String>) = {
             let mut roster = self.roster.lock().unwrap();
             let agent_id = roster
                 .by_session_file(&canonical)
@@ -1247,7 +1265,7 @@ impl Supervisor {
             if let Some(agent_id) = &agent_id {
                 roster.delete(agent_id);
             }
-            agent_id.into_iter().collect()
+            (roster.restamp_spend(&moved), agent_id.into_iter().collect())
         };
         self.push_roster_update(changed, removed);
         Ok(())

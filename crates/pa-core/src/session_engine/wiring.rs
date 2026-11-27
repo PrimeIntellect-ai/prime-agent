@@ -1,6 +1,6 @@
 use super::{
     auxiliary_model, compaction, compaction_exec, image_model_routing, ipython_state, model_usage,
-    provider_adapter, refine, rlm_usage, semantic_edges, telemetry, AgentSession, PromptBatchRow,
+    provider_adapter, refine, semantic_edges, telemetry, usage_store, AgentSession, PromptBatchRow,
 };
 
 impl AgentSession {
@@ -103,7 +103,7 @@ impl AgentSession {
     }
 
     /// Bind the durable store the session's `model_usage` rows append to.
-    pub fn set_usage_store(&mut self, store: std::sync::Arc<dyn rlm_usage::RlmChildUsageStore>) {
+    pub fn set_usage_store(&mut self, store: std::sync::Arc<dyn usage_store::UsageStore>) {
         self.usage_store = store;
     }
 
