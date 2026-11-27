@@ -705,12 +705,6 @@ impl Worker {
                         );
                     });
                 concrete.set_compaction_summary_sink(summary_sink);
-                // The worker's refinement completion sink: the background
-                // run's durable rows and completion events surface here,
-                // generation-fenced, once the run settles.
-                *concrete.refinement_completion_sink.lock().unwrap() = Some(
-                    refinement::completion_sink(Arc::clone(&core), Arc::clone(&events)),
-                );
                 // The kernel-notice wake seam (TS `_promptInjectedMessage`
                 // for `bash.completed` and `factory.progress`): the handlers
                 // validate, the sinks admit/withdraw through the queue lanes.

@@ -233,10 +233,11 @@ impl AgentSessionEngine {
     }
 
     /// The wake's second half: apply the oldest parked reply at the
-    /// session's idle boundary. `None` when nothing is parked.
+    /// session's idle boundary, with its flight's source. `None` when
+    /// nothing is parked.
     pub(crate) async fn apply_pending_refine_reply(
         &self,
-    ) -> Option<anyhow::Result<CommittedRefinement>> {
+    ) -> Option<(RefinementSource, anyhow::Result<CommittedRefinement>)> {
         if self
             .pending_refine_replies
             .lock()
@@ -255,10 +256,12 @@ impl AgentSessionEngine {
                 .unwrap_or_else(PoisonError::into_inner);
             (!pending.is_empty()).then(|| pending.remove(0))
         }?;
-        Some(
+        let source = pending.flight.source;
+        Some((
+            source,
             self.apply_flight_reply(pending.flight, &pending.reply)
                 .await,
-        )
+        ))
     }
 
     /// Commit one refinement child's reply, then finish the compact-trigger
@@ -499,7 +502,8 @@ mod tests {
                 .runtime
                 .block_on(async { engine.apply_pending_refine_reply().await })
         };
-        let first = apply().expect("a parked reply").expect("the first apply");
+        let (_, first) = apply().expect("a parked reply");
+        let first = first.expect("the first apply");
         assert!(first.result.applied_edits[0].applied);
         assert!(
             first
