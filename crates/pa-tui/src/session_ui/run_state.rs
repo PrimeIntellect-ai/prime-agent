@@ -190,6 +190,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn a_failed_or_lost_submit_never_strands_the_loader() {
         assert_eq!(
             after(&[RunEvent::Submitted, FAILED]),
