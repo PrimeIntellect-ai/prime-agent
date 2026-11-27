@@ -283,6 +283,9 @@ pub struct RlmSessionIdentity {
     /// metadata (`factoryContract`): the child's `factory.emit` checks
     /// against it.
     pub factory_contract: Option<serde_json::Value>,
+    /// The create's runtime metadata kind is `refine`: the session is a
+    /// refinement child.
+    pub refine_child: bool,
 }
 
 /// A created session's semantic-edge provenance (TS

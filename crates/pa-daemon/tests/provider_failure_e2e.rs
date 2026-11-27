@@ -57,6 +57,9 @@ enum MockRejection {
     /// The prime-inference storm shape: 429 with `Retry-After` and the
     /// "Too many concurrent requests" body.
     RateLimit { retry_after_secs: u64 },
+    /// The Prime Inference stream shape: HTTP 200, then the rate limit as an
+    /// `error` chunk with no choices, then `[DONE]`.
+    InStreamRateLimit,
     /// THE 402 REGRESSION (the diagnosis's variant B): a wallet-drain 402 carrying
     /// the prime-inference `invalid_request_error` type text (the shape that settled silently).
     PaymentRequired,
@@ -140,9 +143,10 @@ fn serve(
         *requests
     };
     if index <= failures {
-        let (status_line, headers, body) = match rejection {
+        let (status_line, content_type, headers, body) = match rejection {
             MockRejection::ServerError => (
                 "HTTP/1.1 500 Internal Server Error",
+                "application/json",
                 String::new(),
                 json!({
                     "error": { "message": "mock provider overloaded", "type": "server_error", "code": 500 }
@@ -151,6 +155,7 @@ fn serve(
             ),
             MockRejection::PaymentRequired => (
                 "HTTP/1.1 402 Payment Required",
+                "application/json",
                 String::new(),
                 json!({
                     "error": {
@@ -163,6 +168,7 @@ fn serve(
             ),
             MockRejection::RateLimit { retry_after_secs } => (
                 "HTTP/1.1 429 Too Many Requests",
+                "application/json",
                 format!("Retry-After: {retry_after_secs}\r\n"),
                 json!({
                     "error": {
@@ -173,10 +179,25 @@ fn serve(
                 })
                 .to_string(),
             ),
+            MockRejection::InStreamRateLimit => (
+                "HTTP/1.1 200 OK",
+                "text/event-stream",
+                String::new(),
+                format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    json!({
+                        "id": "gen-1",
+                        "object": "chat.completion.chunk",
+                        "model": "mock-1",
+                        "choices": [],
+                        "error": { "code": 429, "message": "Rate limit reached. Please retry shortly." },
+                    })
+                ),
+            ),
         };
         return stream.write_all(
             format!(
-                "{status_line}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "{status_line}\r\nContent-Type: {content_type}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             )
@@ -728,6 +749,50 @@ fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
         })
         .count();
     assert_eq!(outcomes, 1, "exactly one outcome row: {list:?}");
+}
+
+/// A rate limit streamed inside a 200 response (the Prime Inference shape)
+/// retries like the HTTP 429 it stands for, instead of settling as an empty
+/// successful turn.
+#[test]
+fn in_stream_rate_limit_is_retried_then_recovers() {
+    let (_dir, mock, _supervisor, mut client, session_id) = setup_with_rejection(
+        "instream429",
+        1,
+        "recovered answer",
+        MockRejection::InStreamRateLimit,
+    );
+    client.send_command(
+        "p1",
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
+    );
+    let done = client.request("p1");
+    assert_eq!(done["success"], true, "prompt must recover: {done}");
+    client.drain_events(Duration::from_secs(1));
+
+    assert_eq!(mock.count(), 2, "requests: initial + 1 retry");
+    let starts: Vec<&Value> = client
+        .events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("auto_retry_start"))
+        .collect();
+    assert_eq!(starts.len(), 1, "events: {:?}", event_types(&client.events));
+    assert_eq!(
+        starts[0]["errorMessage"],
+        "429 Rate limit reached. Please retry shortly."
+    );
+    let last_message = client
+        .events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("message_end"))
+        .rev()
+        .find(|event| event["message"]["role"] == "assistant")
+        .expect("final assistant message");
+    assert_eq!(last_message["message"]["stopReason"], "stop");
+    assert_eq!(
+        last_message["message"]["content"][0]["text"],
+        "recovered answer"
+    );
 }
 
 /// THE 402 REGRESSION: a wallet-drain 402 must classify by STATUS (the `payment_required`

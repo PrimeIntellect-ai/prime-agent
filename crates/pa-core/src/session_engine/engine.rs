@@ -63,6 +63,9 @@ pub struct SessionEngineConfig {
     /// registers the child's `factory.emit` and `factory.inputs`, and
     /// selects the child prompt's emit line when it declares outputs.
     pub factory_contract: Option<serde_json::Value>,
+    /// Whether this session is a refinement child: its final message is the
+    /// proposal its parent applies, and its kernel refuses harness writes.
+    pub refine_child: bool,
     /// Whether the session runs without a daemon: nothing outside the
     /// session itself (no scheduler, no bash-completion wake) starts a
     /// turn. Set explicitly by the embedding; print sessions are
@@ -542,6 +545,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         on_bootstrap_result,
         config.kernel_ready_gate.clone(),
         config.daemonless,
+        config.refine_child,
     );
     let mut tools = config.tools.clone();
     if !tools.iter().any(|tool| tool.name() == PYTHON_TOOL_NAME) {
@@ -628,6 +632,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                     crate::prompts::FactoryChild::FinalMessage
                 },
             ),
+            refine_child: config.refine_child,
             daemonless: config.daemonless,
             can_spawn: config.rlm_subagent_host.is_some(),
         },

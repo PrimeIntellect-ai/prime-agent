@@ -131,6 +131,7 @@ async fn faux_engine_with_telemetry(
         progress_note_emit: None,
         rlm_depth: None,
         factory_child: false,
+        refine_child: false,
         factory_contract: None,
         daemonless: true,
         model_info: Some(model.clone()),

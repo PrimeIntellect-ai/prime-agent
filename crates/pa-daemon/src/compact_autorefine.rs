@@ -1,7 +1,7 @@
 //! The compact-trigger auto-refine scheduling (TS `_scheduleAutoRefineAfterCompaction`, armed
 //! after every successful compaction): the daemon worker services the trigger off each turn's
 //! settle in a background task — the round is the refinement child's spawn (fire-and-wake;
-//! the child's proposal applies on its reply's arrival). ACP consumes it at the serialized
+//! the child's proposal applies when it settles). ACP consumes it at the serialized
 //! checkpoint between turns.
 
 use pa_core::session_engine::auto_refine_trigger::CompactAutoRefineSurface;
@@ -75,7 +75,7 @@ impl AgentSessionEngine {
                 return Ok(());
             };
             // Fire: the spawn returns once the child is admitted; the
-            // child's reply applies on arrival (the apply finishes the round
+            // child's proposal applies when it settles (the apply finishes the round
             // either way). A standalone engine refuses visibly; the taken
             // round is released below.
             let Some(children) = children.as_ref() else {

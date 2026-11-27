@@ -5,13 +5,7 @@
 
 use std::sync::Arc;
 
-/// The refine child's reply park: `Some(())` when the message came from
-/// one of the session's in-flight refine children and is parked for the
-/// idle-boundary apply; `None` otherwise.
-pub type RefineChildReplyPark<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send + 'a>>;
-
-/// One parked refine reply's idle-boundary apply outcome, with who
+/// One parked refinement outcome's idle-boundary apply, with who
 /// triggered the refinement (`None` when the engine has nothing parked).
 pub type PendingRefineApply<'a> = std::pin::Pin<
     Box<
@@ -183,26 +177,10 @@ pub trait SessionEngine: Send + Sync {
         Ok(())
     }
 
-    /// Park a refine child's reply at the child-reply wake: an in-flight
-    /// refinement child's reply (or its failure envelope) is stored for the
-    /// idle-boundary apply — the fire-and-wake contract's
-    /// delivery is answered at once, and the apply never runs inside the
-    /// child's send. The late reply of a refine child that a branch move or
-    /// a replacement abandoned is consumed and dropped. `None` for any
-    /// other sender.
-    fn park_refine_child_reply(
-        &self,
-        sender_active_session_id: &str,
-        message: &str,
-    ) -> RefineChildReplyPark<'_> {
-        let _ = (sender_active_session_id, message);
-        Box::pin(async { None })
-    }
-
-    /// Apply the oldest parked refine reply at the session's idle boundary:
+    /// Apply the oldest parked refinement outcome at the session's idle boundary:
     /// the worker's runner owns turn admission, so this never interleaves
     /// with a running turn's rows. `None` when the engine has nothing parked.
-    fn apply_pending_refine_reply(&self) -> PendingRefineApply<'_> {
+    fn apply_pending_refine_outcome(&self) -> PendingRefineApply<'_> {
         Box::pin(async { None })
     }
 
@@ -524,7 +502,7 @@ pub trait SessionEngine: Send + Sync {
 
     /// Spawn the refinement child (the daemon `refine` command without a
     /// `rollbackId`): fire-and-wake — the child plans and its proposal
-    /// applies on its reply's arrival. Answers the child's id.
+    /// applies when it settles. Answers the child's id.
     ///
     /// # Errors
     ///

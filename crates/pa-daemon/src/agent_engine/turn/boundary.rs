@@ -112,7 +112,7 @@ impl AgentSessionEngine {
         // The kernel's scheduled `refine.run` consumes here: the pending
         // refinement is the refinement child's, so the boundary spawns it
         // (fire-and-wake) — the session lock and the compaction flight are
-        // never held; the child's proposal applies on its reply's arrival.
+        // never held; the child's proposal applies when it settles.
         {
             let guard = self.session.blocking_lock();
             let pending = match guard.as_deref() {

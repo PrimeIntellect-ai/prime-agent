@@ -100,6 +100,9 @@ pub struct BuildSystemPromptOptions<'a> {
     /// Set when this child runs one factory state: it hands its outputs to
     /// the factory, so it does not reply to the parent.
     pub factory_child: Option<FactoryChild>,
+    /// Whether this child is a refinement child: its parent applies its
+    /// final message as the refinement proposal.
+    pub refine_child: bool,
     /// Whether the session runs without a daemon (no scheduler, no
     /// heartbeat firing). The wake-up facts the daemonless line states
     /// must match the embedding's wiring.
@@ -360,6 +363,10 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
             lines.push(
                 "- `factory.inputs() -> dict[str, Any]`: this state's bound inputs (and the machine's params) as values".to_string(),
             );
+        } else if options.refine_child {
+            lines.push(
+                "Your final message is the refinement proposal your parent applies; do not message the parent.".to_string(),
+            );
         } else if has_ipython {
             lines.push(
                 "When a task calls for an answer, reply explicitly with `await agent_message.send(message, receiver_role=\"parent\")`. Not every message or task needs a reply; continue cleanup after sending and go idle normally.".to_string(),
@@ -486,6 +493,7 @@ mod tests {
                 generic_mcp_servers: Vec::new(),
                 rlm_depth: 0,
                 factory_child: None,
+                refine_child: false,
                 daemonless: false,
                 can_spawn: false,
             }

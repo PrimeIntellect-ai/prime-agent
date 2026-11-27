@@ -146,8 +146,10 @@ def observe(binary, root, case, receipt):
                 budget = body.get('max_tokens', body.get('max_completion_tokens'))
                 assert isinstance(budget, int) and budget > 0, body
                 receipt['requested_output_tokens'] = budget
-                assert actual == ('Refinement failed: the model hit its output limit '
-                                  f'({budget} tokens, prime-inference/parity-1)'), actual
+                # The cut-off reply fails the refinement child's final turn,
+                # and the run's error names the cause.
+                assert actual.startswith('Refinement failed: ') \
+                    and 'cut off at its output limit' in actual, actual
             elif case == 'provider_error':
                 assert actual.startswith('Refinement failed: ') \
                     and 'fixture token budget invalid' in actual, actual

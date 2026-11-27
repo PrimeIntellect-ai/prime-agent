@@ -9,7 +9,7 @@ use super::{
     anyhow, cap_text, compact_rlm_text, create_rlm_child_failure_message,
     create_rlm_child_terminal_notice, json, now_ms, Arc, ChildCloseReason, ChildObservationSource,
     ChildRecord, Context, CustomMessage, DaemonCommand, DaemonSessionLifecycle, Duration, Map,
-    Mutex, ParentIdentity, Path, PromptInput, Result, RlmChildTerminalNotice,
+    Mutex, ParentIdentity, Path, PromptInput, RefineChildOutcome, Result, RlmChildTerminalNotice,
     SupervisorChildSessionsInner, Value, ANSWER_TEXT_MAX_CHARS, CREATE_TIMEOUT_MS,
     IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS, NOTICE_DELIVERY_TIMEOUT_MS, PROMPT_TIMEOUT_MS,
     RUNTIME_METADATA_PROMPT_MAX, STATE_TIMEOUT_MS, WATCH_MAX_UNREACHABLE_POLLS,
@@ -94,12 +94,11 @@ impl SupervisorChildSessionsInner {
             "rlmMaxDepth": identity.rlm_max_depth,
         });
         // The create key: descriptor.rs derives the worker's launch env
-        // from it, and the admission projects `decisionChild` onto the
-        // ledger edge.
-        match kind {
-            RlmSpawnKind::Subagent => {}
-            RlmSpawnKind::Decision => config["decisionChild"] = json!(true),
-            RlmSpawnKind::Refine => config["refineChild"] = json!(true),
+        // from it, and the admission projects it onto the ledger edge. A
+        // refinement child runs the agent engine: its kind rides the
+        // runtime metadata alone.
+        if kind == RlmSpawnKind::Decision {
+            config["decisionChild"] = json!(true);
         }
         if let Some((provider, id)) = model.split_once('/') {
             config["provider"] = json!(provider);
@@ -785,7 +784,9 @@ impl SupervisorChildSessionsInner {
     async fn deliver_settle_notice(&self, record: &Arc<Mutex<ChildRecord>>) {
         let message = {
             let mut record = record.lock().await;
-            if record.notice_delivered || record.replied_since_task {
+            // A refinement child's end reaches its parent engine even when
+            // it messaged the parent: its final message is the proposal.
+            if record.notice_delivered || (record.replied_since_task && !record.refine_child) {
                 return;
             }
             record.notice_delivered = true;
@@ -938,19 +939,33 @@ impl SupervisorChildSessionsInner {
         }
     }
 
-    /// Hand a refinement child's terminal outcome (its run's error, `None`
-    /// for a run that ended without one) to the engine's refine terminal
-    /// hook. `false` for any other child.
+    /// Hand a refinement child's terminal outcome to the engine's refine
+    /// terminal hook: a finished run's final message is its proposal, read
+    /// whole (the record's answer text is capped for the roster and
+    /// collect), and any other end fails the refinement with the run's
+    /// reason. `false` for any other child.
     pub(super) async fn deliver_refine_outcome(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
-        let (active_session_id, error) = {
+        let (active_session_id, session_file, finished, error) = {
             let record = record.lock().await;
             if !record.refine_child {
                 return false;
             }
             (
                 record.active_session_id.clone(),
+                record.session_file.clone(),
+                matches!(record.run.verdict(), Some(RunVerdict::Done)),
                 record.run.error().map(str::to_string),
             )
+        };
+        let outcome = if finished {
+            self.last_assistant_text(&active_session_id, session_file)
+                .await
+                .map_or(
+                    RefineChildOutcome::Failed(None),
+                    RefineChildOutcome::Answered,
+                )
+        } else {
+            RefineChildOutcome::Failed(error)
         };
         let hook = self
             .refine_terminal_hook
@@ -958,7 +973,7 @@ impl SupervisorChildSessionsInner {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(hook) = hook {
-            hook(&active_session_id, error.as_deref());
+            hook(&active_session_id, outcome);
         }
         true
     }

@@ -61,9 +61,8 @@ mod commands;
 pub use env::{
     strip_inherited_worker_env, WORKER_ACTIVE_SESSION_ID_ENV, WORKER_CWD_ENV,
     WORKER_DECISION_CHILD_ENV, WORKER_INSTANCE_ID_ENV, WORKER_RECOVERY_JOURNAL_ENV,
-    WORKER_REFINE_CHILD_ENV, WORKER_ROLE_ENV, WORKER_SCRIPT_ENV, WORKER_SOCKET_ENV,
-    WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
-    WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
+    WORKER_ROLE_ENV, WORKER_SCRIPT_ENV, WORKER_SOCKET_ENV, WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
+    WORKER_SUPERVISOR_SOCKET_ENV, WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
 };
 use serde_json::Map;
 pub(crate) use session_core::SessionCore;
@@ -418,19 +417,13 @@ impl Worker {
             Arc::clone(&events),
             Arc::clone(&recovery),
         ));
-        // The refinement child flag rides the worker's launch env (the
-        // durable create command's `refineChild`): the worker runs the
-        // refinement engine instead of the agent engine.
-        let refine_child =
-            std::env::var_os(WORKER_REFINE_CHILD_ENV).is_some_and(|value| value == "1");
         // The coalescing arrival batch the queued short notice covers:
         // shared by the kernel-notice sink and the agent-message
         // delivery route, so both classes extend the same batch.
         let inbox_arrivals = pa_core::session_engine::inbox::InboxArrivals::default();
-        // The turn runner's passivation context: shared by the engine
+        // The turn runner's passivation context: shared by both engine
         // branches below (the roster context after them moves the worker
-        // token into its queue; the refinement and decision engines take a
-        // clone).
+        // token into its queue; the decision engine takes a clone).
         let passivation = crate::worker::turn::PassivationContext {
             agent_dir: config.agent_dir.clone(),
             link: Arc::clone(&roster_link),
@@ -449,20 +442,9 @@ impl Worker {
         let (engine, agent_engine): (
             std::sync::Arc<dyn SessionEngine>,
             Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
-        ) = if refine_child {
-            // The refinement child runs the refinement engine, the
-            // decision child the decision engine; every other session
-            // (scripted or not) runs the agent engine family.
-            let engine: std::sync::Arc<dyn SessionEngine> =
-                std::sync::Arc::new(crate::refine_engine::RefineEngine::new(
-                    config.agent_dir.clone(),
-                    Arc::clone(&roster_link),
-                    config.active_session_id.clone(),
-                    worker_token.clone(),
-                ));
-            (engine, None)
-        } else if decision_child {
-            // The Decision API child runs the decision engine.
+        ) = if decision_child {
+            // The Decision API child runs the decision engine; every other
+            // session (scripted or not) runs the agent engine family.
             let engine: std::sync::Arc<dyn SessionEngine> =
                 std::sync::Arc::new(crate::decision_engine::DecisionEngine::new(
                     &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),

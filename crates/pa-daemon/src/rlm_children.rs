@@ -98,6 +98,9 @@ pub struct ParentIdentity {
     pub thinking: Option<String>,
     /// Verification seam: create children with a scripted engine file.
     pub child_script: Option<String>,
+    /// This session is a refinement child: it spawns no children (they
+    /// would be ordinary sessions that can write the harness).
+    pub refine_child: bool,
 }
 
 impl ParentIdentity {
@@ -194,7 +197,7 @@ struct ChildRecord {
     /// turn's terminal status so resident child sessions remain resident.
     factory_task_busy: Option<bool>,
     /// The refinement child (the daemon's `refine_child` spawn): a
-    /// one-shot planning pass whose record the registry retires at its
+    /// one-shot refinement run whose record the registry retires at its
     /// own settle — no engine-side teardown — and whose terminal outcome
     /// goes to the engine's refine terminal hook, never the parent
     /// conversation.
@@ -327,9 +330,19 @@ pub type DeleteNotifier = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 pub(crate) type ChildUpdateSink = std::sync::Arc<dyn Fn(Value) + Send + Sync>;
 
+/// How a refinement child's run ended, as its parent applies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RefineChildOutcome {
+    /// The run finished: its final message is the proposal.
+    Answered(String),
+    /// The run ended without a proposal: its error or cancel reason, `None`
+    /// for a run that ended without one or without a final message.
+    Failed(Option<String>),
+}
+
 /// The parent engine's refinement-child terminal hook: the child's active
-/// session id and its run's error (`None` for a run that ended without one).
-pub(crate) type RefineTerminalHook = std::sync::Arc<dyn Fn(&str, Option<&str>) + Send + Sync>;
+/// session id and how its run ended.
+pub(crate) type RefineTerminalHook = std::sync::Arc<dyn Fn(&str, RefineChildOutcome) + Send + Sync>;
 
 /// The parent worker's turn state as the detached child prompt tasks read it.
 #[derive(Debug, Clone, Copy, Default)]
@@ -659,7 +672,7 @@ impl SupervisorChildSessions {
     }
 
     /// Release a refine child's held task prompt: its parent calls this once
-    /// the child's flight is recorded, so the child's reply always finds it.
+    /// the child's flight is recorded, so the child's settle always finds it.
     pub async fn release_child_prompt(&self, rlm_child_id: &str) {
         let children = self.inner.children.lock().await;
         for record in children.iter() {

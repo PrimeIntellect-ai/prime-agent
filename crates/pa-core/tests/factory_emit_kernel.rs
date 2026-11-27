@@ -190,6 +190,7 @@ async fn a_child_fixes_a_rejected_emit_in_the_same_turn() {
         progress_note_emit: None,
         rlm_depth: Some(1),
         factory_child: true,
+        refine_child: false,
         factory_contract: Some(json!({
             "outputs": [{"name": "risk", "type": "enum(low, high)"}, {"name": "design", "type": "file"}],
             "records": {},
@@ -338,6 +339,7 @@ async fn a_daemon_worker_child_emits_from_its_conversation_log_path() {
         progress_note_emit: None,
         rlm_depth: Some(2),
         factory_child: true,
+        refine_child: false,
         factory_contract: Some(json!({
             "outputs": [{"name": "risk", "type": "enum(low, high)"}, {"name": "design", "type": "file"}],
             "records": {},

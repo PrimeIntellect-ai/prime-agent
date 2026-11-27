@@ -176,8 +176,7 @@ impl AgentSessionEngine {
             link,
             children,
             refine_flights: std::sync::Mutex::default(),
-            pending_refine_replies: std::sync::Mutex::default(),
-            abandoned_refine_children: std::sync::Mutex::default(),
+            pending_refine_outcomes: std::sync::Mutex::default(),
             refine_spawn_lock: tokio::sync::Mutex::new(()),
             usage_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -193,6 +192,7 @@ impl AgentSessionEngine {
             rlm_depth: std::sync::atomic::AtomicU32::new(0),
             factory_child: std::sync::atomic::AtomicBool::new(false),
             factory_contract: std::sync::Mutex::new(None),
+            refine_child: std::sync::atomic::AtomicBool::new(false),
             rlm_max_depth_source: std::sync::Mutex::new("default"),
             pending_max_depth: std::sync::Mutex::new(None),
             reloaded_goal_update: std::sync::Mutex::new(None),
@@ -779,7 +779,7 @@ impl AgentSessionEngine {
     ) -> anyhow::Result<SessionCommandExecution> {
         // `/refine` is the refinement child's command (fire-and-wake): the
         // planning spawn returns immediately and the child's proposal applies
-        // on its reply's arrival. Only the mechanical rollback runs inline
+        // when it settles. Only the mechanical rollback runs inline
         // through the base executor.
         if command.name == "refine" {
             let options = pa_core::session_engine::slash_commands::parse_refine_command_options(
@@ -813,8 +813,8 @@ impl AgentSessionEngine {
     }
 
     /// `/refine` without a rollback: spawn the refinement child and return
-    /// immediately — the child's proposal applies on its reply's arrival,
-    /// whose wake emits the durable rows and the completion event.
+    /// immediately — the child's proposal applies when it settles, and the
+    /// apply emits the durable rows and the completion event.
     fn execute_refine_session_command(
         &self,
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
@@ -1171,6 +1171,7 @@ impl AgentSessionEngine {
                 .factory_child
                 .load(std::sync::atomic::Ordering::Relaxed),
             factory_contract,
+            refine_child: self.refine_child.load(std::sync::atomic::Ordering::Relaxed),
             // The worker session runs under the daemon scheduler and its wake-ups.
             daemonless: false,
             model_info: Some(model.clone()),
