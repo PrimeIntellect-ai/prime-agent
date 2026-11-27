@@ -110,24 +110,12 @@ enum PromptContextBoundary {
     Leaf(String),
 }
 
-/// Transfers completion reporting to the worker without retaining its turn runner.
-pub(crate) type RefinementCompletionSink = std::sync::Arc<
-    dyn Fn(
-            tokio::task::JoinHandle<
-                anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
-            >,
-        ) + Send
-        + Sync,
->;
-
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
     pub(crate) config: AgentEngineConfig,
     /// The session-scoped ACP MCP store, shared with the core engine's prompt gating.
     pub(crate) mcp: std::sync::Arc<std::sync::Mutex<pa_core::mcp::McpManager>>,
-    /// Transfers refinement completion reporting to the worker sink.
-    pub(crate) refinement_completion_sink: std::sync::Mutex<Option<RefinementCompletionSink>>,
     pub(crate) late_agent_message_sink:
         std::sync::Mutex<Option<pa_core::LateSentAgentMessageHandler>>,
     /// Whether this run's usage crossed the goal's token budget: the boundary
@@ -259,9 +247,10 @@ pub struct AgentSessionEngine {
     pub(crate) pending_refine_replies:
         std::sync::Mutex<Vec<crate::refine_children::PendingRefineReply>>,
     /// The active session ids of the refinement children that a branch
-    /// move or a replacement abandoned. The cancel cannot recall a reply
-    /// that is already in delivery, so the park drops that late reply and
-    /// removes its id. An id whose child never replied stays, as the child
+    /// move or a replacement abandoned, or whose refinement already failed
+    /// because the child ended before replying. A cancel cannot recall a
+    /// reply that is already in delivery, so the park drops that late reply
+    /// and removes its id. An id whose child never replied stays, as the child
     /// registry also keeps its own record of that child.
     pub(crate) abandoned_refine_children: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Orders refinement-child admissions (prepare, spawn, flight record,

@@ -1,0 +1,1 @@
+- Print mode (`-p`) through a running daemon now exits 1 with the reason when a `/refine` fails, like print mode without a daemon.

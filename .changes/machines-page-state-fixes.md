@@ -1,0 +1,1 @@
+- Fixed the machines page and node view: a node opened before its run is listed now loads its files once the run appears, a machine drill-in that finishes after you opened a run page no longer replaces the list you return to, and a self-loop that just fired lights up on the diagram.

@@ -30,14 +30,14 @@ pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_reminder, admit_kernel_notice,
     announce_waiting_inbox, checkpoint_queue_recovery, clear_withdrawn_progress_note,
-    consume_shown_inbox_items_locked, deliver_inbox_arrival_row_locked, enqueue_priority,
-    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
-    queued_bash_completion_notices, queued_cell_completion_deliveries, refresh_inbox_wake_rows,
-    remove_keyed, restore_queue_snapshot, restored_turn_policy, row_wakes_a_cell,
-    store_and_announce, withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem,
-    TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
-    INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
-    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    consume_shown_inbox_items_locked, continues_session_work, deliver_inbox_arrival_row_locked,
+    enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
+    queue_lanes, queued_bash_completion_notices, queued_cell_completion_deliveries,
+    refresh_inbox_wake_rows, remove_keyed, restore_queue_snapshot, restored_turn_policy,
+    row_wakes_a_cell, store_and_announce, withdraw_bash_completion_notice, QueueCheckpoint,
+    QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
+    INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY,
+    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -51,8 +51,8 @@ use create::{active_session_id_of, worker_server_capabilities};
 #[allow(unused_imports)]
 pub(crate) use summary::{
     broadcast_custom_row_locked, compact_action_label, emit_worker_event_locked,
-    emit_worker_event_with, persist_custom_row, push_roster_delta, session_snapshot,
-    session_summary, RosterPushContext, SummaryInputs,
+    emit_worker_event_with, persist_and_emit_goal_update, persist_custom_row, push_roster_delta,
+    session_snapshot, session_summary, RosterPushContext, SummaryInputs,
 };
 use turn::TurnRunner;
 
@@ -654,6 +654,7 @@ impl Worker {
                     );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
+                concrete.wire_refine_child_terminal(Arc::clone(&work_notify));
                 let late_core = Arc::clone(&core);
                 let late_events = Arc::clone(&events);
                 concrete.set_late_agent_message_sink(std::sync::Arc::new(
@@ -707,12 +708,6 @@ impl Worker {
                         );
                     });
                 concrete.set_compaction_summary_sink(summary_sink);
-                // The worker's refinement completion sink: the background
-                // run's durable rows and completion events surface here,
-                // generation-fenced, once the run settles.
-                *concrete.refinement_completion_sink.lock().unwrap() = Some(
-                    refinement::completion_sink(Arc::clone(&core), Arc::clone(&events)),
-                );
                 // The kernel-notice wake seam (TS `_promptInjectedMessage`
                 // for `bash.completed` and `factory.progress`): the handlers
                 // validate, the sinks admit/withdraw through the queue lanes.

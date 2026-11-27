@@ -1,6 +1,6 @@
 //! The factory's numeric bounds. The machine-directory loader and the
-//! check of a stored JSON spec ([`check_spec_limits`]) both read these, so
-//! every machine has one set of limits.
+//! JSON spec check ([`crate::check_spec`]) both read these, so every
+//! machine has one set of limits.
 
 use serde_json::Value;
 
@@ -14,11 +14,8 @@ pub const MAX_ENTRIES: i64 = 1_000_000;
 
 /// The bound errors of a JSON factory spec (machine form, or dag sugar).
 /// Only declared values are checked; the executor fills defaults later.
-/// The Python validator checks the spec's shape and leaves these numbers to
-/// this check, which a run asks for through the `factory.limits` host
-/// request before it starts.
-#[must_use]
-pub fn check_spec_limits(spec: &Value) -> Vec<String> {
+/// `retries` is bounded by the structural check, in its field order.
+pub(crate) fn check_spec_limits(spec: &Value) -> Vec<String> {
     let mut errors = Vec::new();
     let in_range = |value: Option<&Value>, low: i64, high: i64| {
         value
@@ -57,11 +54,6 @@ pub fn check_spec_limits(spec: &Value) -> Vec<String> {
     }
     for state in states {
         let id = state.get("id").and_then(Value::as_str).unwrap_or("?");
-        if state.get("retries").is_some() && !in_range(state.get("retries"), 0, MAX_RETRIES) {
-            errors.push(format!(
-                "{noun} {id} retries must be an integer between 0 and {MAX_RETRIES}"
-            ));
-        }
         if state.get("max_entries").is_some() && !in_range(state.get("max_entries"), 1, MAX_ENTRIES)
         {
             errors.push(format!(
@@ -100,7 +92,6 @@ mod tests {
                 "run max_parallel must be an integer between 1 and 64",
                 "run max_transitions must be a positive integer no greater than 10000",
                 "run max_children must be a positive integer no greater than 1000000",
-                "state a retries must be an integer between 0 and 10",
                 "state a max_entries must be an integer between 1 and 1000000",
                 "state b foreach.max must be an integer between 1 and 256",
                 "state c foreach.max must be an integer between 1 and 256",
@@ -115,10 +106,5 @@ mod tests {
             "nodes": [{"id": "a", "retries": 10, "foreach": {"over": "xs", "max": 256}}],
         });
         assert!(check_spec_limits(&spec).is_empty());
-        let too_many = json!({"nodes": [{"id": "a", "retries": -1}]});
-        assert_eq!(
-            check_spec_limits(&too_many),
-            ["node a retries must be an integer between 0 and 10"]
-        );
     }
 }
