@@ -8654,6 +8654,16 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
             restarted._runs[run_id].task,
             "the peek read never starts the re-armed control loop",
         )
+        # Inspecting a machine's template (the machines page's drill-in)
+        # never re-arms either.
+        self.host.described["sweep"] = {
+            "name": "sweep",
+            "description": "Sweep a branch.",
+            "version": 1,
+            "spec": {"states": [{"id": "plan", "entry": True, "subagent": {"prompt": "Plan."}}]},
+        }
+        await restarted.activity({"action": "library", "specId": "sweep"})
+        self.assertIn(run_id, restarted._rehydrated, "the library read never drains the re-arm queue")
         # The peek created the executor; the next executed command still
         # releases the boot arm.
         factory_module._BOOT_ARM_TASK = None
