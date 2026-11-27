@@ -1,0 +1,1 @@
+- Fixed heartbeat countdowns: the activity dock and the `/heartbeats` view no longer stick at `1s` after a heartbeat fires, and the open `/heartbeats` view now counts down instead of freezing.

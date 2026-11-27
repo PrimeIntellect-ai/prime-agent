@@ -84,21 +84,44 @@ from rlm.factory import (
     _guard_passes,
     _parse_json_output,
     _spawn_label,
+    _compile_dag,
     canonicalize_factory_spec,
-    cli_dispatch,
-    compile_factory_dag,
     export_factory_spec,
     export_machine,
-    machine_description_errors,
-    machine_name_errors,
     render_machine_file,
     topological_order,
-    validate_factory_machine,
-    validate_factory_spec,
 )
 from rlm.harness import HarnessState
 
 factory_module = importlib.import_module("rlm.factory")
+
+
+class FactoryValidatorStub:
+    """The host's ``factory.validate`` on the synchronous path (harness
+    writes, exports). The rules themselves are tested in Rust (pa-factory);
+    this accepts every spec unless a test sets ``errors``."""
+
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if request_type != "factory.validate":
+            raise AssertionError(f"unexpected synchronous host request {request_type!r}")
+        self.calls.append(payload or {})
+        return {"errors": list(self.errors), "max_transitions": 10_000}
+
+
+FACTORY_VALIDATOR = FactoryValidatorStub()
+_VALIDATOR_PATCH = patch.object(rlm_module, "host_request_sync", FACTORY_VALIDATOR)
+
+
+def setUpModule() -> None:
+    _VALIDATOR_PATCH.start()
+
+
+def tearDownModule() -> None:
+    _VALIDATOR_PATCH.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -190,548 +213,6 @@ def valid_dag() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Dag-form validation (write-time dry run)
 # ---------------------------------------------------------------------------
-
-
-class ValidateFactorySpecTest(unittest.TestCase):
-    def test_valid_spec_has_no_errors(self) -> None:
-        self.assertEqual(validate_factory_spec(valid_dag()), [])
-
-    def test_dag_must_be_an_object(self) -> None:
-        for bad in (None, [], "nodes", 42):
-            errors = validate_factory_spec(bad)
-            self.assertEqual(len(errors), 1)
-            self.assertIn("factory dag must be a JSON object", errors[0])
-
-    def test_nodes_required_and_must_be_a_list(self) -> None:
-        self.assertEqual(
-            validate_factory_spec({"nodes": "nope"}),
-            ["factory dag requires a nodes list"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"run": "bad", "nodes": "nope"}),
-            ["run must be an object", "factory dag requires a nodes list"],
-        )
-
-    def test_node_ids(self) -> None:
-        for good in ("a", "node-1", "1st-node", "a" * 64):
-            self.assertEqual(validate_factory_spec({"nodes": [node(good)]}), [], good)
-        for bad in ("-abc", "ABC", "a_b", "a.b", "a" * 65):
-            errors = validate_factory_spec({"nodes": [{"id": bad, "subagent": "w"}]})
-            self.assertEqual(len(errors), 1, bad)
-            self.assertIn("id must match", errors[0])
-        for bad in ("", None, 5):
-            errors = validate_factory_spec({"nodes": [{"id": bad, "subagent": "w"}]})
-            self.assertEqual(errors, ["nodes[0] requires a non-empty id"], repr(bad))
-
-    def test_duplicate_node_ids(self) -> None:
-        errors = validate_factory_spec({"nodes": [node("dup"), node("dup")]})
-        self.assertEqual(len(errors), 1)
-        self.assertIn("duplicates node id 'dup'", errors[0])
-
-    def test_subagent_forms(self) -> None:
-        by_ref = {"nodes": [node("a", subagent="reviewer")]}
-        self.assertEqual(validate_factory_spec(by_ref), [])
-        inline = {"nodes": [node("a", subagent={"prompt": "Do work."})]}
-        self.assertEqual(validate_factory_spec(inline), [])
-        inline_full = {
-            "nodes": [
-                node("a", subagent={"prompt": "Do work.", "name": "w", "model": "m", "thinking": "high"})
-            ]
-        }
-        self.assertEqual(validate_factory_spec(inline_full), [])
-
-        missing = {"nodes": [{"id": "a"}]}
-        errors = validate_factory_spec(missing)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("requires a subagent", errors[0])
-
-        empty_ref = {"nodes": [node("a", subagent="")]}
-        errors = validate_factory_spec(empty_ref)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("requires a subagent", errors[0])
-
-        empty_prompt = {"nodes": [node("a", subagent={"prompt": ""})]}
-        errors = validate_factory_spec(empty_prompt)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("requires a non-empty prompt", errors[0])
-
-        bad_name = {"nodes": [node("a", subagent={"prompt": "p", "model": 5})]}
-        errors = validate_factory_spec(bad_name)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("model must be a non-empty string", errors[0])
-
-        bad_thinking = {"nodes": [node("a", subagent={"prompt": "p", "thinking": ""})]}
-        errors = validate_factory_spec(bad_thinking)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("thinking must be a non-empty string", errors[0])
-
-        # Whitespace-only values are rejected at write time: runtime
-        # resolution strips them (_resolve_subagents /
-        # _validate_spawn_settings), so a whitespace-only field is a
-        # persistable factory that can never spawn.
-        whitespace_prompt = {"nodes": [node("a", subagent={"prompt": "  \t "})]}
-        errors = validate_factory_spec(whitespace_prompt)
-        self.assertEqual(errors, ["node a inline subagent requires a non-empty prompt"])
-        for key in ("name", "model", "thinking"):
-            whitespace_field = {"nodes": [node("a", subagent={"prompt": "p", key: "  \t "})]}
-            errors = validate_factory_spec(whitespace_field)
-            self.assertEqual(
-                errors, [f"node a inline subagent {key} must be a non-empty string when provided"], key
-            )
-
-        # The dag form compiles to machine form first, so the name rules
-        # (length, cross-state uniqueness) apply to nodes too.
-        dag_duplicate = {
-            "nodes": [
-                node("a", subagent={"prompt": "p", "name": "w"}),
-                node("b", subagent={"prompt": "p", "name": "w"}, depends_on=["a"]),
-            ]
-        }
-        errors = validate_factory_spec(dag_duplicate)
-        self.assertEqual(errors, ["state b subagent name 'w' is already configured by state 'a'"])
-
-    def test_lifecycle(self) -> None:
-        for good in ("task", "resident"):
-            self.assertEqual(validate_factory_spec({"nodes": [node("a", lifecycle=good)]}), [])
-        errors = validate_factory_spec({"nodes": [node("a", lifecycle="daemon")]})
-        self.assertEqual(len(errors), 1)
-        self.assertIn("lifecycle must be 'task' or 'resident'", errors[0])
-
-    def test_run_budget_and_node_budget(self) -> None:
-        ok = {
-            "run": {"budget_ms": 1000},
-            "nodes": [node("a", budget_ms=1000)],
-        }
-        self.assertEqual(validate_factory_spec(ok), [])
-
-        over = {
-            "run": {"budget_ms": 1000},
-            "nodes": [node("a", budget_ms=1001)],
-        }
-        errors = validate_factory_spec(over)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("exceeds the run budget_ms", errors[0])
-
-        for bad in (0, -5, 1.5, "10", True):
-            errors = validate_factory_spec({"run": {"budget_ms": bad}, "nodes": [node("a")]})
-            self.assertEqual(errors, ["run budget_ms must be a positive integer"], bad)
-            errors = validate_factory_spec({"nodes": [node("a", budget_ms=bad)]})
-            self.assertEqual(errors, ["node a budget_ms must be a positive integer"], bad)
-
-        # No run budget set: any positive node budget is fine.
-        self.assertEqual(validate_factory_spec({"nodes": [node("a", budget_ms=999_999)]}), [])
-
-    def test_run_budget_invalid(self) -> None:
-        errors = validate_factory_spec({"run": "bad", "nodes": [node("a")]})
-        self.assertEqual(errors, ["run must be an object"])
-
-    def test_run_failure_policy(self) -> None:
-        for good in ("fail_fast", "continue", "escalate"):
-            self.assertEqual(validate_factory_spec({"run": {"failure_policy": good}, "nodes": [node("a")]}), [])
-        errors = validate_factory_spec({"run": {"failure_policy": "stop"}, "nodes": [node("a")]})
-        self.assertEqual(len(errors), 1)
-        self.assertIn("run failure_policy must be one of", errors[0])
-
-    def test_node_failure_policy(self) -> None:
-        for good in ("fail_fast", "continue", "escalate"):
-            self.assertEqual(validate_factory_spec({"nodes": [node("a", failure_policy=good)]}), [])
-        errors = validate_factory_spec({"nodes": [node("a", failure_policy="retry")]})
-        self.assertEqual(len(errors), 1)
-        self.assertIn("node a failure_policy must be one of", errors[0])
-
-    def test_retries(self) -> None:
-        for good in (0, 5, 10):
-            self.assertEqual(validate_factory_spec({"nodes": [node("a", retries=good)]}), [])
-        for bad in (-1, 11, 1.5, "2", True):
-            errors = validate_factory_spec({"nodes": [node("a", retries=bad)]})
-            self.assertEqual(errors, ["node a retries must be an integer between 0 and 10"], bad)
-
-    def test_depends_on(self) -> None:
-        ok = {"nodes": [node("a"), node("b", depends_on=["a"])]}
-        self.assertEqual(validate_factory_spec(ok), [])
-
-        self_dep = {"nodes": [node("a", depends_on=["a"])]}
-        errors = validate_factory_spec(self_dep)
-        self.assertEqual(errors, ["node a cannot depend on itself"])
-
-        unknown = {"nodes": [node("a", depends_on=["ghost"])]}
-        errors = validate_factory_spec(unknown)
-        self.assertEqual(errors, ["node a depends on unknown node 'ghost'"])
-
-        not_list = {"nodes": [node("a", depends_on="b")]}
-        errors = validate_factory_spec(not_list)
-        self.assertEqual(errors, ["node a depends_on must be a list of node ids"])
-
-        bad_entry = {"nodes": [node("a", depends_on=[5])]}
-        errors = validate_factory_spec(bad_entry)
-        self.assertEqual(errors, ["node a depends_on entries must be non-empty node id strings"])
-
-    def test_self_input_edge_is_rejected_like_a_self_dependency(self) -> None:
-        # Review finding: a node reading its own output would compile to a
-        # never-reachable self-loop state, so the self-dependency rule covers
-        # the EFFECTIVE edge set (depends_on union inputs[].from), not only
-        # depends_on.
-        self_output = {
-            "nodes": [
-                node("a", outputs=[{"name": "o", "type": "text"}]),
-                node("b", inputs=[{"name": "i", "type": "text", "from": "b.o"}]),
-            ]
-        }
-        errors = validate_factory_spec(self_output)
-        self.assertIn("node b cannot depend on itself", errors)
-        machine, compile_errors = compile_factory_dag(self_output)
-        self.assertIsNone(machine)
-        self.assertIn("node b cannot depend on itself", compile_errors)
-
-        # A cross-node input edge is of course fine.
-        ok = {
-            "nodes": [
-                node("a", outputs=[{"name": "o", "type": "text"}]),
-                node("b", inputs=[{"name": "i", "type": "text", "from": "a.o"}]),
-            ]
-        }
-        self.assertEqual(validate_factory_spec(ok), [])
-
-    def test_explicit_null_typed_fields_are_rejected_not_defaulted(self) -> None:
-        # Review finding: explicit JSON null on a typed field used to survive
-        # canonicalization as None and reach the executor without a usable
-        # limit. Presence-based checks reject null with the field's own
-        # message instead of treating it as an omitted default.
-        self.assertEqual(
-            validate_factory_spec({"run": {"budget_ms": None}, "nodes": [node("a")]}),
-            ["run budget_ms must be a positive integer"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"run": {"failure_policy": None}, "nodes": [node("a")]}),
-            ["run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got None"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"nodes": [node("a", budget_ms=None)]}),
-            ["node a budget_ms must be a positive integer"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"nodes": [node("a", failure_policy=None)]}),
-            ["node a failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got None"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"nodes": [node("a", lifecycle=None)]}),
-            ["node a lifecycle must be 'task' or 'resident', got None"],
-        )
-        self.assertEqual(
-            validate_factory_machine({"states": [{"id": "a", "entry": None, "subagent": "w"}], "transitions": []}),
-            [
-                "state a entry must be a boolean",
-                "factory machine requires at least one entry state",
-            ],
-        )
-
-    def test_data_edges(self) -> None:
-        ok = {
-            "nodes": [
-                node("a", outputs=[{"name": "out", "type": "text"}]),
-                node("b", inputs=[{"name": "in", "type": "text", "from": "a.out"}]),
-            ]
-        }
-        self.assertEqual(validate_factory_spec(ok), [])
-
-        # A data edge implies ordering even without depends_on.
-        no_declared_dep = {
-            "nodes": [
-                node("a", outputs=[{"name": "out", "type": "json"}]),
-                node("b", inputs=[{"name": "in", "type": "json", "from": "a.out"}]),
-            ]
-        }
-        self.assertEqual(validate_factory_spec(no_declared_dep), [])
-
-        unknown_source = {
-            "nodes": [node("b", inputs=[{"name": "in", "type": "text", "from": "ghost.out"}])]
-        }
-        errors = validate_factory_spec(unknown_source)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("references unknown node 'ghost'", errors[0])
-
-        undeclared_output = {
-            "nodes": [
-                node("a"),
-                node("b", inputs=[{"name": "in", "type": "text", "from": "a.missing"}]),
-            ]
-        }
-        errors = validate_factory_spec(undeclared_output)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("does not declare", errors[0])
-
-        type_mismatch = {
-            "nodes": [
-                node("a", outputs=[{"name": "out", "type": "text"}]),
-                node("b", inputs=[{"name": "in", "type": "json", "from": "a.out"}]),
-            ]
-        }
-        errors = validate_factory_spec(type_mismatch)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("cannot read from output", errors[0])
-        self.assertIn("of type 'text'", errors[0])
-
-        malformed_from = {
-            "nodes": [
-                node("a", outputs=[{"name": "out", "type": "text"}]),
-                node("b", inputs=[{"name": "in", "type": "text", "from": "no-dot"}]),
-            ]
-        }
-        errors = validate_factory_spec(malformed_from)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("requires a 'from' reference", errors[0])
-
-    def test_input_output_ports(self) -> None:
-        ok = {
-            "nodes": [
-                node(
-                    "a",
-                    outputs=[{"name": "o1", "type": "text"}, {"name": "o2", "type": "json"}],
-                )
-            ]
-        }
-        self.assertEqual(validate_factory_spec(ok), [])
-
-        bad_output_type = {"nodes": [node("a", outputs=[{"name": "o", "type": "yaml"}])]}
-        errors = validate_factory_spec(bad_output_type)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("output 'o' type must be 'text' or 'json'", errors[0])
-
-        dup_output = {
-            "nodes": [node("a", outputs=[{"name": "o", "type": "text"}, {"name": "o", "type": "json"}])]
-        }
-        errors = validate_factory_spec(dup_output)
-        self.assertEqual(errors, ["node a declares duplicate output name 'o'"])
-
-        bad_input_type = {
-            "nodes": [
-                node("b", outputs=[{"name": "o", "type": "text"}]),
-                node("a", inputs=[{"name": "i", "type": "yaml", "from": "b.o"}]),
-            ]
-        }
-        errors = validate_factory_spec(bad_input_type)
-        self.assertEqual(errors, ["node a input 'i' type must be 'text' or 'json'"])
-
-        dup_input = {
-            "nodes": [
-                node(
-                    "a",
-                    inputs=[
-                        {"name": "i", "type": "text", "from": "b.o1"},
-                        {"name": "i", "type": "text", "from": "b.o2"},
-                    ],
-                ),
-                node("b", outputs=[{"name": "o1", "type": "text"}, {"name": "o2", "type": "text"}]),
-            ]
-        }
-        errors = validate_factory_spec(dup_input)
-        self.assertEqual(errors, ["node a declares duplicate input name 'i'"])
-
-        missing_name = {"nodes": [node("a", outputs=[{"type": "text"}])]}
-        errors = validate_factory_spec(missing_name)
-        self.assertEqual(errors, ["node a outputs[0] requires a non-empty name"])
-
-        not_a_list = {"nodes": [node("a", outputs="nope")]}
-        errors = validate_factory_spec(not_a_list)
-        self.assertEqual(errors, ["node a outputs must be a list"])
-        not_a_list = {"nodes": [node("a", inputs="nope")]}
-        errors = validate_factory_spec(not_a_list)
-        self.assertEqual(errors, ["node a inputs must be a list"])
-
-    def test_resident_rules(self) -> None:
-        resident_ok = {"nodes": [node("watcher", lifecycle="resident")]}
-        self.assertEqual(validate_factory_spec(resident_ok), [])
-
-        depended_on = {
-            "nodes": [node("watcher", lifecycle="resident"), node("task", depends_on=["watcher"])]
-        }
-        errors = validate_factory_spec(depended_on)
-        self.assertEqual(errors, ["node task cannot depend on resident node 'watcher'"])
-
-        read_from = {
-            "nodes": [
-                node("watcher", lifecycle="resident"),
-                node("task", inputs=[{"name": "i", "type": "text", "from": "watcher.o"}]),
-            ]
-        }
-        errors = validate_factory_spec(read_from)
-        self.assertEqual(errors, ["node task input 'i' cannot read from resident node 'watcher'"])
-
-        declares_outputs = {"nodes": [node("watcher", lifecycle="resident", outputs=[{"name": "o", "type": "text"}])]}
-        errors = validate_factory_spec(declares_outputs)
-        self.assertEqual(errors, ["resident node watcher cannot declare outputs"])
-
-        uses_foreach = {
-            "nodes": [
-                node("src", outputs=[{"name": "items", "type": "json"}]),
-                node(
-                    "watcher",
-                    lifecycle="resident",
-                    inputs=[{"name": "items", "type": "json", "from": "src.items"}],
-                    foreach={"over": "items", "max": 4},
-                ),
-            ]
-        }
-        errors = validate_factory_spec(uses_foreach)
-        self.assertEqual(errors, ["resident node watcher cannot use foreach"])
-
-        declares_retries = {"nodes": [node("watcher", lifecycle="resident", retries=2)]}
-        errors = validate_factory_spec(declares_retries)
-        self.assertEqual(errors, ["resident node watcher cannot declare retries"])
-
-        # Retries 0 is the canonical default, so nothing is declared.
-        zero_retries = {"nodes": [node("watcher", lifecycle="resident", retries=0)]}
-        self.assertEqual(validate_factory_spec(zero_retries), [])
-
-        # The type/range guard runs before the resident rule: a malformed
-        # value names the bound, not "cannot declare retries".
-        malformed_retries = {"nodes": [node("watcher", lifecycle="resident", retries="bad")]}
-        self.assertEqual(
-            validate_factory_spec(malformed_retries),
-            ["node watcher retries must be an integer between 0 and 10"],
-        )
-
-        # Empty outputs list on a resident node is fine: nothing is declared.
-        empty_outputs = {"nodes": [node("watcher", lifecycle="resident", outputs=[])]}
-        self.assertEqual(validate_factory_spec(empty_outputs), [])
-
-    def test_foreach(self) -> None:
-        ok = {
-            "nodes": [
-                node("a", outputs=[{"name": "items", "type": "json"}]),
-                node(
-                    "b",
-                    inputs=[{"name": "items", "type": "json", "from": "a.items"}],
-                    foreach={"over": "items", "max": 16},
-                ),
-            ]
-        }
-        self.assertEqual(validate_factory_spec(ok), [])
-
-        for good_max in (1, 256):
-            ok_max = {
-                "nodes": [
-                    node("a", outputs=[{"name": "items", "type": "json"}]),
-                    node(
-                        "b",
-                        inputs=[{"name": "items", "type": "json", "from": "a.items"}],
-                        foreach={"over": "items", "max": good_max},
-                    ),
-                ]
-            }
-            self.assertEqual(validate_factory_spec(ok_max), [])
-
-        wrong_port = {
-            "nodes": [
-                node("a", outputs=[{"name": "items", "type": "json"}]),
-                node(
-                    "b",
-                    inputs=[{"name": "items", "type": "json", "from": "a.items"}],
-                    foreach={"over": "not-an-input", "max": 4},
-                ),
-            ]
-        }
-        errors = validate_factory_spec(wrong_port)
-        self.assertEqual(
-            errors, ["node b foreach.over must name one of this node's inputs, got 'not-an-input'"]
-        )
-
-        text_port = {
-            "nodes": [
-                node("a", outputs=[{"name": "draft", "type": "text"}]),
-                node(
-                    "b",
-                    inputs=[{"name": "draft", "type": "text", "from": "a.draft"}],
-                    foreach={"over": "draft", "max": 4},
-                ),
-            ]
-        }
-        errors = validate_factory_spec(text_port)
-        self.assertEqual(errors, ["node b foreach.over input 'draft' must have type 'json'"])
-
-        not_object = {"nodes": [node("a", foreach=["bad"])]}
-        errors = validate_factory_spec(not_object)
-        self.assertEqual(errors, ["node a foreach must be an object"])
-
-    def test_cycles_are_legal_when_an_entry_state_exists(self) -> None:
-        # A cycle that does not cover the whole dag compiles to a machine with
-        # an entry state; cycles are legal in machine form, so this validates.
-        cycle_with_entry = {
-            "nodes": [
-                node("a"),
-                node("b", depends_on=["c"]),
-                node("c", depends_on=["b"]),
-            ]
-        }
-        self.assertEqual(validate_factory_spec(cycle_with_entry), [])
-
-        data_cycle_with_entry = {
-            "nodes": [
-                node("a"),
-                node("b", depends_on=["a"], outputs=[{"name": "o", "type": "json"}]),
-                node("c", inputs=[{"name": "i", "type": "json", "from": "b.o"}]),
-            ]
-        }
-        self.assertEqual(validate_factory_spec(data_cycle_with_entry), [])
-
-    def test_fully_cyclic_dag_compiles_to_a_machine_without_entry_states(self) -> None:
-        depends_cycle = {
-            "nodes": [
-                node("a", depends_on=["b"]),
-                node("b", depends_on=["a"]),
-            ]
-        }
-        self.assertEqual(
-            validate_factory_spec(depends_cycle),
-            ["factory machine requires at least one entry state"],
-        )
-
-        data_cycle = {
-            "nodes": [
-                node("a", outputs=[{"name": "o", "type": "json"}], inputs=[
-                    {"name": "i", "type": "json", "from": "b.o"}
-                ]),
-                node("b", outputs=[{"name": "o", "type": "json"}], inputs=[
-                    {"name": "i", "type": "json", "from": "a.o"}
-                ]),
-            ]
-        }
-        self.assertEqual(
-            validate_factory_spec(data_cycle),
-            ["factory machine requires at least one entry state"],
-        )
-
-        three_cycle = {
-            "nodes": [
-                node("a", depends_on=["c"]),
-                node("b", depends_on=["a"]),
-                node("c", depends_on=["b"]),
-            ]
-        }
-        self.assertEqual(
-            validate_factory_spec(three_cycle),
-            ["factory machine requires at least one entry state"],
-        )
-
-    def test_collects_multiple_errors(self) -> None:
-        dag = {
-            "run": {"max_parallel": 99, "failure_policy": "nope"},
-            "nodes": [
-                node("a", depends_on=["ghost"]),
-                node("b", retries=99),
-                node("c", failure_policy="retry"),
-            ],
-        }
-        errors = validate_factory_spec(dag)
-        self.assertEqual(
-            errors,
-            [
-                "run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'nope'",
-                "node a depends on unknown node 'ghost'",
-                "node b retries must be an integer between 0 and 10",
-                "node c failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'retry'",
-            ],
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -897,20 +378,6 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
             },
         )
 
-    def test_raises_with_joined_errors_on_invalid_input(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            canonicalize_factory_spec({"nodes": [node("a", depends_on=["ghost"])]})
-        message = str(ctx.exception)
-        self.assertIn("depends on unknown node", message)
-
-        with self.assertRaises(ValueError) as ctx:
-            canonicalize_factory_spec("not a dag")
-        self.assertIn("factory dag must be a JSON object", str(ctx.exception))
-
-        with self.assertRaises(ValueError) as ctx:
-            canonicalize_factory_spec({"states": [state("a")], "transitions": [{"from": "a", "to": "ghost"}]})
-        self.assertIn("references unknown to-state", str(ctx.exception))
-
     def test_does_not_mutate_input(self) -> None:
         dag = {"nodes": [{"id": "a", "subagent": {"prompt": "p"}, "outputs": [{"name": "o", "type": "json"}]}]}
         snapshot = {"nodes": [dict(dag["nodes"][0])]}
@@ -940,1000 +407,6 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class ValidateFactoryMachineTest(unittest.TestCase):
-    """Every machine-form validator rule, valid and invalid."""
-
-    def test_valid_machine_has_no_errors(self) -> None:
-        # Includes an entry state, a guard switch, a self-loop, re-entry
-        # bounds, and a reviewing<->fixing cycle: all legal in machine form.
-        self.assertEqual(validate_factory_spec(valid_machine()), [])
-        self.assertEqual(validate_factory_machine(valid_machine()), [])
-
-    def test_machine_must_be_an_object(self) -> None:
-        for bad in (None, [], "states", 42):
-            self.assertEqual(validate_factory_machine(bad), ["factory machine must be a JSON object"], repr(bad))
-
-    def test_states_required_and_must_be_a_list(self) -> None:
-        self.assertEqual(
-            validate_factory_machine({"transitions": []}),
-            ["factory machine requires a states list"],
-        )
-        self.assertEqual(
-            validate_factory_machine({"states": "nope"}),
-            ["factory machine requires a states list"],
-        )
-        self.assertEqual(
-            validate_factory_machine({"run": "bad", "states": "nope"}),
-            ["run must be an object", "factory machine requires a states list"],
-        )
-
-    def test_state_cap(self) -> None:
-        at_cap = {"states": [state(f"s{i}") for i in range(1024)], "transitions": []}
-        at_cap["states"][0]["entry"] = True
-        self.assertEqual(validate_factory_machine(at_cap), [])
-        empty = {"states": [], "transitions": []}
-        self.assertEqual(validate_factory_machine(empty), ["factory machine must declare at least one state"])
-
-    def test_state_ids(self) -> None:
-        for good in ("a", "state-1", "1st-state", "a" * 64):
-            machine = {"states": [{"id": good, "entry": True, "subagent": "w"}], "transitions": []}
-            self.assertEqual(validate_factory_machine(machine), [], good)
-        for bad in ("-abc", "ABC", "a_b", "a.b", "a" * 65):
-            machine = {"states": [{"id": bad, "entry": True, "subagent": "w"}], "transitions": []}
-            errors = validate_factory_machine(machine)
-            self.assertEqual(len(errors), 1, bad)
-            self.assertIn("id must match", errors[0])
-        for bad in ("", None, 5):
-            machine = {"states": [{"id": bad, "subagent": "w"}], "transitions": []}
-            self.assertEqual(
-                validate_factory_machine(machine),
-                ["states[0] requires a non-empty id"],
-                repr(bad),
-            )
-
-    def test_duplicate_state_ids(self) -> None:
-        machine = {"states": [state("dup"), state("dup")], "transitions": []}
-        machine["states"][0]["entry"] = True
-        errors = validate_factory_machine(machine)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("duplicates state id 'dup'", errors[0])
-
-    def test_entry_state_required(self) -> None:
-        no_entry = {"states": [state("a"), state("b")], "transitions": [{"from": "a", "to": "b"}]}
-        self.assertEqual(
-            validate_factory_machine(no_entry),
-            ["factory machine requires at least one entry state"],
-        )
-        explicit_false = {"states": [state("a", entry=False)], "transitions": []}
-        self.assertEqual(
-            validate_factory_machine(explicit_false),
-            ["factory machine requires at least one entry state"],
-        )
-        bad_flag = {"states": [state("a", entry="yes")], "transitions": []}
-        self.assertEqual(
-            validate_factory_machine(bad_flag),
-            ["state a entry must be a boolean", "factory machine requires at least one entry state"],
-        )
-
-    def test_optional_input_flag(self) -> None:
-        ok = {
-            "states": [
-                {"id": "seed", "entry": True, "subagent": "w", "outputs": [{"name": "o", "type": "json"}]},
-                {
-                    "id": "loop",
-                    "subagent": "w",
-                    "inputs": [{"name": "o", "type": "json", "from": "seed.o", "optional": True}],
-                },
-            ],
-            "transitions": [{"from": "seed", "to": "loop"}],
-        }
-        self.assertEqual(validate_factory_machine(ok), [])
-        for bad in ("yes", 1, []):
-            machine = {
-                "states": [
-                    state("seed", entry=True, outputs=[{"name": "o", "type": "json"}]),
-                    {
-                        "id": "loop",
-                        "subagent": "w",
-                        "inputs": [{"name": "o", "type": "json", "from": "seed.o", "optional": bad}],
-                    },
-                ],
-                "transitions": [{"from": "seed", "to": "loop"}],
-            }
-            self.assertEqual(
-                validate_factory_machine(machine),
-                ["state loop input 'o' optional must be a boolean when provided"],
-                repr(bad),
-            )
-
-    def test_required_self_input_is_rejected_optional_stays_the_loop_form(self) -> None:
-        # A required self-input can never bind: the first entry waits for its
-        # own prior settle, which cannot exist yet -- the entry stays pending
-        # until the stall detector fails the run naming the state. Optional
-        # self-inputs are the designed loop form (first entry binds the null
-        # sentinel) and stay valid; the rule is the machine-form mirror of
-        # the dag compiler's "cannot depend on itself" rejection.
-        absent = object()  # sentinel: the optional key is omitted entirely
-
-        def machine(optional: Any = absent) -> dict[str, Any]:
-            loop_inputs: list[dict[str, Any]] = [{"name": "last", "type": "text", "from": "loop.last"}]
-            if optional is not absent:
-                loop_inputs[0]["optional"] = optional
-            return {
-                "states": [
-                    {"id": "seed", "entry": True, "subagent": "w", "outputs": [{"name": "go", "type": "text"}]},
-                    {
-                        "id": "loop",
-                        "subagent": "w",
-                        "inputs": loop_inputs,
-                        "outputs": [{"name": "last", "type": "text"}],
-                        "max_entries": 3,
-                    },
-                ],
-                "transitions": [{"from": "seed", "to": "loop"}, {"from": "loop", "to": "loop"}],
-            }
-
-        self.assertEqual(validate_factory_machine(machine(True)), [])
-        for required in (False, absent):
-            self.assertEqual(
-                validate_factory_machine(machine(required)),
-                [
-                    "state loop input 'last' cannot require itself: mark the self-input optional - "
-                    "a required one can never bind on the state's first entry"
-                ],
-                repr(required),
-            )
-
-    def test_entry_state_inputs_must_be_optional(self) -> None:
-        absent = object()  # sentinel: the optional key is omitted entirely
-
-        def with_inputs(optional: Any) -> dict[str, Any]:
-            inp: dict[str, Any] = {"name": "i", "type": "text", "from": "peer.o"}
-            if optional is not absent:
-                inp["optional"] = optional
-            return {
-                "states": [
-                    state("src", entry=True, inputs=[inp]),
-                    state("peer", outputs=[{"name": "o", "type": "text"}]),
-                ],
-                "transitions": [{"from": "src", "to": "peer"}, {"from": "peer", "to": "src"}],
-            }
-
-        self.assertEqual(validate_factory_machine(with_inputs(True)), [])
-        for required in (False, absent):
-            self.assertEqual(
-                validate_factory_machine(with_inputs(required)),
-                ["entry state src input 'i' must be optional: an entry state's first entry has no upstream settle to bind"],
-                repr(required),
-            )
-        entry_without_inputs = {"states": [state("a", entry=True)], "transitions": []}
-        self.assertEqual(validate_factory_machine(entry_without_inputs), [])
-        # Compiled dags only mark dep-free nodes as entry states, so the rule
-        # never fires on the dag path.
-        dag = {
-            "nodes": [
-                node("a", outputs=[{"name": "o", "type": "text"}]),
-                node("b", depends_on=["a"], inputs=[{"name": "i", "type": "text", "from": "a.o"}]),
-            ]
-        }
-        self.assertEqual(validate_factory_spec(dag), [])
-
-    def test_python_states(self) -> None:
-        python = {"import": "tools", "callable": "plan"}
-        machine = {
-            "states": [
-                {"id": "plan", "entry": True, "python": python, "outputs": [{"name": "items", "type": "json"}]},
-                state("work", inputs=[{"name": "items", "type": "json", "from": "plan.items"}]),
-            ],
-            "transitions": [{"from": "plan", "to": "work"}],
-        }
-        self.assertEqual(validate_factory_machine(machine), [])
-        canonical = canonicalize_factory_spec(machine)
-        self.assertEqual(canonical["states"][0]["python"], python)
-        self.assertNotIn("subagent", canonical["states"][0])
-        # The dag form compiles python nodes to python states.
-        dag = {"nodes": [{"id": "plan", "python": python}, node("work", depends_on=["plan"])]}
-        self.assertEqual(canonicalize_factory_spec(dag)["states"][0]["python"], python)
-
-        cases = {
-            "declares both subagent and python": {"python": python, "subagent": "worker"},
-            "python requires non-empty 'import' and 'callable' strings": {"python": {"import": "tools"}},
-            "python state a cannot be resident": {"python": python, "lifecycle": "resident"},
-            "state a python path must be an absolute directory when provided": {
-                "python": {**python, "path": "nodes"}
-            },
-            "python state a cannot use foreach": {
-                "python": python,
-                "inputs": [{"name": "xs", "type": "json", "from": "b.xs"}],
-                "foreach": {"over": "xs", "max": 2},
-            },
-        }
-        for expected, fields in cases.items():
-            machine = {
-                "states": [
-                    {"id": "a", "entry": not fields.get("inputs"), **fields},
-                    state("b", entry=True, outputs=[{"name": "xs", "type": "json"}]),
-                ],
-                "transitions": [],
-            }
-            errors = validate_factory_machine(machine)
-            self.assertTrue(any(expected in error for error in errors), (expected, errors))
-
-    def test_params(self) -> None:
-        machine = {
-            "params": {"task": "ship it", "max_loc": 400},
-            "states": [state("a", entry=True)],
-            "transitions": [],
-        }
-        self.assertEqual(validate_factory_machine(machine), [])
-        self.assertEqual(canonicalize_factory_spec(machine)["params"], {"task": "ship it", "max_loc": 400})
-        self.assertNotIn("params", canonicalize_factory_spec({"states": [state("a", entry=True)]}))
-        for params in (["task"], {"Task": "x"}, {"1x": 1}):
-            self.assertEqual(
-                validate_factory_machine({**machine, "params": params}),
-                ["params must be an object keyed by lowercase identifiers"],
-                repr(params),
-            )
-        colliding = {
-            "params": {"items": []},
-            "states": [
-                state("a", entry=True, outputs=[{"name": "items", "type": "json"}]),
-                state("b", inputs=[{"name": "items", "type": "json", "from": "a.items"}]),
-            ],
-            "transitions": [{"from": "a", "to": "b"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(colliding),
-            ["state b input 'items' is also a param; rename the input"],
-        )
-
-    def test_subagent_required(self) -> None:
-        missing = {"states": [{"id": "a", "entry": True}], "transitions": []}
-        errors = validate_factory_machine(missing)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("requires a subagent", errors[0])
-        self.assertIn("state a", errors[0])
-
-        empty_ref = {"states": [state("a", entry=True, subagent="")], "transitions": []}
-        errors = validate_factory_machine(empty_ref)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("requires a subagent", errors[0])
-
-        empty_prompt = {"states": [state("a", entry=True, subagent={"prompt": ""})], "transitions": []}
-        errors = validate_factory_machine(empty_prompt)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("requires a non-empty prompt", errors[0])
-
-        bad_model = {"states": [state("a", entry=True, subagent={"prompt": "p", "model": 5})], "transitions": []}
-        errors = validate_factory_machine(bad_model)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("model must be a non-empty string", errors[0])
-
-        # Whitespace-only inline fields are write-time invalid in machine
-        # form too (the shared state validation strips like the runtime
-        # resolvers do), so no persistable machine can be unspawnable.
-        whitespace = {
-            "states": [state("a", entry=True, subagent={"prompt": "  ", "model": " \t "})],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(whitespace),
-            [
-                "state a inline subagent requires a non-empty prompt",
-                "state a inline subagent model must be a non-empty string when provided",
-            ],
-        )
-
-        inline_ok = {
-            "states": [state("a", entry=True, subagent={"prompt": "Do work.", "name": "w", "thinking": "high"})],
-            "transitions": [],
-        }
-        self.assertEqual(validate_factory_machine(inline_ok), [])
-
-    def test_inline_subagent_name_length_and_uniqueness(self) -> None:
-        # The configured name labels spawned children, and the host caps
-        # subagent session names at 64 characters: reject an over-length
-        # name at write time (a persistable factory must be spawnable)
-        # instead of failing every spawn admission.
-        too_long = {
-            "states": [state("a", entry=True, subagent={"prompt": "p", "name": "x" * (SUBAGENT_NAME_MAX_LENGTH + 1)})],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(too_long),
-            [
-                f"state a inline subagent name must be at most {SUBAGENT_NAME_MAX_LENGTH} characters, "
-                f"got {SUBAGENT_NAME_MAX_LENGTH + 1}"
-            ],
-        )
-
-        # Two states configured with one name would collide on the
-        # supervisor's unique sibling-name requirement at spawn time: reject
-        # the duplicate at write time, like duplicate state ids.
-        duplicate = {
-            "states": [
-                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "reviewer"}},
-                {"id": "b", "subagent": {"prompt": "p", "name": "reviewer"}},
-            ],
-            "transitions": [{"from": "a", "to": "b"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(duplicate),
-            ["state b subagent name 'reviewer' is already configured by state 'a'"],
-        )
-        # Distinct configured names are fine, and string references never
-        # carry a name.
-        distinct = {
-            "states": [
-                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "reviewer"}},
-                {"id": "b", "subagent": {"prompt": "p", "name": "fixer"}},
-                {"id": "c", "subagent": "worker"},
-            ],
-            "transitions": [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}],
-        }
-        self.assertEqual(validate_factory_machine(distinct), [])
-
-        # A name another state's name can suffix onto (Macroscope review
-        # finding: foo's later instances spawn foo-i1, so a state configured
-        # foo-i1 collides at spawn time) is rejected at write time, in
-        # either order; the attempt chain form is caught too.
-        shadowing = {
-            "states": [
-                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "foo"}},
-                {"id": "b", "subagent": {"prompt": "p", "name": "foo-i1"}},
-            ],
-            "transitions": [{"from": "a", "to": "b"}],
-        }
-        errors = validate_factory_machine(shadowing)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("collides with the suffixed spawn labels of state 'a'", errors[0])
-        self.assertIn("re-entry, foreach, and retries name children 'foo'-i<n> and 'foo'-a<n>", errors[0])
-        # Reversed declaration order: the CURRENT state's name generates the
-        # suffixed labels, and the message must attribute them to it, not to
-        # the earlier state (Cursor review finding).
-        reversed_shadowing = {
-            "states": [
-                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "foo-i1"}},
-                {"id": "b", "subagent": {"prompt": "p", "name": "foo"}},
-            ],
-            "transitions": [{"from": "a", "to": "b"}],
-        }
-        errors = validate_factory_machine(reversed_shadowing)
-        self.assertEqual(len(errors), 1)
-        self.assertEqual(
-            errors[0],
-            "state b subagent name 'foo' suffixed by re-entry, foreach, and retries "
-            "('foo'-i<n>, 'foo'-a<n>) collides with state 'a' (configured 'foo-i1')",
-        )
-        for shadowed_name in ("foo-a2", "foo-i1-a2", "foo-i9"):
-            machine = {
-                "states": [
-                    {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "foo"}},
-                    {"id": "b", "subagent": {"prompt": "p", "name": shadowed_name}},
-                ],
-                "transitions": [{"from": "a", "to": "b"}],
-            }
-            self.assertEqual(len(validate_factory_machine(machine)), 1, shadowed_name)
-        # The never-generated -i0/-a1 do not shadow, and unrelated names pass.
-        no_shadow = {
-            "states": [
-                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "foo"}},
-                {"id": "b", "subagent": {"prompt": "p", "name": "foo-i0"}},
-                {"id": "c", "subagent": {"prompt": "p", "name": "foo-a1"}},
-                {"id": "d", "subagent": {"prompt": "p", "name": "bar-i1"}},
-            ],
-            "transitions": [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}, {"from": "c", "to": "d"}],
-        }
-        self.assertEqual(validate_factory_machine(no_shadow), [])
-
-    def test_wait_states_are_gated_until_the_communication_series(self) -> None:
-        # The rlm.watch.* host handlers do not exist on this stack, so wait
-        # blocks are rejected outright (machine form and dag form alike).
-        machine = {
-            "states": [
-                {"id": "watch", "entry": True, "subagent": "w", "wait": {"kind": "path", "target": "/tmp/x", "timeout_ms": 5}},
-                state("act"),
-            ],
-            "transitions": [{"from": "watch", "to": "act"}],
-        }
-        errors = validate_factory_machine(machine)
-        self.assertEqual(
-            errors,
-            [
-                "state watch: wait states require the watch host handlers (rlm.watch.*); "
-                "they arrive with the communication series - remove the wait block until then"
-            ],
-        )
-        self.assertEqual(validate_factory_spec(machine), errors)
-
-        dag_wait = {"nodes": [node("a", wait={"kind": "path", "target": "t", "timeout_ms": 5})]}
-        errors = validate_factory_spec(dag_wait)
-        self.assertEqual(
-            errors,
-            [
-                "node a: wait states require the watch host handlers (rlm.watch.*); "
-                "they arrive with the communication series - remove the wait block until then"
-            ],
-        )
-
-    def test_resident_states(self) -> None:
-        resident_ok = {
-            "states": [
-                {"id": "entry", "entry": True, "subagent": "w", "outputs": [{"name": "o", "type": "text"}]},
-                {"id": "watcher", "subagent": "w", "lifecycle": "resident"},
-            ],
-            "transitions": [{"from": "entry", "to": "watcher"}],
-        }
-        self.assertEqual(validate_factory_machine(resident_ok), [])
-
-        declares_outputs = {
-            "states": [state("watcher", entry=True, lifecycle="resident", outputs=[{"name": "o", "type": "text"}])],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(declares_outputs),
-            ["resident state watcher cannot declare outputs"],
-        )
-        uses_foreach = {
-            "states": [
-                state("src", entry=True, outputs=[{"name": "items", "type": "json"}]),
-                {
-                    "id": "watcher",
-                    "subagent": "w",
-                    "lifecycle": "resident",
-                    "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
-                    "foreach": {"over": "items", "max": 4},
-                },
-            ],
-            "transitions": [{"from": "src", "to": "watcher"}],
-        }
-        self.assertEqual(validate_factory_machine(uses_foreach), ["resident state watcher cannot use foreach"])
-        declares_retries = {
-            "states": [state("watcher", entry=True, lifecycle="resident", retries=1)],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(declares_retries),
-            ["resident state watcher cannot declare retries"],
-        )
-        # Same order as the node form: the bound check reports first.
-        malformed_retries = {
-            "states": [state("watcher", entry=True, lifecycle="resident", retries="bad")],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(malformed_retries),
-            ["state watcher retries must be an integer between 0 and 10"],
-        )
-        leaves_resident = {
-            "states": [
-                {"id": "entry", "entry": True, "subagent": "w"},
-                {"id": "watcher", "subagent": "w", "lifecycle": "resident"},
-            ],
-            "transitions": [{"from": "watcher", "to": "entry"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(leaves_resident),
-            ["transitions[0] cannot leave resident state 'watcher'"],
-        )
-
-    def test_input_cannot_read_from_resident_state(self) -> None:
-        machine = {
-            "states": [
-                state("watcher", lifecycle="resident"),
-                state("task", inputs=[{"name": "i", "type": "text", "from": "watcher.o"}]),
-                state("seed", entry=True),
-            ],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(machine),
-            ["state task input 'i' cannot read from resident state 'watcher'"],
-        )
-
-    def test_port_rules(self) -> None:
-        dup_output = {"states": [state("a", entry=True, outputs=[{"name": "o", "type": "text"}, {"name": "o", "type": "json"}])], "transitions": []}
-        self.assertEqual(validate_factory_machine(dup_output), ["state a declares duplicate output name 'o'"])
-        bad_type = {"states": [state("a", entry=True, outputs=[{"name": "o", "type": "yaml"}])], "transitions": []}
-        self.assertEqual(validate_factory_machine(bad_type), ["state a output 'o' type must be 'text' or 'json'"])
-        unknown_source = {
-            "states": [state("a", entry=True), state("b", inputs=[{"name": "i", "type": "text", "from": "ghost.o"}])],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(unknown_source),
-            ["state b input 'i' references unknown state 'ghost'"],
-        )
-        undeclared_output = {
-            "states": [
-                state("a", entry=True),
-                state("b", inputs=[{"name": "i", "type": "text", "from": "a.missing"}]),
-            ],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(undeclared_output),
-            ["state b input 'i' references output 'missing' that state 'a' does not declare"],
-        )
-        type_mismatch = {
-            "states": [
-                state("a", entry=True, outputs=[{"name": "o", "type": "text"}]),
-                state("b", inputs=[{"name": "i", "type": "json", "from": "a.o"}]),
-            ],
-            "transitions": [],
-        }
-        errors = validate_factory_machine(type_mismatch)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("cannot read from output", errors[0])
-        malformed = {
-            "states": [
-                state("a", entry=True, outputs=[{"name": "o", "type": "text"}]),
-                state("b", inputs=[{"name": "i", "type": "text", "from": "nodot"}]),
-            ],
-            "transitions": [],
-        }
-        errors = validate_factory_machine(malformed)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("requires a 'from' reference", errors[0])
-
-    def test_budgets_and_retries_and_policies(self) -> None:
-        over = {
-            "run": {"budget_ms": 1000},
-            "states": [state("a", entry=True, budget_ms=1001)],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(over),
-            ["state a budget_ms 1001 exceeds the run budget_ms 1000"],
-        )
-        for bad in (0, -5, 1.5, "10", True):
-            machine = {"run": {"budget_ms": bad}, "states": [state("a", entry=True)], "transitions": []}
-            self.assertEqual(validate_factory_machine(machine), ["run budget_ms must be a positive integer"], bad)
-            machine = {"states": [state("a", entry=True, budget_ms=bad)], "transitions": []}
-            self.assertEqual(validate_factory_machine(machine), ["state a budget_ms must be a positive integer"], bad)
-        bad_policy = {"states": [state("a", entry=True, failure_policy="retry")], "transitions": []}
-        self.assertEqual(
-            validate_factory_machine(bad_policy),
-            ["state a failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'retry'"],
-        )
-        bad_lifecycle = {"states": [state("a", entry=True, lifecycle="daemon")], "transitions": []}
-        self.assertEqual(
-            validate_factory_machine(bad_lifecycle),
-            ["state a lifecycle must be 'task' or 'resident', got 'daemon'"],
-        )
-
-    def test_foreach_rules(self) -> None:
-        ok = {
-            "states": [
-                state("a", entry=True, outputs=[{"name": "items", "type": "json"}]),
-                state(
-                    "b",
-                    inputs=[{"name": "items", "type": "json", "from": "a.items"}],
-                    foreach={"over": "items", "max": 16},
-                ),
-            ],
-            "transitions": [{"from": "a", "to": "b"}],
-        }
-        self.assertEqual(validate_factory_machine(ok), [])
-        wrong_port = {
-            "states": [
-                state("a", entry=True, outputs=[{"name": "items", "type": "json"}]),
-                state(
-                    "b",
-                    inputs=[{"name": "items", "type": "json", "from": "a.items"}],
-                    foreach={"over": "not-an-input", "max": 4},
-                ),
-            ],
-            "transitions": [{"from": "a", "to": "b"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(wrong_port),
-            ["state b foreach.over must name one of this state's inputs, got 'not-an-input'"],
-        )
-        text_port = {
-            "states": [
-                state("a", entry=True, outputs=[{"name": "draft", "type": "text"}]),
-                state(
-                    "b",
-                    inputs=[{"name": "draft", "type": "text", "from": "a.draft"}],
-                    foreach={"over": "draft", "max": 4},
-                ),
-            ],
-            "transitions": [{"from": "a", "to": "b"}],
-        }
-        self.assertEqual(validate_factory_machine(text_port), ["state b foreach.over input 'draft' must have type 'json'"])
-        not_object = {"states": [state("a", entry=True, foreach=["bad"])], "transitions": []}
-        self.assertEqual(validate_factory_machine(not_object), ["state a foreach must be an object"])
-
-    def test_transitions_reference_existing_states(self) -> None:
-        unknown_from = {
-            "states": [state("a", entry=True)],
-            "transitions": [{"from": "ghost", "to": "a"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(unknown_from),
-            ["transitions[0] references unknown from-state 'ghost'"],
-        )
-        unknown_to = {"states": [state("a", entry=True)], "transitions": [{"from": "a", "to": "ghost"}]}
-        self.assertEqual(
-            validate_factory_machine(unknown_to),
-            ["transitions[0] references unknown to-state 'ghost'"],
-        )
-        not_object = {"states": [state("a", entry=True)], "transitions": ["bad"]}
-        self.assertEqual(validate_factory_machine(not_object), ["transitions[0] must be an object"])
-        not_a_list = {"states": [state("a", entry=True)], "transitions": "bad"}
-        self.assertEqual(validate_factory_machine(not_a_list), ["factory machine transitions must be a list"])
-        bad_on = {"states": [state("a", entry=True)], "transitions": [{"from": "a", "to": "a", "on": "manual"}]}
-        self.assertEqual(
-            validate_factory_machine(bad_on),
-            ["transitions[0] on must be one of ['settled'], got 'manual'"],
-        )
-
-    def test_join_transitions_from_a_list(self) -> None:
-        # A ``from`` LIST is a join transition: it fires once every source
-        # state settled (the compiled dag fan-in shape).
-        ok = {
-            "states": [
-                state("a", entry=True),
-                state("b", entry=True),
-                state("d"),
-            ],
-            "transitions": [{"from": ["a", "b"], "to": "d"}],
-        }
-        self.assertEqual(validate_factory_machine(ok), [])
-
-        unknown_source = {
-            "states": [state("a", entry=True), state("d")],
-            "transitions": [{"from": ["a", "ghost"], "to": "d"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(unknown_source),
-            ["transitions[0] references unknown from-state 'ghost'"],
-        )
-        repeated_source = {
-            "states": [state("a", entry=True), state("d")],
-            "transitions": [{"from": ["a", "a"], "to": "d"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(repeated_source),
-            ["transitions[0] from must not repeat a state"],
-        )
-        empty_source = {
-            "states": [state("a", entry=True), state("d")],
-            "transitions": [{"from": [], "to": "d"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(empty_source),
-            ["transitions[0] from must name at least one state"],
-        )
-        non_string_entry = {
-            "states": [state("a", entry=True), state("d")],
-            "transitions": [{"from": ["a", 5], "to": "d"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(non_string_entry),
-            ["transitions[0] from entries must be non-empty state id strings"],
-        )
-        # A guard needs exactly one from-state's latest settle output.
-        guard_on_join = {
-            "states": [
-                state("a", entry=True),
-                state("b", entry=True),
-                state("d"),
-            ],
-            "transitions": [
-                {"from": ["a", "b"], "to": "d", "when": {"output": "o", "op": "exists"}},
-            ],
-        }
-        self.assertEqual(
-            validate_factory_machine(guard_on_join),
-            [
-                "transitions[0] with multiple from-states cannot carry a when guard; "
-                "use single-state transitions for guards"
-            ],
-        )
-        resident_source = {
-            "states": [
-                state("a", entry=True),
-                {"id": "watcher", "subagent": "w", "lifecycle": "resident"},
-                state("d"),
-            ],
-            "transitions": [{"from": ["a", "watcher"], "to": "d"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(resident_source),
-            ["transitions[0] cannot leave resident state 'watcher'"],
-        )
-        # Regression (bot review): UNHASHABLE malformed entries (a dict, a
-        # list) used to raise a raw TypeError from the set() dedupe before
-        # the type check; validation must report an error instead.
-        for bad_from in ([{}], [[1]], ["a", {}]):
-            malformed = {
-                "states": [state("a", entry=True), state("d")],
-                "transitions": [{"from": bad_from, "to": "d"}],
-            }
-            self.assertEqual(
-                validate_factory_machine(malformed),
-                ["transitions[0] from entries must be non-empty state id strings"],
-            )
-            self.assertEqual(
-                validate_factory_spec(
-                    {
-                        "states": [state("a", entry=True), state("d")],
-                        "transitions": [{"from": bad_from, "to": "d"}],
-                    }
-                ),
-                ["transitions[0] from entries must be non-empty state id strings"],
-            )
-
-    def test_self_loop_is_legal_re_entry(self) -> None:
-        machine = {
-            "states": [state("a", entry=True, max_entries=5, outputs=[{"name": "o", "type": "json"}])],
-            "transitions": [{"from": "a", "to": "a"}],
-        }
-        self.assertEqual(validate_factory_machine(machine), [])
-
-    def test_cyclic_machine_validates(self) -> None:
-        machine = {
-            "states": [
-                state("seed", entry=True, outputs=[{"name": "o", "type": "text"}]),
-                state("b"),
-                state("c"),
-            ],
-            "transitions": [
-                {"from": "seed", "to": "b"},
-                {"from": "b", "to": "c"},
-                {"from": "c", "to": "b"},
-            ],
-        }
-        self.assertEqual(validate_factory_machine(machine), [])
-        self.assertEqual(validate_factory_spec(machine), [])
-
-    def test_guard_values_must_be_finite(self) -> None:
-        # Regression (bot review): a non-finite float in a guard comparison
-        # value serializes as the non-JSON NaN/Infinity tokens and breaks
-        # every strict consumer of the activity reply frames (the host
-        # bridge's parser included) — validation rejects them at the
-        # machine's source, deeply (a contains needle list carries the
-        # same rule).
-        def machine_with(when: Any) -> dict[str, Any]:
-            return {
-                "states": [
-                    state("a", entry=True, outputs=[{"name": "verdict", "type": "json"}]),
-                    state("b"),
-                ],
-                "transitions": [{"from": "a", "to": "b", "when": when}],
-            }
-
-        for bad in (float("nan"), float("inf"), float("-inf")):
-            self.assertEqual(
-                validate_factory_machine(
-                    machine_with({"output": "verdict", "op": "eq", "value": bad})
-                ),
-                ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
-                repr(bad),
-            )
-        nested = machine_with(
-            {"output": "verdict", "op": "contains", "value": ["ok", {"x": float("nan")}]}
-        )
-        self.assertEqual(
-            validate_factory_machine(nested),
-            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
-        )
-
-    def test_guard_value_object_keys_must_be_strings(self) -> None:
-        # The same wire-cleanliness rule at the object's keys: a
-        # non-finite float key serializes as the non-JSON ``NaN`` token
-        # and breaks the strict consumers, and a non-string key is either
-        # coerced by the encoder (the wire object no longer matches the
-        # declared machine) or rejected by it — a guard declaring one
-        # never survives the reply frames.
-        def machine_with(value: Any) -> dict[str, Any]:
-            return {
-                "states": [
-                    state("a", entry=True, outputs=[{"name": "verdict", "type": "json"}]),
-                    state("b"),
-                ],
-                "transitions": [
-                    {"from": "a", "to": "b", "when": {"output": "verdict", "op": "contains", "value": value}}
-                ],
-            }
-
-        for bad in (
-            {float("nan"): 1},
-            {1: "x"},
-            {"ok": {("tuple",): 2}},
-            # Non-JSON container leaves reject at the source: a tuple
-            # serializes as something other than the declared shape (an
-            # array) if the encoder accepts it at all, and the floats it
-            # carries would ride past the finiteness traversal.
-            (float("nan"),),
-            ("plain", "tuple"),
-            {"set", "of", "strings"},
-            b"bytes",
-        ):
-            self.assertEqual(
-                validate_factory_machine(machine_with(["ok", bad])),
-                ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
-                repr(bad),
-            )
-        # String keys with finite values stay valid.
-        self.assertEqual(
-            validate_factory_machine(machine_with(["ok", {"flag": True, "nested": {"count": 2}}])),
-            [],
-        )
-
-    def test_guard_value_cycles_reject_without_exhausting_the_stack(self) -> None:
-        # A self-referential container can never serialize (the encoder
-        # refuses circular references outright), so it is not a valid
-        # comparison value: the traversal must reject it at the cycle
-        # instead of chasing it to a RecursionError, and the write path
-        # must answer the validation error, not crash.
-        def machine_with(value: Any) -> dict[str, Any]:
-            return {
-                "states": [
-                    state("a", entry=True, outputs=[{"name": "verdict", "type": "json"}]),
-                    state("b"),
-                ],
-                "transitions": [
-                    {"from": "a", "to": "b", "when": {"output": "verdict", "op": "contains", "value": value}}
-                ],
-            }
-
-        cycle: list[Any] = ["ok"]
-        cycle.append(cycle)
-        self.assertEqual(
-            validate_factory_machine(machine_with(cycle)),
-            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
-        )
-        nested: dict[str, Any] = {"flag": True}
-        nested["self"] = nested
-        self.assertEqual(
-            validate_factory_machine(machine_with([nested])),
-            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
-        )
-        # A shared-but-acyclic reference is NOT a cycle: the same object
-        # appearing twice (a diamond) stays a valid comparison value.
-        shared = {"flag": True}
-        self.assertEqual(validate_factory_machine(machine_with([shared, shared])), [])
-
-    def test_guard_value_depth_rejects_without_exhausting_the_stack(self) -> None:
-        # Deep-but-ACYCLIC nesting is the cycle rule's other half: the
-        # traversal descends one level per recursion, so a value nested
-        # past the interpreter's stack would raise RecursionError on the
-        # write path instead of answering the validation error. Every
-        # downstream seam recurses per level the same way (the snapshot's
-        # deep copy, the wire conversion, the reply frames' encoder), so
-        # the nesting rejects at the bound with the same message — and a
-        # value under the bound (realistic guard values nest a handful of
-        # levels) stays valid.
-        def machine_with(value: Any) -> dict[str, Any]:
-            return {
-                "states": [
-                    state("a", entry=True, outputs=[{"name": "verdict", "type": "json"}]),
-                    state("b"),
-                ],
-                "transitions": [
-                    {"from": "a", "to": "b", "when": {"output": "verdict", "op": "contains", "value": value}}
-                ],
-            }
-
-        deep: list[Any] = []
-        node = deep
-        for _ in range(factory_module.MAX_GUARD_VALUE_DEPTH + 50):
-            child: list[Any] = []
-            node.append(child)
-            node = child
-        self.assertEqual(
-            validate_factory_machine(machine_with(deep)),
-            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
-        )
-        within: list[Any] = ["verdict"]
-        for _ in range(10):
-            within = [within]
-        self.assertEqual(validate_factory_machine(machine_with(within)), [])
-
-    def test_guard_rules(self) -> None:
-        def machine_with(when: Any) -> dict[str, Any]:
-            return {
-                "states": [state("a", entry=True, outputs=[{"name": "verdict", "type": "json"}]), state("b")],
-                "transitions": [{"from": "a", "to": "b", "when": when}],
-            }
-
-        unknown_output = machine_with({"output": "missing", "op": "exists"})
-        self.assertEqual(
-            validate_factory_machine(unknown_output),
-            ["transitions[0] when.output 'missing' is not a declared output of state 'a'"],
-        )
-        empty_output = machine_with({"output": "", "op": "exists"})
-        self.assertEqual(
-            validate_factory_machine(empty_output),
-            ["transitions[0] when requires a non-empty output"],
-        )
-        not_object = machine_with("nope")
-        self.assertEqual(validate_factory_machine(not_object), ["transitions[0] when must be an object"])
-        path_on_text = {
-            "states": [
-                state("a", entry=True, outputs=[{"name": "note", "type": "text"}]),
-                state("b"),
-            ],
-            "transitions": [{"from": "a", "to": "b", "when": {"output": "note", "path": "x", "op": "eq", "value": 1}}],
-        }
-        self.assertEqual(
-            validate_factory_machine(path_on_text),
-            ["transitions[0] when.path requires a json output, got text output 'note'"],
-        )
-        bad_op = machine_with({"output": "verdict", "op": "matches", "value": 1})
-        self.assertEqual(
-            validate_factory_machine(bad_op),
-            ["transitions[0] when.op must be one of ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'exists', 'contains'], got 'matches'"],
-        )
-        for op in ("gt", "gte", "lt", "lte"):
-            non_numeric = machine_with({"output": "verdict", "op": op, "value": "1"})
-            self.assertEqual(
-                validate_factory_machine(non_numeric),
-                [f"transitions[0] when.op {op!r} requires a numeric value"],
-                op,
-            )
-        contains_needs_list = machine_with({"output": "verdict", "op": "contains", "value": "x"})
-        self.assertEqual(
-            validate_factory_machine(contains_needs_list),
-            ["transitions[0] when.op 'contains' requires a non-empty list value"],
-        )
-        # Review finding: an empty list is not a legal contains needle.
-        contains_empty_list = machine_with({"output": "verdict", "op": "contains", "value": []})
-        self.assertEqual(
-            validate_factory_machine(contains_empty_list),
-            ["transitions[0] when.op 'contains' requires a non-empty list value"],
-        )
-        eq_rejects_list = machine_with({"output": "verdict", "op": "eq", "value": [1]})
-        self.assertEqual(
-            validate_factory_machine(eq_rejects_list),
-            ["transitions[0] when.op 'eq' requires a scalar value"],
-        )
-        ne_rejects_list = machine_with({"output": "verdict", "op": "ne", "value": [1]})
-        self.assertEqual(
-            validate_factory_machine(ne_rejects_list),
-            ["transitions[0] when.op 'ne' requires a scalar value"],
-        )
-        empty_path = machine_with({"output": "verdict", "path": "", "op": "exists"})
-        self.assertEqual(
-            validate_factory_machine(empty_path),
-            ["transitions[0] when.path must be a non-empty dotted path"],
-        )
-        # Valid guard shapes across every op.
-        for when in (
-            {"output": "verdict", "path": "approved", "op": "eq", "value": False},
-            {"output": "verdict", "path": "approved", "op": "ne", "value": True},
-            {"output": "verdict", "path": "score", "op": "gt", "value": 1.5},
-            {"output": "verdict", "path": "score", "op": "gte", "value": 2},
-            {"output": "verdict", "path": "score", "op": "lt", "value": 0},
-            {"output": "verdict", "path": "score", "op": "lte", "value": -3},
-            {"output": "verdict", "path": "findings", "op": "exists"},
-            {"output": "verdict", "path": "tags", "op": "contains", "value": ["a", "b"]},
-            {"output": "verdict", "op": "exists"},
-        ):
-            self.assertEqual(validate_factory_machine(machine_with(when)), [], repr(when))
-
-    def test_collects_multiple_errors(self) -> None:
-        machine = {
-            "run": {"max_parallel": 99, "failure_policy": "nope"},
-            "states": [
-                {"id": "a", "entry": True, "subagent": "w", "retries": 99},
-                {"id": "b", "subagent": "w", "max_entries": 0},
-            ],
-            "transitions": [{"from": "a", "to": "ghost"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(machine),
-            [
-                "run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'nope'",
-                "state a retries must be an integer between 0 and 10",
-                "transitions[0] references unknown to-state 'ghost'",
-            ],
-        )
-
-
 # ---------------------------------------------------------------------------
 # Dag compilation: the dag sugar compiles to machine form
 # ---------------------------------------------------------------------------
@@ -1948,8 +421,7 @@ class CompileFactoryDagTest(unittest.TestCase):
                 node("c", depends_on=["b"]),
             ]
         }
-        machine, errors = compile_factory_dag(dag)
-        self.assertEqual(errors, [])
+        machine = _compile_dag(dag)
         self.assertEqual(
             machine,
             {
@@ -1964,7 +436,6 @@ class CompileFactoryDagTest(unittest.TestCase):
                 ],
             },
         )
-        self.assertEqual(validate_factory_machine(machine), [])
 
     def test_diamond_compiles_the_fan_in_to_one_join_transition(self) -> None:
         # Review finding: a fan-in node's full effective dependency set
@@ -1986,8 +457,7 @@ class CompileFactoryDagTest(unittest.TestCase):
                 ),
             ],
         }
-        machine, errors = compile_factory_dag(dag)
-        self.assertEqual(errors, [])
+        machine = _compile_dag(dag)
         self.assertEqual(
             machine,
             {
@@ -2015,7 +485,6 @@ class CompileFactoryDagTest(unittest.TestCase):
                 ],
             },
         )
-        self.assertEqual(validate_factory_machine(machine), [])
 
     def test_wide_fan_in_stays_one_join_per_target(self) -> None:
         # 300 predecessors, data edges plus depends_on: the target's compiled
@@ -2026,13 +495,11 @@ class CompileFactoryDagTest(unittest.TestCase):
             depends_on=[f"s{i}" for i in range(0, 300, 2)],
             inputs=[{"name": f"i{i}", "type": "text", "from": f"s{i}.o"} for i in range(1, 300, 2)],
         )
-        machine, errors = compile_factory_dag({"nodes": [*sources, target]})
-        self.assertEqual(errors, [])
+        machine = _compile_dag({"nodes": [*sources, target]})
         self.assertEqual(len(machine["transitions"]), 1)
         join = machine["transitions"][0]
         self.assertEqual(join["to"], "t")
         self.assertEqual(set(join["from"]), {f"s{i}" for i in range(300)})
-        self.assertEqual(validate_factory_machine(machine), [])
 
     def test_control_only_dependency_waits_too(self) -> None:
         # The join carries depends_on-only edges as well: a node with a
@@ -2044,8 +511,7 @@ class CompileFactoryDagTest(unittest.TestCase):
                 node("d", depends_on=["b", "c"], inputs=[{"name": "l", "type": "text", "from": "b.o"}]),
             ]
         }
-        machine, errors = compile_factory_dag(dag)
-        self.assertEqual(errors, [])
+        machine = _compile_dag(dag)
         # c contributes no data (d reads nothing from it), so the join waits
         # for it as a pure control-only parent.
         self.assertEqual(machine["transitions"], [{"from": ["b", "c"], "to": "d"}])
@@ -2057,8 +523,7 @@ class CompileFactoryDagTest(unittest.TestCase):
                 node("b", inputs=[{"name": "i", "type": "text", "from": "a.o"}]),
             ]
         }
-        machine, errors = compile_factory_dag(dag)
-        self.assertEqual(errors, [])
+        machine = _compile_dag(dag)
         self.assertEqual(machine["states"][1]["entry"], False)
         self.assertEqual(machine["transitions"], [{"from": "a", "to": "b"}])
 
@@ -2069,28 +534,14 @@ class CompileFactoryDagTest(unittest.TestCase):
                 node("b", depends_on=["a", "a"], inputs=[{"name": "i", "type": "text", "from": "a.o"}]),
             ]
         }
-        machine, errors = compile_factory_dag(dag)
-        self.assertEqual(errors, [])
+        machine = _compile_dag(dag)
         self.assertEqual(machine["transitions"], [{"from": "a", "to": "b"}])
 
     def test_explicit_empty_depends_on_still_enters(self) -> None:
         dag = {"nodes": [node("a", depends_on=[])]}
-        machine, errors = compile_factory_dag(dag)
-        self.assertEqual(errors, [])
+        machine = _compile_dag(dag)
         self.assertEqual(machine["states"][0]["entry"], True)
         self.assertEqual(machine["transitions"], [])
-
-    def test_invalid_dag_returns_errors_without_a_machine(self) -> None:
-        for bad, expected in (
-            ("nope", "factory dag must be a JSON object"),
-            ({"nodes": "nope"}, "factory dag requires a nodes list"),
-            ({"nodes": []}, "factory dag must declare at least one node"),
-            ({"nodes": [node("a", depends_on=["ghost"])]}, "node a depends on unknown node 'ghost'"),
-        ):
-            machine, errors = compile_factory_dag(bad)
-            self.assertIsNone(machine, repr(bad))
-            self.assertEqual(len(errors), 1, repr(bad))
-            self.assertIn(expected, errors[0])
 
     def test_compiled_dag_and_handwritten_machine_canonicalize_identically(self) -> None:
         dag = {
@@ -2133,70 +584,6 @@ class CompileFactoryDagTest(unittest.TestCase):
             ],
         }
         self.assertEqual(canonicalize_factory_spec(diamond_dag), canonicalize_factory_spec(diamond_machine))
-
-
-class ValidateFactorySpecFormTest(unittest.TestCase):
-    """The unified entry point detects the form first."""
-
-    def test_both_forms_are_rejected_together(self) -> None:
-        both = {"nodes": [node("a")], "states": [state("a", entry=True)]}
-        self.assertEqual(validate_factory_spec(both), ["pass either dag or machine form, not both"])
-        with self.assertRaisesRegex(ValueError, "not both"):
-            canonicalize_factory_spec(both)
-
-    def test_machine_wins_when_states_or_transitions_present(self) -> None:
-        transitions_only = {"transitions": [{"from": "a", "to": "b"}]}
-        self.assertEqual(
-            validate_factory_spec(transitions_only),
-            ["factory machine requires a states list"],
-        )
-
-    def test_dag_wording_without_machine_keys(self) -> None:
-        self.assertEqual(
-            validate_factory_spec({"nodes": "nope"}),
-            ["factory dag requires a nodes list"],
-        )
-
-    def test_validation_reports_errors_and_never_raises(self) -> None:
-        # The write-time dry run touches arbitrary caller JSON: malformed
-        # shapes (unhashable entries, wrong types everywhere) must surface
-        # as error lists, never as raw exceptions (regression: the join
-        # set() dedupe used to raise TypeError on unhashable from entries).
-        hostile = [
-            "str",
-            12,
-            None,
-            {"nodes": "nope"},
-            {"nodes": [None, 5, "str"]},
-            {"nodes": [{"id": {}, "subagent": "w"}]},
-            {"nodes": [{"id": ["x"], "subagent": "w"}]},
-            {"nodes": [{"id": "a", "subagent": {"prompt": 1}}]},
-            {"nodes": [{"id": "a", "subagent": "w", "depends_on": "a"}]},
-            {"nodes": [{"id": "a", "subagent": "w", "depends_on": [{}]}]},
-            {"nodes": [{"id": "a", "subagent": "w", "inputs": "nope"}]},
-            {"nodes": [{"id": "a", "subagent": "w", "inputs": [{"from": 5}]}]},
-            {"nodes": [{"id": "a", "subagent": "w", "outputs": [{"name": {}, "type": "text"}]}]},
-            {"nodes": [{"id": "a", "subagent": "w", "foreach": {"over": 5, "max": "x"}}]},
-            {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": {}, "to": "a"}]},
-            {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": [{}], "to": "a"}]},
-            {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": ["a", {}], "to": "a"}]},
-            {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": ["a"], "to": {}}]},
-            {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": "a", "to": "a", "when": {"op": "eq", "value": [1]}}]},
-            {"states": [{"id": "a", "entry": True, "subagent": "w", "failure_policy": {}}]},
-            {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": {"from": "a"}},
-            {"nodes": [{"id": "a", "subagent": "w"}], "states": [{"id": "b", "entry": True, "subagent": "w"}]},
-            {"params": {"x": 1}, "states": [{"id": "a", "entry": True, "subagent": "w", "inputs": [{"name": ["x"]}]}]},
-        ]
-        for index, spec in enumerate(hostile):
-            result = validate_factory_spec(spec)
-            self.assertIsInstance(result, list, f"spec #{index}")
-            self.assertTrue(all(isinstance(error, str) and error for error in result), f"spec #{index}")
-            self.assertTrue(result, f"hostile spec #{index} must report errors")
-
-
-    def test_non_object_specs_reject_with_dag_wording(self) -> None:
-        for bad in (None, [], "nodes", 42):
-            self.assertEqual(validate_factory_spec(bad), ["factory dag must be a JSON object"], repr(bad))
 
 
 class TopologicalOrderTest(unittest.TestCase):
@@ -2254,40 +641,6 @@ class TopologicalOrderTest(unittest.TestCase):
     def test_stable_order_uses_input_position(self) -> None:
         nodes = [node("b"), node("c"), node("a"), node("d")]
         self.assertEqual(topological_order(nodes), ["b", "c", "a", "d"])
-
-
-class NonQuadraticValidationTest(unittest.TestCase):
-    """Review finding: write-time validation must stay linear in the port
-    count. A rebuild-and-count duplicate check is quadratic, so a state with
-    tens of thousands of ports would block the write."""
-
-    def test_many_outputs_validate_in_linear_time(self) -> None:
-        outputs = [{"name": f"o{i}", "type": "text"} for i in range(8000)]
-        outputs.append({"name": "o1", "type": "json"})  # a duplicate at the end
-        dag = {"nodes": [node("a", outputs=outputs)]}
-        started = time.monotonic()
-        errors = validate_factory_spec(dag)
-        elapsed = time.monotonic() - started
-        self.assertEqual(errors, ["node a declares duplicate output name 'o1'"])
-        self.assertLess(elapsed, 2.0)
-
-    def test_many_inputs_from_one_source_validate_in_linear_time(self) -> None:
-        source = node("src", outputs=[{"name": f"o{i}", "type": "text"} for i in range(3000)])
-        inputs = [{"name": f"i{i}", "type": "text", "from": f"src.o{i}"} for i in range(3000)]
-        inputs.append({"name": "i1", "type": "text", "from": "src.o1"})  # duplicate input name
-        dag = {"nodes": [source, node("dst", inputs=inputs)]}
-        started = time.monotonic()
-        errors = validate_factory_spec(dag)
-        elapsed = time.monotonic() - started
-        self.assertEqual(errors, ["node dst declares duplicate input name 'i1'"])
-        self.assertLess(elapsed, 2.0)
-
-    def test_many_duplicate_outputs_report_once(self) -> None:
-        # The duplicate report is deduplicated too: every repeat of one
-        # name produces exactly one error sentence.
-        outputs = [{"name": "dup", "type": "text"} for _ in range(500)]
-        dag = {"nodes": [node("a", outputs=outputs)]}
-        self.assertEqual(validate_factory_spec(dag), ["node a declares duplicate output name 'dup'"])
 
 
 class ChildNameTest(unittest.TestCase):
@@ -2762,9 +1115,9 @@ class FakeHost:
         self.check_errors: dict[str, str] = {}
         self.factory_task_busy_until_collect: dict[str, int] = {}
         self.deleted: dict[str, dict[str, Any]] = {}
-        # factory.limits answers the Rust max_transitions bound unless a
-        # test scripts its error.
-        self.limits_error: str | None = None
+        # factory.validate answers no errors and the Rust max_transitions
+        # bound unless a test scripts them.
+        self.validate_errors: list[str] = []
         self.max_transitions_bound = 10_000
 
     def gate(self, request_type: str, call_number: int) -> asyncio.Event:
@@ -2983,10 +1336,8 @@ class FakeHost:
             if name not in self.described:
                 raise RuntimeError(f"no library machine named {name!r} (machines: none)")
             return self.described[name]
-        if request_type == "factory.limits":
-            if self.limits_error is not None:
-                raise RuntimeError(self.limits_error)
-            return {"max_transitions": self.max_transitions_bound}
+        if request_type == "factory.validate":
+            return {"errors": list(self.validate_errors), "max_transitions": self.max_transitions_bound}
         if request_type == "agent_message.send":
             if self.on_message is not None:
                 self.on_message(payload or {})
@@ -3363,10 +1714,11 @@ class FactoryExecutorTest(_ExecutorTestCase):
                 ]
             },
         )
+        self.host.validate_errors = ["factory dag must declare at least one node"]
         for spec_id in ("empty", "cyclic"):
             with self.assertRaisesRegex(ValueError, "factory"):
                 await self.start(spec_id)
-        self.assertEqual(self.host.calls, [])
+        self.assertEqual(self.host.calls_of("rlm.run"), [])
 
     @async_test
     async def test_run_lists_all_missing_subagent_references(self) -> None:
@@ -3383,7 +1735,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
             await self.start()
         self.assertIn("ghost-a", str(ctx.exception))
         self.assertIn("ghost-b", str(ctx.exception))
-        self.assertEqual(self.host.calls, [])
+        self.assertEqual(self.host.calls_of("rlm.run"), [])
 
     @async_test
     async def test_run_rejects_unknown_spec(self) -> None:
@@ -7514,13 +5866,13 @@ class FactoryMachineDirectoryTest(_ExecutorTestCase):
             await rlm_module.rlm.factory.run("sw", params={"task": "x"})
 
     @async_test
-    async def test_a_run_asks_the_host_for_the_limits_before_it_starts(self) -> None:
+    async def test_a_run_asks_the_host_validator_before_it_starts(self) -> None:
         spec = {"run": {"max_parallel": 65}, "states": [state("a", entry=True)]}
         self.store_machine(spec)
-        self.host.limits_error = "run max_parallel must be an integer between 1 and 64"
+        self.host.validate_errors = ["run max_parallel must be an integer between 1 and 64"]
         with self.assertRaisesRegex(ValueError, "run max_parallel must be an integer between 1 and 64"):
             await rlm_module.rlm.factory.run("sw")
-        self.assertEqual(self.host.calls_of("factory.limits"), [{"spec": spec}])
+        self.assertEqual(self.host.calls_of("factory.validate"), [{"spec": spec}])
         self.assertEqual(self.host.calls_of("rlm.run"), [])
 
     @async_test
@@ -8654,6 +7006,16 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
             restarted._runs[run_id].task,
             "the peek read never starts the re-armed control loop",
         )
+        # Inspecting a machine's template (the machines page's drill-in)
+        # never re-arms either.
+        self.host.described["sweep"] = {
+            "name": "sweep",
+            "description": "Sweep a branch.",
+            "version": 1,
+            "spec": {"states": [{"id": "plan", "entry": True, "subagent": {"prompt": "Plan."}}]},
+        }
+        await restarted.activity({"action": "library", "specId": "sweep"})
+        self.assertIn(run_id, restarted._rehydrated, "the library read never drains the re-arm queue")
         # The peek created the executor; the next executed command still
         # releases the boot arm.
         factory_module._BOOT_ARM_TASK = None
@@ -9222,13 +7584,9 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         self.harness.create_factory("Dag factory", "content", id="dag", dag=valid_dag())
         dag_graph = await rlm_module.rlm.factory.graph("dag")
         self.assertEqual(dag_graph["machine"]["order"], ["collect", "fan-out", "review"])
-        # unknown refs fail loudly; a corrupt spec names itself
+        # unknown refs fail loudly
         with self.assertRaisesRegex(ValueError, "unknown factory run or spec 'missing'"):
             await rlm_module.rlm.factory.graph("missing")
-        self.harness.create_factory("Broken", "content", id="broken", dag={"nodes": [node("a")]})
-        self.corrupt_spec("broken", {"nodes": []})
-        with self.assertRaisesRegex(ValueError, "does not validate"):
-            await rlm_module.rlm.factory.graph("broken")
 
     @async_test
     async def test_compact_snapshot_sheds_answers_and_carries_the_short_tail(self) -> None:
@@ -9471,6 +7829,7 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
             "states": [{"id": "a", "entry": True, "subagent": "worker"}],
             "transitions": [{"from": "a", "to": f"missing{i}"} for i in range(6_000)],
         }
+        self.host.validate_errors = [f"transitions[{i}] references unknown to-state 'missing{i}'" for i in range(6_000)]
         sent: list[dict[str, Any]] = []
         patcher = patch("rlm.repl._send", sent.append)
         patcher.start()
@@ -9874,20 +8233,6 @@ class MachineFileRenderTest(unittest.TestCase):
         self.assertIn('\n  "run": {\n    "failure_policy": "continue"\n  },', fence)
 
 
-class MachineCliDispatchTest(unittest.TestCase):
-    """cli_dispatch's one op: the import gate's structural spec check."""
-
-    def test_validate_answers_ok_or_the_exact_errors(self) -> None:
-        self.assertEqual(cli_dispatch({"op": "validate", "spec": valid_machine()}), {"ok": True})
-        result = cli_dispatch({"op": "validate", "spec": {"states": []}})
-        self.assertEqual(result["ok"], False)
-        self.assertEqual(result["errors"], validate_factory_spec({"states": []}))
-
-    def test_dispatch_rejects_other_payloads(self) -> None:
-        for payload in ([], {"op": "list"}, {"op": "import", "path": "/x"}):
-            self.assertEqual(cli_dispatch(payload)["ok"], False, payload)
-
-
 # ---------------------------------------------------------------------------
 # The mermaid renderer and the library graph seam (the TUI library view's
 # kernel surface).
@@ -9978,10 +8323,29 @@ class ExportMachineTest(unittest.TestCase):
         export_factory_spec(valid_machine(), out, name="sweep", description="Overwrite.", overwrite=True)
         self.assertIn("Overwrite.", out.read_text(encoding="utf-8"))
 
-    def test_spec_export_multiline_description_is_one_sentence(self) -> None:
-        # The single-line rule lives in machine_description_errors alone:
-        # one defect, one sentence, whether the description arrives as a
-        # parsed frontmatter value or an export argument.
+    def test_a_spec_that_is_not_json_data_is_refused_before_the_host(self) -> None:
+        calls = len(FACTORY_VALIDATOR.calls)
+        tuple_dep = {"nodes": [node("a"), node("b", depends_on=("a",))]}
+        self.assertEqual(
+            factory_module.check_factory_spec(tuple_dep),
+            ["factory spec must be JSON data: lists, objects with string keys, strings, finite numbers, booleans, null"],
+        )
+        self.assertEqual(len(FACTORY_VALIDATOR.calls), calls)
+
+    def test_a_missing_export_name_reaches_the_validator(self) -> None:
+        export_factory_spec_name_none = lambda: export_factory_spec(  # noqa: E731
+            valid_machine(), self.out_dir / "n.MACHINE.md", name=None, description=None
+        )
+        FACTORY_VALIDATOR.errors = ["machine name must be a non-empty string"]
+        self.addCleanup(setattr, FACTORY_VALIDATOR, "errors", [])
+        with self.assertRaisesRegex(ValueError, "machine name must be a non-empty string"):
+            export_factory_spec_name_none()
+        self.assertEqual(FACTORY_VALIDATOR.calls[-1], {"spec": valid_machine(), "name": None, "description": None})
+
+    def test_spec_export_refuses_with_the_validator_errors(self) -> None:
+        # The spec, name, and description go to the host's validator together.
+        FACTORY_VALIDATOR.errors = ["frontmatter description must be a single line"]
+        self.addCleanup(setattr, FACTORY_VALIDATOR, "errors", [])
         with self.assertRaises(ValueError) as raised:
             export_factory_spec(
                 valid_machine(),
@@ -9989,9 +8353,12 @@ class ExportMachineTest(unittest.TestCase):
                 name="sweep",
                 description="A machine that\nsweeps.",
             )
+        self.assertEqual(str(raised.exception), "frontmatter description must be a single line")
         self.assertEqual(
-            str(raised.exception), "frontmatter description must be a single line"
+            FACTORY_VALIDATOR.calls[-1],
+            {"spec": valid_machine(), "name": "sweep", "description": "A machine that\nsweeps."},
         )
+        self.assertFalse((self.out_dir / "x.MACHINE.md").exists())
 
     def test_exports_a_stored_entry_spec_byte_pretty(self) -> None:
         self.harness.create_factory("Sweep", "A machine that sweeps.", id="sweep", dag=valid_dag())
@@ -10001,14 +8368,16 @@ class ExportMachineTest(unittest.TestCase):
         text = out.read_text(encoding="utf-8")
         self.assertIn("name: sweep\n", text)
         spec = rendered_spec(text)
-        self.assertEqual(validate_factory_spec(spec), [])
         self.assertEqual(canonicalize_factory_spec(spec), canonicalize_factory_spec(valid_dag()))
 
     def test_entry_ids_that_are_not_machine_names_are_rejected(self) -> None:
         self.harness.create_factory("Sweep", "A machine that sweeps.", id="Sweep Entry", dag=valid_dag())
+        FACTORY_VALIDATOR.errors = ["machine name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"]
+        self.addCleanup(setattr, FACTORY_VALIDATOR, "errors", [])
         with self.assertRaises(ValueError) as ctx:
             export_machine("Sweep Entry", self.out_dir / "x.MACHINE.md")
-        self.assertIn("invalid characters", str(ctx.exception))
+        self.assertIn("cannot become a machine name", str(ctx.exception))
+        self.assertEqual(FACTORY_VALIDATOR.calls[-1], {"name": "Sweep Entry"})
 
     def test_exports_a_runs_canonical_machine(self) -> None:
         self.harness.create_factory("Sweep", "A machine that sweeps.", id="sweep", machine=valid_machine())
@@ -10028,17 +8397,6 @@ class ExportMachineTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             export_machine("ghost", self.out_dir / "ghost.MACHINE.md")
         self.assertIn("no stored factory entry or live run 'ghost'", str(ctx.exception))
-
-    def test_export_rejects_invalid_specs(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            export_factory_spec(
-                {"run": {"failure_policy": "sometimes"}, "states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
-                self.out_dir / "bad.MACHINE.md",
-                name="sweep",
-                description="A machine that sweeps.",
-            )
-        self.assertIn("run failure_policy must be one of", str(ctx.exception))
-        self.assertFalse((self.out_dir / "bad.MACHINE.md").exists())
 
 
 class FactoryRunFromLibraryTest(unittest.TestCase):
@@ -10202,7 +8560,6 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         # machine is exactly the canonicalized template.
         self.assertIn("states", run.machine)
         self.assertNotIn("nodes", run.machine)
-        self.assertEqual(validate_factory_spec(run.machine), [])
         self.assertEqual(run.machine, canonicalize_factory_spec(run.machine))
 
     # helpers ------------------------------------------------------------------

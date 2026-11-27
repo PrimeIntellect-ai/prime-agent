@@ -198,7 +198,7 @@ impl AgentSessionEngine {
     /// `None` when nothing is parked.
     pub(crate) async fn apply_pending_refine_outcome(
         &self,
-    ) -> Option<anyhow::Result<CommittedRefinement>> {
+    ) -> Option<(RefinementSource, anyhow::Result<CommittedRefinement>)> {
         if self
             .pending_refine_outcomes
             .lock()
@@ -217,7 +217,8 @@ impl AgentSessionEngine {
                 .unwrap_or_else(PoisonError::into_inner);
             (!pending.is_empty()).then(|| pending.remove(0))
         }?;
-        Some(self.apply_flight_outcome(pending).await)
+        let source = pending.flight.source;
+        Some((source, self.apply_flight_outcome(pending).await))
     }
 
     /// Commit one refinement child's proposal, then finish the
@@ -421,7 +422,8 @@ mod tests {
                 .runtime
                 .block_on(async { engine.apply_pending_refine_outcome().await })
         };
-        let first = apply().expect("a parked outcome").expect("the first apply");
+        let (_, first) = apply().expect("a parked outcome");
+        let first = first.expect("the first apply");
         assert!(first.result.applied_edits[0].applied);
         assert!(
             first
@@ -442,9 +444,9 @@ mod tests {
 
     /// A child that ends without a proposal fails its refinement on the
     /// same apply path: its failure parks in the flight's place and the idle
-    /// apply answers the failure with the child's reason; a child with no
-    /// open flight owes nothing. Red when the failure is dropped or the
-    /// flight survives the child's end.
+    /// apply answers the failure with the child's reason and its flight's
+    /// source; a child with no open flight owes nothing. Red when the
+    /// failure is dropped or the flight survives the child's end.
     #[test]
     fn a_child_that_ends_without_a_proposal_fails_its_refinement() {
         let _faux = FAUX_TEST_LOCK
@@ -465,11 +467,16 @@ mod tests {
             !engine.park_refine_child_outcome("active-1", RefineChildOutcome::Failed(None)),
             "a child without an open flight owes nothing"
         );
-        let error = engine
+        let (source, outcome) = engine
             .runtime
             .block_on(async { engine.apply_pending_refine_outcome().await })
-            .expect("the parked failure applies")
-            .expect_err("the refinement fails");
+            .expect("the parked failure applies");
+        assert_eq!(
+            source,
+            RefinementSource::User,
+            "the failure reports its flight's source"
+        );
+        let error = outcome.expect_err("the refinement fails");
         assert!(
             error.to_string().contains("Child worker unreachable"),
             "the failure names the child's reason: {error}"

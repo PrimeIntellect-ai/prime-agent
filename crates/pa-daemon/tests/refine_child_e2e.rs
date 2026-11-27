@@ -1079,6 +1079,10 @@ fn a_failed_child_proposal_surfaces_the_refine_failed_event() {
     );
     let error = failed["error"].as_str().unwrap_or_default();
     assert!(!error.is_empty(), "the failure message rides the event");
+    assert_eq!(
+        failed["source"], "user",
+        "the failure names its source: {failed}"
+    );
     assert!(
         client
             .events
@@ -1135,6 +1139,10 @@ fn a_length_stop_fails_the_refinement_with_the_cut_off_reason() {
         Duration::from_secs(30),
         "refine_failed",
         &dir.path().join("daemon.stderr"),
+    );
+    assert_eq!(
+        failed["source"], "user",
+        "the failure names its source: {failed}"
     );
     let error = failed["error"].as_str().unwrap_or_default();
     assert!(
@@ -1698,6 +1706,10 @@ fn a_refine_child_that_ends_mid_plan_fails_the_refinement() {
         Duration::from_secs(30),
         "refine_failed",
         &stderr_path,
+    );
+    assert_eq!(
+        failed["source"], "user",
+        "the failure names its source: {failed}"
     );
     let error = failed["error"].as_str().unwrap_or_default();
     assert!(

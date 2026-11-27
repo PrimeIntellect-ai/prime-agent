@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 
-pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
+pub use pa_types::inbox_notice::AGENT_MESSAGE_CUSTOM_TYPE;
 /// The queue-strip preview label for a delivered agent message
 /// (`queuedAgentMessagePreview` renders "<label>: <details.message>").
 pub const AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL: &str = "Agent message received";

@@ -80,8 +80,8 @@ fn injected_terminal_links_are_not_clickable() {
             message: format!("{injected}\n{nested}"),
         })),
         ChatEntry::ShellCompletion(Box::new(crate::custom_message::ShellCompletionRow {
-            pid: Some(1),
-            exit_code: Some(0),
+            label: "Background shell command finished".to_string(),
+            failed: false,
             content: format!("[bash-done] {injected}"),
         })),
         ChatEntry::CompactionSummary {
@@ -1148,8 +1148,8 @@ fn agent_message_row() -> ChatEntry {
 
 fn shell_completion_row() -> ChatEntry {
     ChatEntry::ShellCompletion(Box::new(crate::custom_message::ShellCompletionRow {
-        pid: Some(1),
-        exit_code: Some(0),
+        label: "Background shell command finished".to_string(),
+        failed: false,
         content: "[bash-done]".to_string(),
     }))
 }
