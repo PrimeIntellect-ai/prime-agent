@@ -93,6 +93,10 @@ _active: dict[str, asyncio.Task[Any]] = {}
 _interrupted: set[str] = set()
 _cell_counter = 0
 _pending_host: dict[str, "asyncio.Future[dict[str, Any]]"] = {}
+# Synchronous host requests by id: [reply-ready event, reply]. The reader
+# thread fills them directly, so a blocked loop thread is no obstacle.
+_pending_host_sync: dict[str, list[Any]] = {}
+_host_sync_closed = False
 # Set on the loop thread once stdin hits EOF or a shutdown request arrives; no
 # host reply can arrive after that, so waiting (and future) host_request calls fail.
 _host_closed = False
@@ -299,6 +303,42 @@ async def host_request(data: dict[str, Any]) -> dict[str, Any]:
         _pending_host.pop(rid, None)
 
 
+def host_request_sync(data: dict[str, Any]) -> dict[str, Any]:
+    """Send one typed request to the host and block until its raw reply.
+
+    For synchronous APIs (a harness write in a cell): the reader thread
+    resolves the reply without the event loop, so blocking the loop thread
+    here cannot deadlock."""
+    if _loop is None:
+        raise RuntimeError("repl runtime is not serving")
+    if _host_closed:
+        raise RuntimeError("host connection closed; host_request cannot be answered")
+    _check_payload("host_request", data)
+    rid = uuid.uuid4().hex
+    slot: list[Any] = [threading.Event(), None]
+    _pending_host_sync[rid] = slot
+    try:
+        if _host_sync_closed:
+            raise RuntimeError("host connection closed; host_request cannot be answered")
+        _send({"event": "host_request", "id": rid, "data": data})
+        slot[0].wait()
+        return slot[1]
+    finally:
+        _pending_host_sync.pop(rid, None)
+
+
+def _fail_pending_sync_host_requests() -> None:
+    """Reader-thread half of teardown for synchronous waiters: no reply can
+    arrive anymore, and their thread may be the loop thread itself."""
+    global _host_sync_closed
+    _host_sync_closed = True
+    for slot in list(_pending_host_sync.values()):
+        if slot[0].is_set():
+            continue  # its reply already arrived
+        slot[1] = {"status": "error", "error": "host connection closed; host_request cannot be answered"}
+        slot[0].set()
+
+
 def _fail_pending_host_requests() -> None:
     """Loop-thread half of teardown: no host reply can arrive anymore, so every
     awaiting cell must unblock or the queued shutdown would never be served."""
@@ -322,6 +362,11 @@ def teardown_started() -> bool:
 def _resolve_host_reply(rid: str, data: dict[str, Any]) -> None:
     """Reader-thread half of the host bridge; late/unknown replies are dropped."""
     assert _loop is not None
+    slot = _pending_host_sync.get(rid)
+    if slot is not None:
+        slot[1] = data
+        slot[0].set()
+        return
 
     def deliver() -> None:
         future = _pending_host.get(rid)
@@ -1779,6 +1824,7 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
     if rtype == "shutdown":
         # No host reply follows a shutdown; a cell awaiting host_request
         # must fail now or it would block _serve from ever consuming this.
+        _fail_pending_sync_host_requests()
         _loop.call_soon_threadsafe(_fail_pending_host_requests)
     _loop.call_soon_threadsafe(queue.put_nowait, req)
 
@@ -1800,6 +1846,7 @@ def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
     # Host closed stdin: shut the runtime down. The marker distinguishes
     # this from the host's explicit shutdown request (which runs after the
     # host flushed its own final snapshot, so no runtime-side flush runs).
+    _fail_pending_sync_host_requests()
     _loop.call_soon_threadsafe(_fail_pending_host_requests)
     _loop.call_soon_threadsafe(queue.put_nowait, {"type": "shutdown", "eof": True})
 

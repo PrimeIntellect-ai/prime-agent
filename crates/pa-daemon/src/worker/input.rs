@@ -83,7 +83,10 @@ impl Worker {
             .filter(|id| !id.is_empty())
             .map(str::to_string);
         if let Some(admission_id) = &admission_id {
-            self.register_prompt_admission(admission_id);
+            self.register_prompt_admission(
+                admission_id,
+                payload.get("clientAdmissionId").and_then(Value::as_str),
+            );
         }
         let (done_tx, done_rx) = oneshot::channel();
         let done = if wait { Some(done_tx) } else { None };

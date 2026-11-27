@@ -1,0 +1,1 @@
+- Backgrounded cell completions and factory run milestones now render like a background shell completion: one summary line (`✓ Background cell finished · 339.9s`, `✗ Factory run failed · run-1`) that click or Ctrl+O expands, both in the transcript and inside the python card that read them from the inbox, instead of an always-expanded `[cell-done]` or `[factory-progress]` panel.

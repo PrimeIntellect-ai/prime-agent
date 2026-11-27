@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::limits::check_spec_limits;
 use crate::load::{load_machine_dir, MACHINE_FILE};
+use crate::spec::check_spec;
 
 /// The v1 machine file inside a library folder.
 pub const MACHINE_MD_FILE: &str = "MACHINE.md";
@@ -215,11 +215,12 @@ pub fn scan_library(levels: &[Level]) -> Library {
     library
 }
 
-/// Read, parse, and bound-check one `MACHINE.md`.
+/// Read, parse, and check one `MACHINE.md` (its spec through
+/// [`check_spec`]).
 ///
 /// # Errors
 /// `<path>: <errors>` when the file cannot be read, does not parse, or its
-/// spec breaks a limit.
+/// spec is invalid.
 pub fn read_machine_md(path: &Path) -> Result<MachineMd, String> {
     let bytes =
         std::fs::read(path).map_err(|error| format!("{}: unreadable ({error})", path.display()))?;
@@ -227,9 +228,9 @@ pub fn read_machine_md(path: &Path) -> Result<MachineMd, String> {
         .map_err(|error| format!("{}: not valid UTF-8 ({error})", path.display()))?;
     let machine =
         parse_machine_md(&text, &path.display().to_string()).map_err(|errors| errors.join("; "))?;
-    let limits = check_spec_limits(&machine.spec);
-    if !limits.is_empty() {
-        return Err(format!("{}: {}", path.display(), limits.join("; ")));
+    let errors = check_spec(&machine.spec);
+    if !errors.is_empty() {
+        return Err(format!("{}: {}", path.display(), errors.join("; ")));
     }
     Ok(machine)
 }
@@ -237,7 +238,7 @@ pub fn read_machine_md(path: &Path) -> Result<MachineMd, String> {
 /// The machine name rule (the skill library's): lowercase a-z, 0-9 and
 /// hyphens, at most 64 characters, not ending in a hyphen.
 #[must_use]
-pub(crate) fn machine_name_errors(name: &str) -> Vec<String> {
+pub fn machine_name_errors(name: &str) -> Vec<String> {
     if name.is_empty() {
         return vec!["machine name must be a non-empty string".to_string()];
     }
@@ -265,7 +266,9 @@ pub(crate) fn machine_name_errors(name: &str) -> Vec<String> {
     errors
 }
 
-fn machine_description_errors(description: Option<&str>) -> Vec<String> {
+/// The description rule: present, one line, at most 1024 characters.
+#[must_use]
+pub fn machine_description_errors(description: Option<&str>) -> Vec<String> {
     let Some(description) = description.filter(|text| !text.trim().is_empty()) else {
         return vec!["frontmatter description is required".to_string()];
     };
