@@ -59,7 +59,9 @@ pub(super) fn remove_socket_file(socket_path: &Path) -> bool {
 }
 
 /// Stop every worker tracked for one supervisor socket and clean up its records.
-/// Returns the failure reasons. Workers are read from the given agent dir.
+/// A tracked pid whose start id no longer matches belongs to a recycled pid, so
+/// its worker is already gone and only the stale records are pruned. Returns the
+/// failure reasons. Workers are read from the given agent dir.
 pub(super) fn force_stop_tracked_workers(
     supervisor_socket_path: &Path,
     agent_dir: &Path,
@@ -80,36 +82,37 @@ pub(super) fn force_stop_tracked_workers(
     failures
 }
 
-/// Identity-gated stop: SIGTERM the worker (it exits keeping its resume entry),
-/// then SIGKILL if it hangs. The start-id gate defeats pid reuse.
-pub(super) fn stop_tracked_process(pid: u32, expected_start_id: Option<&str>) -> bool {
+/// True when the pid no longer names the tracked process: it is dead, or its
+/// start id proves the pid was recycled by an unrelated process.
+fn tracked_process_gone(pid: u32, expected_start_id: Option<&str>) -> bool {
     if !is_alive(pid) {
         return true;
     }
-    if let Some(expected) = expected_start_id {
-        if process_start_id(pid).as_deref() != Some(expected) {
-            return false;
-        }
+    expected_start_id.is_some_and(|expected| process_start_id(pid).as_deref() != Some(expected))
+}
+
+/// Identity-gated stop: SIGTERM the worker (it exits keeping its resume entry),
+/// then SIGKILL if it hangs. The start-id gate defeats pid reuse: a pid whose
+/// start id no longer matches belongs to a recycled pid, so the tracked worker
+/// is already gone — reported as stopped and never signalled.
+pub(super) fn stop_tracked_process(pid: u32, expected_start_id: Option<&str>) -> bool {
+    if tracked_process_gone(pid, expected_start_id) {
+        return true;
     }
     let _ = kill_pid(pid as i32, Signal::Term);
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     while is_alive(pid) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    if !is_alive(pid) {
+    if tracked_process_gone(pid, expected_start_id) {
         return true;
-    }
-    if let Some(expected) = expected_start_id {
-        if process_start_id(pid).as_deref() != Some(expected) {
-            return false;
-        }
     }
     let _ = kill_pid(pid as i32, Signal::Kill);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while is_alive(pid) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    !is_alive(pid)
+    tracked_process_gone(pid, expected_start_id)
 }
 
 /// The `--force` residual sweep: kill whatever product listeners remain in
@@ -248,6 +251,52 @@ mod tests {
         }
     }
 
+    /// A tracked-worker descriptor plus the record files the stop path prunes.
+    /// The record names the given pid and start id, so a test can point it at a
+    /// recycled pid or at a live worker.
+    struct TrackedWorkerFixture {
+        descriptor: PathBuf,
+        worker_socket: PathBuf,
+        recovery_journal: PathBuf,
+    }
+
+    fn write_tracked_worker(
+        agent_dir: &Path,
+        supervisor_socket_path: &Path,
+        pid: u32,
+        start_id: &str,
+    ) -> TrackedWorkerFixture {
+        let descriptor_dir = agent_dir.join("daemon-workers").join("fixture-supervisor");
+        std::fs::create_dir_all(&descriptor_dir).expect("create the descriptor dir");
+        let worker_socket = agent_dir.join("sockets").join("worker-fixture.sock");
+        std::fs::create_dir_all(worker_socket.parent().expect("socket parent"))
+            .expect("create the socket dir");
+        std::fs::write(&worker_socket, b"").expect("write the worker socket fixture");
+        let recovery_journal = agent_dir.join("journals").join("fixture.recovery.jsonl");
+        std::fs::create_dir_all(recovery_journal.parent().expect("journal parent"))
+            .expect("create the journal dir");
+        std::fs::write(&recovery_journal, b"{}\n").expect("write the recovery journal");
+        let descriptor = descriptor_dir.join("fixture-worker.json");
+        let record = serde_json::json!({
+            "workerId": "fixture-worker",
+            "pid": pid,
+            "processStartId": start_id,
+            "supervisorSocketPath": supervisor_socket_path.display().to_string(),
+            "socketPath": worker_socket.display().to_string(),
+            "recoveryJournalPath": recovery_journal.display().to_string(),
+        });
+        std::fs::write(
+            &descriptor,
+            serde_json::to_string(&record).expect("serialize the descriptor"),
+        )
+        .expect("write the descriptor");
+        TrackedWorkerFixture {
+            descriptor,
+            worker_socket,
+            recovery_journal,
+        }
+    }
+
     #[test]
     fn residual_sweep_over_an_empty_fixture_root_reports_nothing() {
         // No product daemon is spawned here: the sweep over an empty listener
@@ -331,5 +380,85 @@ mod tests {
         };
         assert!(terminate_verified_listener(&listener));
         let _ = reaper.join();
+    }
+
+    #[test]
+    fn force_stop_tracked_workers_prunes_a_recycled_pid_without_signalling_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let supervisor_socket_path = tmp.path().join("sockets").join("daemon.sock");
+        // A live process stands in for the recycled pid: the record's start id
+        // names the worker that used to own this pid, not its current owner.
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a sleep child");
+        let pid = child.id();
+        let stale_start_id = "ps:Fri Nov 13 02:42:27 2026";
+        assert_ne!(process_start_id(pid).as_deref(), Some(stale_start_id));
+        let fixture =
+            write_tracked_worker(tmp.path(), &supervisor_socket_path, pid, stale_start_id);
+
+        let failures = force_stop_tracked_workers(&supervisor_socket_path, tmp.path());
+
+        assert!(
+            failures.is_empty(),
+            "a recycled pid is a stale record, not a stop failure: {failures:?}"
+        );
+        assert!(
+            !fixture.descriptor.exists(),
+            "the stale descriptor must be pruned"
+        );
+        assert!(
+            !fixture.worker_socket.exists(),
+            "the stale worker socket must be pruned"
+        );
+        assert!(
+            !fixture.recovery_journal.exists(),
+            "the stale recovery journal must be pruned"
+        );
+        assert!(
+            is_alive(pid),
+            "the pid's current owner must never be signalled"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn force_stop_tracked_workers_stops_a_matching_worker_and_prunes_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let supervisor_socket_path = tmp.path().join("sockets").join("daemon.sock");
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a sleep child");
+        let pid = child.id();
+        let start_id = process_start_id(pid).expect("a live child exposes its start id");
+        let fixture = write_tracked_worker(tmp.path(), &supervisor_socket_path, pid, &start_id);
+
+        let failures = force_stop_tracked_workers(&supervisor_socket_path, tmp.path());
+
+        assert!(
+            failures.is_empty(),
+            "the matching worker must stop: {failures:?}"
+        );
+        assert!(
+            !fixture.descriptor.exists(),
+            "the stopped worker's descriptor must be pruned"
+        );
+        assert!(
+            !fixture.worker_socket.exists(),
+            "the stopped worker's socket must be pruned"
+        );
+        assert!(
+            !fixture.recovery_journal.exists(),
+            "the stopped worker's journal must be pruned"
+        );
+        assert!(!is_alive(pid), "the matched worker must be stopped");
+        let _ = child.wait();
     }
 }
