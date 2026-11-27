@@ -74,9 +74,10 @@ name: ci
 on:
   push:
     branches: [main]
+  # A stacked PR targets a feature branch, so this trigger's `branches: [main]`
+  # filter skipped the trust gates and CI for it; run the gates for any PR base.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
   merge_group:
     types: [checks_requested]
 
