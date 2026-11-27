@@ -359,7 +359,8 @@ jobs:
           export PA_E2E_KERNEL_PYTHON="${PRIME_AGENT_KERNEL_PYTHON}"
           test -x "${PRIME_AGENT_KERNEL_PYTHON}"
           check_status=0
-          python3 scripts/test_lifecycle_lib.py || check_status=1
+          failed() { echo "::error::$1 exited $2"; check_status=1; }
+          python3 scripts/test_lifecycle_lib.py || failed scripts/test_lifecycle_lib.py $?
           # Discover independently added checks so feature PRs do not
           # overwrite or conflict with each other's selection.
           for check in scripts/check_*.py; do
@@ -368,9 +369,10 @@ jobs:
             scenario="${scenario%.py}"
             check_test="scripts/test_check_${scenario}.py"
             if [ -f "${check_test}" ]; then
-              python3 "${check_test}" || check_status=1
+              python3 "${check_test}" || failed "${check_test}" $?
             fi
-            python3 "${check}" --receipt "${RUNNER_TEMP}/lifecycle-check-receipts/${scenario}.json" || check_status=1
+            python3 "${check}" --receipt "${RUNNER_TEMP}/lifecycle-check-receipts/${scenario}.json" \
+              || failed "${check} (receipt ${scenario}.json)" $?
           done
           exit "${check_status}"
       - name: Upload the lifecycle check receipts
