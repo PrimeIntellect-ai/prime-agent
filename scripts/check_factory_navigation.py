@@ -42,6 +42,7 @@ OVERVIEW = {'runs': [dict(GRAPH['runs'][0], ownerId='s1', ownerName='Fixture', s
     armed=None)], 'warnings': []}
 MACHINES_PAGE = 'machines \u00b7'
 RUN_PAGE = 'run: ' + RUN
+MACHINE_ROW_SELECTED = '\u25b8 \u25c8 navigation-fixture'
 RUN_ROW_SELECTED = '\u25b8 \u21b3 ' + RUN
 STATE_SELECTED = '\u2503 work'
 
@@ -143,10 +144,13 @@ def observe(binary, root, observed):
             observed['frames'][label] = {'text': terminal.screen.text(),
                 'styles': copy.deepcopy(terminal.screen.styles)}
         def open_run_page(label):
-            # The dock's machines group opens the machines page; the session's
-            # run nests under its machine, one row below the anchored machine.
+            # The dock's machines group opens the machines page. Until the
+            # machine list lands, the page lists the seeded run alone and its
+            # cursor stays anchored to the first row, so the list's arrival
+            # moves the cursor to the machine row. Wait for that row; the
+            # session's run then nests one row below it.
             terminal.send(dock_click(terminal.screen))
-            snap(label + '_machines_page', lambda text: MACHINES_PAGE in text and RUN in text)
+            snap(label + '_machines_page', lambda text: MACHINE_ROW_SELECTED in text and RUN in text)
             terminal.send('\x1b[B')
             snap(label + '_run_row_selected', lambda text: RUN_ROW_SELECTED in text)
             terminal.send('\r')
