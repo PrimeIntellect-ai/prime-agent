@@ -89,6 +89,14 @@ impl SessionUi {
         }
     }
 
+    /// Whether the run has actually STARTED (`agent_start` seen). A submitted or
+    /// admitted prompt has no run yet, so a tool frame in that window belongs to
+    /// the previous run and must land on nothing: admitting it would mount a
+    /// card whose timer keeps ticking on later paints.
+    pub(crate) fn run_started(&self) -> bool {
+        matches!(self.run_state, RunState::Running)
+    }
+
     /// Every run or turn start restarts the loader; a re-attached run anchors it at the LAST
     /// HUMAN PROMPT (the operator's 2026-09-28 rule).
     pub(crate) fn apply_run_event(&mut self, event: RunEvent, view: &mut AgentView) {

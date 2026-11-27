@@ -453,7 +453,7 @@ impl SessionUi {
                 // frames — it would allocate a fresh card whose timer then
                 // reticks the settled id on this run's paints, so it lands
                 // on nothing too.
-                if !self.aborted_tools.contains(&tool_call_id) && self.run_busy() {
+                if !self.aborted_tools.contains(&tool_call_id) && self.run_started() {
                     crate::snapshot::apply_tool_execution_start(
                         view,
                         &tool_call_id,
