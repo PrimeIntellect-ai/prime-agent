@@ -199,20 +199,14 @@ pub(crate) fn render_shell_completion(
     width: usize,
     leading: bool,
 ) -> Vec<Line> {
-    let failed = matches!(row.exit_code, Some(code) if code != 0);
-    let color = if failed {
+    let color = if row.failed {
         theme.fg_style(ThemeColor::Error)
     } else {
         theme.fg_style(ThemeColor::Muted)
     };
-    let label = if let (Some(code), true) = (row.exit_code, failed) {
-        format!("Background shell command failed \u{b7} exit {code}")
-    } else {
-        "Background shell command finished".to_string()
-    };
-    let mark = if failed { "\u{2717}" } else { "\u{2713}" };
+    let mark = if row.failed { "\u{2717}" } else { "\u{2713}" };
     let header = truncate_line(
-        &vec![Span::styled(format!(" {mark} {label}"), color)],
+        &vec![Span::styled(format!(" {mark} {}", row.label), color)],
         width,
         "",
     );
@@ -375,8 +369,8 @@ mod tests {
     #[test]
     fn shell_completion_rows() {
         let ok = ShellCompletionRow {
-            pid: Some(4371),
-            exit_code: Some(0),
+            label: "Background shell command finished".to_string(),
+            failed: false,
             content: "[bash-done pid:4371 exit:0]".to_string(),
         };
         let rows = render_shell_completion(&ok, Detail::Overview, &theme(), 60, true);
@@ -388,11 +382,11 @@ mod tests {
         assert_eq!(
             rows[1][0].style,
             theme().fg_style(ThemeColor::Muted),
-            "muted when exit 0"
+            "muted when it succeeded"
         );
         let failed = ShellCompletionRow {
-            pid: Some(11),
-            exit_code: Some(2),
+            label: "Background shell command failed \u{b7} exit 2".to_string(),
+            failed: true,
             content: "[bash-done pid:11 exit:2]".to_string(),
         };
         let rows = render_shell_completion(&failed, Detail::Overview, &theme(), 60, false);
@@ -409,8 +403,8 @@ mod tests {
         // The expanded body is the raw content under the branch gutter: the gutter on
         // the first content row, the four-column continuation on the blank source line.
         let row = ShellCompletionRow {
-            pid: Some(99),
-            exit_code: Some(0),
+            label: "Background shell command finished".to_string(),
+            failed: false,
             content: "[bash-done pid:99 exit:0]\n\nCommand: \"printf done\"".to_string(),
         };
         let rows = render_shell_completion(&row, Detail::All, &theme(), 60, true);

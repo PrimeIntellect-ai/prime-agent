@@ -1,0 +1,1 @@
+- Added `--a2a-clients <file>` for `--mode a2a`: several named A2A clients, each with its own token, and each sees only its own tasks and contexts. A message whose `acceptedOutputModes` excludes `text/markdown` is now refused with `ContentTypeNotSupportedError`.

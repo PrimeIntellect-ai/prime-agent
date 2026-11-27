@@ -2271,6 +2271,24 @@ class EofFinalFlushTest(unittest.TestCase):
         self.assertEqual(flushed, [1, 42])
 
 
+class SyncHostRequestTeardownTest(unittest.TestCase):
+    """In-process checks of the synchronous host-request teardown."""
+
+    def test_teardown_keeps_a_reply_that_already_arrived(self) -> None:
+        import rlm.repl as repl
+
+        answered = [threading.Event(), {"status": "ok", "result": {"errors": []}}]
+        answered[0].set()
+        waiting = [threading.Event(), None]
+        repl._pending_host_sync.update({"answered": answered, "waiting": waiting})
+        self.addCleanup(repl._pending_host_sync.clear)
+        self.addCleanup(setattr, repl, "_host_sync_closed", False)
+        repl._fail_pending_sync_host_requests()
+        self.assertEqual(answered[1], {"status": "ok", "result": {"errors": []}})
+        self.assertTrue(waiting[0].is_set())
+        self.assertEqual(waiting[1]["status"], "error")
+
+
 class FinishRequestTest(unittest.TestCase):
     """In-process checks of the parked-interrupt bookkeeping on request finish."""
 

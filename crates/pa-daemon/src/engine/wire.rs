@@ -167,6 +167,7 @@ pub enum EngineEvent {
     },
     RefineFailed {
         error: String,
+        source: pa_core::session_engine::refine::RefinementSource,
     },
 }
 

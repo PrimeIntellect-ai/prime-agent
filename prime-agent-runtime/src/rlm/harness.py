@@ -26,7 +26,7 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Literal
 
-from .factory import require_factory_enabled, validate_factory_spec
+from .factory import check_factory_spec, require_factory_enabled
 
 if sys.platform == "darwin":
     import fcntl
@@ -315,7 +315,7 @@ def _validate_factory_arguments(entry_name: str, arguments: dict[str, Any]) -> N
         raise ValueError(
             f"factory entry {entry_name!r} rejected: factory entries require a dag or machine object in arguments"
         )
-    errors = validate_factory_spec(spec)
+    errors = check_factory_spec(spec)
     if errors:
         raise ValueError(f"factory entry {entry_name!r} rejected: {'; '.join(errors)}")
 
@@ -1098,7 +1098,7 @@ class HarnessState:
         # dict after creation must not change the live entry (a later update
         # that omits both forms would preserve the mutated, unvalidated spec).
         spec, key = _factory_spec_argument(dag, machine)
-        errors = validate_factory_spec(spec)
+        errors = check_factory_spec(spec)
         if errors:
             raise ValueError("; ".join(errors))
         return self.create(
@@ -1135,7 +1135,7 @@ class HarnessState:
         # update to re-send the full spec, exactly like update_skill treats reference.
         if dag is not None or machine is not None:
             spec, key = _factory_spec_argument(dag, machine)
-            errors = validate_factory_spec(spec)
+            errors = check_factory_spec(spec)
             if errors:
                 raise ValueError("; ".join(errors))
             arguments = {key: copy.deepcopy(spec)}
