@@ -267,6 +267,7 @@ pub fn kernel_provisioner(
     on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
     ready_gate: Option<crate::kernel::provisioner::KernelReadyGate>,
     daemonless: bool,
+    refine_child: bool,
 ) -> Arc<KernelProvisioner> {
     let mut env = HashMap::with_capacity(4);
     env.insert(
@@ -296,6 +297,11 @@ pub fn kernel_provisioner(
         if let Some(value) = value {
             env.insert(key.to_string(), value.to_string_lossy().to_string());
         }
+    }
+    // A refinement child proposes harness edits in its final message and
+    // its parent commits them: the kernel's harness writes refuse.
+    if refine_child {
+        env.insert("RLM_HARNESS_READ_ONLY".to_string(), "1".to_string());
     }
     env.extend(websearch_env);
     Arc::new(KernelProvisioner::new(

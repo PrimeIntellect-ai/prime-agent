@@ -298,9 +298,9 @@ impl Worker {
     /// `refine { instructions?, rollbackId?, global? }` (TS `session.refine`): the
     /// mechanical rollback applies inline (answering its `RefinementResult`); every
     /// planning refinement is the refinement child's — the command spawns it and
-    /// returns immediately (fire-and-wake), and the child's proposal applies on
-    /// its reply's arrival (the reply's wake emits the durable outcome and notice
-    /// rows and the `refine_complete` event).
+    /// returns immediately (fire-and-wake), and the child's proposal applies when
+    /// it settles (the apply emits the durable outcome and notice rows and the
+    /// `refine_complete` event).
     pub(crate) async fn handle_refine(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("refine") {
             return response;
@@ -364,7 +364,7 @@ impl Worker {
             }
         };
         // The spawned child answers immediately; its proposal's outcome rows
-        // and completion event arrive on its reply's wake.
+        // and completion event arrive when it settles.
         if result.get("refinementChildSpawned") == Some(&serde_json::json!(true)) {
             return response_success(None, "refine", Some(result));
         }

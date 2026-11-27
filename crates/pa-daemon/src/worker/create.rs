@@ -188,6 +188,11 @@ impl Worker {
             .get("runtimeMetadata")
             .is_some_and(|metadata| metadata.get("factory").is_some());
         let factory_contract = create_payload_factory_contract(payload);
+        let refine_child = payload
+            .get("runtimeMetadata")
+            .and_then(|metadata| metadata.get("kind"))
+            .and_then(Value::as_str)
+            == Some("refine");
         let thinking = payload
             .get("thinking")
             .and_then(Value::as_str)
@@ -616,6 +621,7 @@ impl Worker {
             semantic_spawn,
             factory_child,
             factory_contract,
+            refine_child,
         }) {
             return response_failure(None, "create", &error.to_string(), None);
         }

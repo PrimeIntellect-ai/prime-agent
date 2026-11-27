@@ -91,6 +91,8 @@ def observe(binary, root, receipt):
             expected = {'authorization': 'Bearer fixture-only', 'x-prime-team-id': 'team-1'}
             receipt['identity'] = actual
             assert actual == expected, actual
+            # The one request is the refinement child's (it answers with
+            # the proposal at once).
             assert server.requests[0]['auxiliary'], server.requests
             receipt['refine_verified'] = True
         finally:

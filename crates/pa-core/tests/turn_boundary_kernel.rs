@@ -206,6 +206,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         progress_note_emit: None,
         rlm_depth: None,
         factory_child: false,
+        refine_child: false,
         factory_contract: None,
         daemonless: true,
         telemetry: None,

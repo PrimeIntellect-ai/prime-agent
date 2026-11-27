@@ -201,6 +201,7 @@ async fn an_end_turn_cell_ends_the_turn_without_another_assistant_response() {
         progress_note_emit: None,
         rlm_depth: None,
         factory_child: false,
+        refine_child: false,
         factory_contract: None,
         daemonless: true,
         telemetry: None,

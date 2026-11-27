@@ -367,6 +367,7 @@ impl Worker {
                 // A TS replacement runtime has no semantic spawn.
                 semantic_spawn: None,
                 factory_child: false,
+                refine_child: false,
                 factory_contract: None,
             }) {
             Ok(()) => self.reseed_rlm_children().await,
@@ -587,9 +588,8 @@ impl Worker {
                 // interleaving before it.
                 let engine = std::sync::Arc::clone(&self.engine);
                 // The round is the refinement child's spawn — fire-and-wake;
-                // the child's proposal applies on its reply's arrival (the
-                // reply's wake emits the outcome rows and the
-                // `refine_complete` event).
+                // the child's proposal applies when it settles (the apply
+                // emits the outcome rows and the `refine_complete` event).
                 let spawned = if goal_continue_scheduled {
                     Ok(())
                 } else {

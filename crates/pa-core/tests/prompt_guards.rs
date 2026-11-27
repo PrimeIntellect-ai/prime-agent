@@ -66,6 +66,7 @@ fn session_options<'a>(
         generic_mcp_servers: Vec::new(),
         rlm_depth: 0,
         factory_child: None,
+        refine_child: false,
         daemonless: false,
         can_spawn: false,
     }

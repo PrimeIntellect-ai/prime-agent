@@ -430,6 +430,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         session_file: Some(parent_session_file),
         thinking: None,
         child_script: Some(child_script.to_string_lossy().to_string()),
+        refine_child: false,
     });
     let handle = children
         .spawn(RlmSpawnRequest {
@@ -763,6 +764,7 @@ async fn family_edges_never_cross_families_end_to_end() {
             session_file: Some(file.clone()),
             thinking: None,
             child_script: Some(kid_script.to_string_lossy().to_string()),
+            refine_child: false,
         });
         let handle = children
             .spawn(RlmSpawnRequest {
@@ -906,6 +908,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         session_file: Some(kid_a_file.clone()),
         thinking: None,
         child_script: Some(kid_script.to_string_lossy().to_string()),
+        refine_child: false,
     });
     let grandkid_handle = kid_children
         .spawn(RlmSpawnRequest {
@@ -1227,6 +1230,7 @@ async fn parent_renames_a_child_end_to_end() {
         session_file: Some(parent_session_file.clone()),
         thinking: None,
         child_script: Some(child_script.to_string_lossy().to_string()),
+        refine_child: false,
     });
     let handle = children
         .spawn(RlmSpawnRequest {
@@ -1621,6 +1625,7 @@ async fn passivated_child_recent_messages_reads_its_file_end_to_end() {
         session_file: parent_summary["sessionFile"].as_str().map(str::to_string),
         thinking: None,
         child_script: Some(kid_script.to_string_lossy().to_string()),
+        refine_child: false,
     });
     children
         .spawn(RlmSpawnRequest {
@@ -1791,6 +1796,7 @@ async fn family_members_read_each_others_transcripts_end_to_end() {
             session_file: summary["sessionFile"].as_str().map(str::to_string),
             thinking: None,
             child_script: Some(kid_script.to_string_lossy().to_string()),
+            refine_child: false,
         });
         let mut handles = Vec::new();
         for kid in kids {
