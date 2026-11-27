@@ -306,4 +306,32 @@ mod tests {
         assert_eq!(second.status, JobStatus::Active);
         assert_eq!(cancelled[0].status, JobStatus::Cancelled);
     }
+
+    /// A fire rolls `nextRunAt` (claim) and bumps the run count (record): both are catalog
+    /// changes, so the listeners that push `heartbeats_changed` to clients hear each one.
+    #[test]
+    fn a_fire_notifies_the_heartbeat_change_listeners() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = AgentCronJobStore::new(dir.path().join("jobs.json"));
+        let changes = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&changes);
+        store.on_heartbeat_change(Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+        let now = 1_700_000_000_000;
+        let mut rlm_input = input("watch pods", "every 2m", now);
+        rlm_input.source = Some("rlm_heartbeat".to_string());
+        let job = store.create_rlm_heartbeat(&rlm_input).unwrap();
+        let after_create = changes.load(Ordering::SeqCst);
+        let due = crate::cron::parse_iso_millis(job.next_run_at.as_deref().unwrap()).unwrap();
+        assert_eq!(store.claim_due(due, due).unwrap().len(), 1);
+        assert_eq!(changes.load(Ordering::SeqCst), after_create + 1);
+        let options = crate::cron::store::RecordRunOptions {
+            now: Some(due + 1_000),
+            error: None,
+        };
+        store.record_run_result(&job.id, &options).unwrap();
+        assert_eq!(changes.load(Ordering::SeqCst), after_create + 2);
+    }
 }

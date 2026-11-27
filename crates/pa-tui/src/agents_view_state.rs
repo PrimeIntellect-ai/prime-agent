@@ -1068,6 +1068,7 @@ mod tests {
                 "sessionId": "s1",
                 "lifecycle": "live",
                 "usage": { "cost": 1.5 },
+                "totalUsage": { "cost": 1.5 },
             }),
         )];
         let records = reconcile_unified_sessions(&roster, &[], None);

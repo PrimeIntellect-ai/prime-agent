@@ -17,7 +17,7 @@ use crate::kernel::shared::HostRequestHandlers;
 use crate::session::manager::SessionManager;
 use crate::skills::{get_python_skill_runtime_info, Skill};
 use crate::tools::ipython::{
-    IpythonKernelProvisioner, IpythonToolOptions, KernelAttachment, KernelErrorInfo,
+    CellStop, IpythonKernelProvisioner, IpythonToolOptions, KernelAttachment, KernelErrorInfo,
     KernelExecuteOptions, KernelExecutor,
 };
 
@@ -34,7 +34,7 @@ pub struct RlmWiring {
     /// Child-session machinery backing `rlm.spawn`/`rlm.create_session` and
     /// the roster/collect/delete surface.
     pub subagent_host: Option<Arc<dyn RlmSubagentHost>>,
-    pub usage_store: Option<Arc<dyn super::rlm_usage::RlmChildUsageStore>>,
+    pub usage_store: Option<Arc<dyn super::usage_store::UsageStore>>,
     /// Announces every accepted `rlm.progress.note`; `None` keeps the store
     /// the only surface.
     pub progress_note_emit: Option<super::rlm_host::RlmProgressNoteEmit>,
@@ -90,9 +90,9 @@ pub struct SessionKernelWiring {
     pub runtime: Arc<SessionRuntime>,
     /// The RLM bridge: progress-note state the daemon roster reads.
     pub rlm: Arc<RlmHostBridge>,
-    /// The child-usage attribution producer the daemon's children
-    /// registry drives after the engine is built.
-    pub rlm_usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    /// The session's durable usage store (the embedding's, else the
+    /// session manager's own).
+    pub usage_store: Arc<dyn super::usage_store::UsageStore>,
 }
 
 /// Build the session runtime and register the `goal.*`, `rlm.*`, the
@@ -164,10 +164,9 @@ pub fn wire_session_runtime(
             agent_dir.join("models.json"),
         ))
     });
-    let rlm_usage = Arc::new(super::rlm_usage::RlmChildUsageAttributions::new(
-        rlm.usage_store
-            .unwrap_or_else(|| Arc::new(super::rlm_usage::SessionUsageStore(session.clone()))),
-    ));
+    let usage_store = rlm
+        .usage_store
+        .unwrap_or_else(|| Arc::new(super::usage_store::SessionUsageStore(session.clone())));
     // The daemon supplies the child-session host; an embedding without
     // one keeps the no-children behavior, whose self-rename appends the
     // session's own `session_info` name row.
@@ -177,7 +176,6 @@ pub fn wire_session_runtime(
     let rlm_bridge = Arc::new(RlmHostBridge::new(
         model_registry,
         subagent_host,
-        rlm_usage.clone(),
         rlm.progress_note_emit,
     ));
     register_rlm_host_handlers(&mut handlers, &rlm_bridge);
@@ -191,7 +189,7 @@ pub fn wire_session_runtime(
         handlers,
         runtime,
         rlm: rlm_bridge,
-        rlm_usage,
+        usage_store,
     }
 }
 
@@ -393,6 +391,24 @@ impl IpythonKernelProvisioner for KernelProvisioner {
     fn kill(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let this = self.clone();
         Box::pin(async move { this.kill_and_wait().await })
+    }
+
+    fn stop_cell(&self, cell_id: &str) -> Pin<Box<dyn Future<Output = CellStop> + Send>> {
+        let manager = self.manager();
+        let cell_id = cell_id.to_string();
+        Box::pin(async move {
+            let Some(manager) = manager else {
+                return CellStop::NotRunning;
+            };
+            if !manager.stop_detached_execution(&cell_id).await {
+                return CellStop::NotRunning;
+            }
+            if manager.retired_for_ignored_interrupt() {
+                CellStop::KernelRetired
+            } else {
+                CellStop::Stopped
+            }
+        })
     }
 
     fn take_kernel_restart_note(&self) -> bool {

@@ -2189,7 +2189,20 @@ class ConcurrentCellTest(unittest.TestCase):
         self.assertEqual(dones, [("next", "error"), ("slow", "ok")])
         refusal = next(e for e in events if e.get("event") == "error" and e.get("id") == "next")
         self.assertEqual(refusal["ename"], "KernelBusy")
+        self.assertIn("cell 'slow' is running blocking code", refusal["evalue"])
         self.assertNotIn("next ran", stream_text(events, "stdout"))
+
+    def test_the_refusal_names_the_running_cell_inside_an_earlier_cells_function(self):
+        self.repl.execute("define", "import time\ndef block():\n    print('started')\n    time.sleep(30)")
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "holder", "code": "block()"})
+        self.until_started("holder", events)
+        refused = self.repl.execute("next", "print('next ran')")
+        refusal = next(e for e in refused if e.get("event") == "error" and e.get("id") == "next")
+        self.assertEqual(refusal["ename"], "KernelBusy")
+        self.assertIn("cell 'holder' is running blocking code", refusal["evalue"])
+        self.repl.send({"type": "interrupt", "id": "holder"})
+        self.assertEqual(one(self.repl.until_done("holder"), "done")["status"], "error")
 
     def test_interrupting_the_awaiting_cell_leaves_the_synchronous_cell_running(self):
         events: list[dict] = []

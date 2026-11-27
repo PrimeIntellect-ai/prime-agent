@@ -1,0 +1,1 @@
+- `prime-agent factory convert` keeps a transition whose `when` is null as an unguarded edge, and refuses a machine with two joins into one state instead of writing a directory that does not load.

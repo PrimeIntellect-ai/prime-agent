@@ -217,51 +217,34 @@ pub(crate) fn compaction_entry_in_entries(engine: &AgentSessionEngine) -> bool {
         .any(|entry| matches!(entry, pa_types::session::FileEntry::Compaction { .. }))
 }
 
-/// Admit one prompt on a parked thread, sharing its events; `started`
-/// flips on the first compaction start event. Returns the join handle.
-pub(crate) fn admit_parked(
+/// Admit one prompt, aborting the compaction from inside the emit of its
+/// `compaction_start`: the earliest moment a client can see the start and
+/// send `abort_compaction`. Returns the run's events.
+pub(crate) fn admit_aborting_at_compaction_start(
     engine: &std::sync::Arc<AgentSessionEngine>,
     message: String,
-    events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>>,
-    started: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> std::thread::JoinHandle<()> {
-    let engine = std::sync::Arc::clone(engine);
-    std::thread::spawn(move || {
-        engine.run_prompt(
-            0,
-            PromptRequest {
-                batch: Vec::new(),
-                images: Vec::new(),
-                message,
-                source: "user".to_string(),
-                agent_message_id: None,
-                custom_message: None,
-            },
-            &|| false,
-            &mut |event| {
-                if matches!(event, EngineEvent::CompactionStart { .. }) {
-                    started.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                events
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(event);
-                true
-            },
-        );
-    })
-}
-
-/// Wait until the parked admission's compaction started (deadline-bounded).
-pub(crate) fn wait_for_compaction_start(started: &std::sync::atomic::AtomicBool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !started.load(std::sync::atomic::Ordering::SeqCst) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the auto compaction never started"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+) -> Vec<EngineEvent> {
+    let mut events = Vec::new();
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            batch: Vec::new(),
+            images: Vec::new(),
+            message,
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            if matches!(event, EngineEvent::CompactionStart { .. }) {
+                engine.abort_auto_compaction();
+            }
+            events.push(event);
+            true
+        },
+    );
+    events
 }
 
 /// The aborted `compaction_end` event: `aborted` with no

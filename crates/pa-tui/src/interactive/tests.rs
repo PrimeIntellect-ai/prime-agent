@@ -74,10 +74,33 @@ fn an_update_notice_replaces_the_shutdown_recovery() {
     assert!(
         matches!(&connection, Connection::Recovering(driver) if driver.kind == RecoveryKind::Shutdown)
     );
-    connection.on(ConnectionEvent::UpdateNotice { est_seconds: 30 });
+    connection.on(ConnectionEvent::UpdateNotice);
     assert!(
         matches!(&connection, Connection::Recovering(driver) if driver.kind == RecoveryKind::Update)
     );
+}
+
+/// A failed reattach after an update notice backs off and retries inside the window (an
+/// abandoned update's relaunching worker); only the window's expiry detaches.
+#[test]
+fn an_update_reattach_failure_retries_until_the_window_expires() {
+    let mut connection = Connection::Connected;
+    connection.on(ConnectionEvent::UpdateNotice);
+    let effect = connection.on(ConnectionEvent::ReattachFailed("timed out".to_string()));
+    assert_eq!(effect, ConnectionEffect::None);
+    assert!(
+        matches!(&connection, Connection::Recovering(driver) if driver.kind == RecoveryKind::Update && driver.delay == Duration::from_secs(2))
+    );
+    if let Connection::Recovering(driver) = &mut connection {
+        driver.deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+    }
+    assert!(matches!(
+        connection.on(ConnectionEvent::AttemptLanded),
+        ConnectionEffect::Exit {
+            reason: "update_reconnect_failed",
+            ..
+        }
+    ));
 }
 
 /// A supervisor loss while the session-plane driver retries hands the recovery to the full driver:

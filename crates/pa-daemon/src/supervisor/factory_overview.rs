@@ -1824,6 +1824,7 @@ mod tests {
                 name: "custom child".to_string(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .expect("append ledger spawn");
         // The child is outside the default sessions catalog; the custom
@@ -2310,6 +2311,7 @@ mod tests {
                 name: "custom child".to_string(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .expect("append ledger spawn");
         drop(ledger);

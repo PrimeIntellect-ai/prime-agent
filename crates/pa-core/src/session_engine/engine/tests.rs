@@ -129,7 +129,7 @@ async fn engine_runs_tool_loop_and_persists() {
         additional_prompt_paths: vec![],
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
-        rlm_usage_store: None,
+        usage_store: None,
 
         inbox: None,
         progress_note_emit: None,
@@ -243,7 +243,7 @@ async fn spawned_child_prompt_stamps_its_depth() {
         additional_prompt_paths: vec![],
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
-        rlm_usage_store: None,
+        usage_store: None,
 
         inbox: None,
         progress_note_emit: None,
@@ -320,7 +320,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             additional_prompt_paths: vec![],
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host: None,
-            rlm_usage_store: None,
+            usage_store: None,
 
             inbox: None,
             progress_note_emit: None,
@@ -516,7 +516,7 @@ async fn create_session_appends_missing_resume_settings_rows() {
         additional_prompt_paths: vec![],
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
-        rlm_usage_store: None,
+        usage_store: None,
 
         inbox: None,
         progress_note_emit: None,
@@ -907,7 +907,7 @@ async fn late_receipts_recorded_before_the_row_lands_apply_on_landing() {
         additional_prompt_paths: vec![],
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
-        rlm_usage_store: None,
+        usage_store: None,
 
         inbox: None,
         progress_note_emit: None,
