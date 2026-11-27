@@ -1,0 +1,1 @@
+- Fixed rate limits and other errors that a provider streams inside a successful response (Prime Inference, OpenRouter) ending the turn empty without a retry; they now retry like the matching HTTP error.

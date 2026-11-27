@@ -2,7 +2,7 @@
 //! exactly like the `openai` npm SDK (`APIError.makeMessage`, openai 6.47.0), which the TS provider
 //! surfaces verbatim.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::utils_inner::stream_failure::{ProviderError, ProviderHttpError};
 
@@ -10,7 +10,8 @@ use crate::utils_inner::stream_failure::{ProviderError, ProviderHttpError};
 /// `APIError` text (which `streamOpenAICompletions` copies into the assistant message's error
 /// message as-is):
 ///
-/// - JSON body whose `error.message` is a non-empty string: `"{status} {message}"`.
+/// - JSON body whose `error.message` is a non-empty string: `"{status} {message}"`, or just
+///   `"{message}"` without a status (an error streamed inside a 200 response).
 /// - JSON body whose `error` is present without a usable message: `"{status} {error}"`
 ///   (stringified).
 /// - JSON body without a usable `error` field: `"{status} status code (no body)"`.
@@ -20,7 +21,7 @@ use crate::utils_inner::stream_failure::{ProviderError, ProviderHttpError};
 /// divergences (real provider error bodies carry a string `error.message`): serde renders `1.0` as
 /// `1.0` where `JSON.stringify` renders `1`, and object keys sort alphabetically where JS keeps
 /// body order.
-pub fn openai_sdk_error_message(status: u16, body: &str) -> String {
+pub fn openai_sdk_error_message(status: Option<u16>, body: &str) -> String {
     let parsed = match serde_json::from_str::<Value>(body) {
         Ok(value) if js_truthy(&value) => Some(value),
         _ => None,
@@ -40,9 +41,11 @@ pub fn openai_sdk_error_message(status: u16, body: &str) -> String {
         },
         None => err_message.map(str::to_string),
     };
-    match msg.filter(|msg| !msg.is_empty()) {
-        Some(msg) => format!("{status} {msg}"),
-        None => format!("{status} status code (no body)"),
+    match (status, msg.filter(|msg| !msg.is_empty())) {
+        (Some(status), Some(msg)) => format!("{status} {msg}"),
+        (Some(status), None) => format!("{status} status code (no body)"),
+        (None, Some(msg)) => msg,
+        (None, None) => "(no status code or body)".to_string(),
     }
 }
 
@@ -50,13 +53,13 @@ pub fn openai_sdk_error_message(status: u16, body: &str) -> String {
 /// (`status`, body, headers) the stream-failure classification reads for diagnostics and retry
 /// decisions.
 pub fn openai_http_error(
-    status: u16,
+    status: Option<u16>,
     body: &str,
     headers: std::collections::HashMap<String, String>,
 ) -> ProviderError {
     ProviderError::Http(ProviderHttpError {
         message: openai_sdk_error_message(status, body),
-        status: Some(status),
+        status,
         body: Some(body.to_string()),
         headers,
         request_id: None,
@@ -66,6 +69,21 @@ pub fn openai_http_error(
         retry_after_ms: None,
         provider_error_type: None,
     })
+}
+
+/// Build the error for an `error` object streamed inside a 200 response, which gateways (Prime
+/// Inference, `OpenRouter`) send for rate limits and upstream failures. A numeric `code` is the
+/// HTTP status the failure stands for, so it classifies and retries exactly like the non-OK
+/// response it replaces; a string `code` (`"server_error"`) classifies as the error type.
+pub fn openai_stream_error(
+    error: &Value,
+    headers: std::collections::HashMap<String, String>,
+) -> ProviderError {
+    let status = error
+        .get("code")
+        .and_then(Value::as_u64)
+        .and_then(|code| u16::try_from(code).ok());
+    openai_http_error(status, &json!({ "error": error }).to_string(), headers)
 }
 
 /// The `OpenRouter` extra-information field the TS provider appends to the error message:
@@ -122,7 +140,11 @@ mod tests {
     fn http_error_carries_structured_pieces() {
         let mut headers = std::collections::HashMap::new();
         headers.insert("x-request-id".to_string(), "req_1".to_string());
-        let error = openai_http_error(400, r#"{"error": {"message": "bad"}}"#, headers.clone());
+        let error = openai_http_error(
+            Some(400),
+            r#"{"error": {"message": "bad"}}"#,
+            headers.clone(),
+        );
         let http = match &error {
             ProviderError::Http(http) => http,
             other => panic!("expected http error, got {other:?}"),
@@ -135,7 +157,7 @@ mod tests {
         );
         // The Cerebras context-overflow pattern matches this empty-body text.
         assert_eq!(
-            openai_sdk_error_message(400, ""),
+            openai_sdk_error_message(Some(400), ""),
             "400 status code (no body)"
         );
     }

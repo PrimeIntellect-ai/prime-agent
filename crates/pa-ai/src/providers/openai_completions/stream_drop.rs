@@ -1,6 +1,6 @@
 //! The stream-drop pins: the SSE fixtures whose response body ends without
-//! the protocol's terminal marker, and the healthy shapes that must never
-//! classify as drops.
+//! the protocol's terminal marker, the in-stream error chunk, and the
+//! healthy shapes that must never classify as drops.
 //!
 //! The silent lane-death class: the provider (the internal glm-5.3 route)
 //! ends the response stream mid-block — no stop signal (`finish_reason`),
@@ -174,6 +174,38 @@ async fn a_finish_reason_or_done_marker_completes() {
         };
         assert_eq!(message.stop_reason, StopReason::Stop);
         assert_eq!(message.error_message, None);
+    }
+}
+
+/// The Prime Inference rate-limit shape: HTTP 200, then a chunk with no choices and an `error`
+/// object. It fails the request as the 429 it stands for (the retryable `rate_limit` kind), also
+/// after content streamed, instead of completing an empty turn at the `[DONE]` marker.
+const RATE_LIMIT_CHUNK: &str = "data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"model\":\"openai/gpt-6.2-sol\",\"choices\":[],\"error\":{\"code\":429,\"message\":\"Rate limit reached. Please retry shortly.\",\"metadata\":{\"error_type\":\"rate_limit_exceeded\"}}}\n\n";
+
+#[tokio::test]
+async fn an_in_stream_error_chunk_fails_the_request_with_its_code() {
+    for (body, partial_text) in [
+        (format!("{RATE_LIMIT_CHUNK}{DONE}"), None),
+        (
+            format!("{TEXT_DELTA}{RATE_LIMIT_CHUNK}{DONE}"),
+            Some("Here is the first half of"),
+        ),
+    ] {
+        let (_, terminal) = stream_events(body.clone()).await;
+        let AssistantMessageEvent::Error { error, .. } = terminal else {
+            panic!("an error chunk must terminate with an error event: {body}");
+        };
+        assert_eq!(error.stop_reason, StopReason::Error);
+        assert_eq!(
+            error.error_message.as_deref(),
+            Some("429 Rate limit reached. Please retry shortly.")
+        );
+        assert_eq!(failure_kind(&error).as_deref(), Some("rate_limit"));
+        let text = error.content.iter().find_map(|block| match block {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        });
+        assert_eq!(text, partial_text);
     }
 }
 
