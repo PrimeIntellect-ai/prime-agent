@@ -47,7 +47,7 @@ pub(crate) fn wake_delay(
 }
 
 /// A bash completion that exited 0.
-fn is_success(class: &str, meta: &Value) -> bool {
+fn is_success(class: &str, meta: &serde_json::Map<String, Value>) -> bool {
     class == INBOX_CLASS_BASH_DONE && meta.get("exitCode").and_then(Value::as_i64) == Some(0)
 }
 

@@ -1212,7 +1212,8 @@ impl SessionEngine for DrainSweepEngine {
         // The kernel's rlm.inbox.read drained the store inside the cell
         // and fired the drain seam: the sweep runs inside the read's own
         // host handler.
-        self.inbox.drain();
+        self.inbox
+            .read(&pa_core::session_engine::inbox::InboxReadFilter::default());
         withdraw_drained_inbox_notice(
             self.recovery.get().expect("the runner's recovery"),
             self.core.get().expect("the runner's core"),
@@ -1286,9 +1287,9 @@ async fn a_draining_turn_sweeps_the_queued_reminder_and_parks_settled() {
     inbox.push(
         pa_core::session_engine::inbox::InboxNotice {
             class: pa_types::inbox_notice::INBOX_CLASS_BASH_DONE,
-            sender: Some("the command".to_string()),
+            sender: None,
             text: "the command finished".to_string(),
-            meta: json!({ "pid": 4321 }),
+            meta: serde_json::from_value(json!({ "pid": 4321 })).unwrap(),
         },
         1_000,
     );

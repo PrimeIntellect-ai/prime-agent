@@ -530,9 +530,11 @@ impl Worker {
             };
             // The provenance the targeted reads filter on: the sender
             // name, the message id, and the family relationship.
-            let mut meta = json!({ "id": &id, "from": &sender });
+            let mut meta = serde_json::Map::new();
+            meta.insert("id".to_string(), json!(&id));
+            meta.insert("from".to_string(), sender.clone());
             if let Some(relationship) = from_relationship {
-                meta["relationship"] = json!(relationship.as_str());
+                meta.insert("relationship".to_string(), json!(relationship.as_str()));
             }
             let notice = pa_core::session_engine::inbox::InboxNotice {
                 class: pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE,

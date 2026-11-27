@@ -11,13 +11,14 @@ fn bash_done(id: &str, exit_code: i64, tail: &str) -> InboxMessage {
         id: id.to_string(),
         class: "bash-done".to_string(),
         arrived_at_ms: 0,
-        sender: Some("make".to_string()),
+        sender: None,
         text: format!("[bash-done {id} exit:{exit_code}]"),
-        meta: json!({
+        meta: serde_json::from_value(json!({
             "command": "make",
             "exitCode": exit_code,
             "outputTail": tail,
-        }),
+        }))
+        .unwrap(),
     }
 }
 

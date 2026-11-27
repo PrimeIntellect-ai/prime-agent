@@ -16,9 +16,9 @@ const JUST_BEFORE_THE_HOLD: Duration = Duration::from_millis(29_999);
 fn notice(class: &'static str, text: &str, exit_code: i64) -> InboxNotice {
     InboxNotice {
         class,
-        sender: Some("sender".to_string()),
+        sender: None,
         text: text.to_string(),
-        meta: json!({ "exitCode": exit_code }),
+        meta: serde_json::from_value(json!({ "exitCode": exit_code })).unwrap(),
     }
 }
 
@@ -207,7 +207,7 @@ async fn a_delivery_consumes_what_it_shows_and_leaves_counted_items_waiting() {
             .lines()
             .last()
             .unwrap()
-            .contains("\"kind\":\"withdrawn\""),
+            .contains("\"kind\":\"removed\""),
         "{journal}"
     );
 

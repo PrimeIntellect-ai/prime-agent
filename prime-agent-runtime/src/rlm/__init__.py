@@ -134,19 +134,21 @@ class RLMInboxMessage:
 
     `inbox_class` is `bash-done`, `factory-progress`, `agent-message`,
     `child-exited`, `child-failed`, or `heartbeat`; `arrived_at_ms` is
-    the epoch-ms arrival time; `sender` is the command for a bash
-    completion, the run id for a factory milestone, the agent name for
-    an agent message, the child's session name for a child lifecycle
-    notice, or the job id for a heartbeat fire; `meta` carries the
-    notice's metadata (pid/command/exitCode/exitClass, the run's
-    fields, the message id, sender and family relationship, the child's
-    status and ids, or the fired heartbeat's job fields).
+    the epoch-ms arrival time; `sender` is the agent name of an agent
+    message (None for the other classes); `key` is the other classes'
+    own key: the command of a bash completion, the run id of a factory
+    milestone, the cell id of a background cell completion, the child's session name of a child lifecycle notice, or
+    the job id of a heartbeat fire; `meta` carries the notice's metadata
+    (pid/command/exitCode/exitClass, the run's fields, the message id,
+    sender and family relationship, the child's status and ids, or the
+    fired heartbeat's job fields).
     """
 
     id: str
     inbox_class: str
     arrived_at_ms: int
     sender: str | None
+    key: str | None
     text: str
     meta: dict[str, Any]
 
@@ -600,34 +602,15 @@ async def progress_note(message: str) -> RLMProgressNoteResult:
 _INBOX_MESSAGE_MIME = "application/vnd.prime-agent.inbox-message+json"
 
 
-def _inbox_message_from_payload(payload: Any) -> RLMInboxMessage:
-    if not isinstance(payload, dict):
-        raise RuntimeError("rlm.inbox.read returned an invalid message entry")
-    message_id = payload.get("id")
-    inbox_class = payload.get("class")
-    arrived_at_ms = payload.get("arrivedAtMs")
-    text = payload.get("text")
-    if not isinstance(message_id, str) or not message_id:
-        raise RuntimeError("rlm.inbox.read entry is missing id")
-    if not isinstance(inbox_class, str) or not inbox_class:
-        raise RuntimeError("rlm.inbox.read entry has invalid class")
-    if not isinstance(arrived_at_ms, int) or isinstance(arrived_at_ms, bool):
-        raise RuntimeError("rlm.inbox.read entry has invalid arrivedAtMs")
-    if not isinstance(text, str):
-        raise RuntimeError("rlm.inbox.read entry has invalid text")
-    sender = payload.get("sender")
-    if sender is not None and not isinstance(sender, str):
-        raise RuntimeError("rlm.inbox.read entry has invalid sender")
-    meta = payload.get("meta")
-    if not isinstance(meta, dict):
-        raise RuntimeError("rlm.inbox.read entry has invalid meta")
+def _inbox_message_from_payload(payload: dict[str, Any]) -> RLMInboxMessage:
     return RLMInboxMessage(
-        id=message_id,
-        inbox_class=inbox_class,
-        arrived_at_ms=arrived_at_ms,
-        sender=sender,
-        text=text,
-        meta=meta,
+        id=payload["id"],
+        inbox_class=payload["class"],
+        arrived_at_ms=payload["arrivedAtMs"],
+        sender=payload.get("sender"),
+        key=payload.get("key"),
+        text=payload["text"],
+        meta=payload["meta"],
     )
 
 
@@ -636,6 +619,7 @@ async def inbox_read(
     inbox_class: str | None = None,
     since_ms: int | None = None,
     before_ms: int | None = None,
+    key: str | None = None,
 ) -> list[RLMInboxMessage]:
     """Read and drain the session inbox: the waiting machine-generated
     notices (bash completions, factory milestones, agent messages,
@@ -644,11 +628,12 @@ async def inbox_read(
     so assign the result: ``msgs = await rlm.inbox.read()``.
 
     Every argument narrows the read (ANDed); no argument drains
-    everything. ``sender`` matches exactly (a command, a run id, an
-    agent name, a child's session name, or a heartbeat job id);
+    everything. ``sender`` matches an agent message's sender exactly;
     ``inbox_class`` matches the message class (``bash-done``,
     ``factory-progress``, ``agent-message``, ``child-exited``,
-    ``child-failed``, ``heartbeat``); ``since_ms`` is the inclusive
+    ``child-failed``, ``heartbeat``); ``key`` matches the class's own
+    key exactly (a command, a run id, a cell id, a child's session name,
+    or a heartbeat job id) and needs ``inbox_class``; ``since_ms`` is the inclusive
     arrival lower bound and ``before_ms`` the exclusive upper bound
     (epoch milliseconds). Only the matching messages leave the inbox.
 
@@ -664,19 +649,21 @@ async def inbox_read(
         raise TypeError("since_ms must be an int or None")
     if before_ms is not None and (not isinstance(before_ms, int) or isinstance(before_ms, bool)):
         raise TypeError("before_ms must be an int or None")
+    if key is not None and (not isinstance(key, str) or not key):
+        raise TypeError("key must be a non-empty str or None")
     filter_payload: dict[str, Any] = {}
     if sender is not None:
         filter_payload["sender"] = sender
     if inbox_class is not None:
         filter_payload["class"] = inbox_class
+    if key is not None:
+        filter_payload["key"] = key
     if since_ms is not None:
         filter_payload["sinceMs"] = since_ms
     if before_ms is not None:
         filter_payload["beforeMs"] = before_ms
     payload = await host_request("rlm.inbox.read", filter_payload)
-    messages = payload.get("messages")
-    if not isinstance(messages, list):
-        raise RuntimeError("rlm.inbox.read returned an invalid messages list")
+    messages = payload["messages"]
     read = [_inbox_message_from_payload(entry) for entry in messages]
     for entry in messages:
         emit({_INBOX_MESSAGE_MIME: entry})
@@ -805,7 +792,7 @@ _harness_state = _HarnessProxy()
 class _RLMInboxNamespace:
     """The session inbox of machine-generated notices:
     ``msgs = await rlm.inbox.read()`` drains and returns the waiting messages
-    (optionally narrowed by sender, inbox_class, and arrival window); read
+    (optionally narrowed by sender, inbox_class, key, and arrival window); read
     messages are gone, so assign the result; ``await rlm.inbox.count()``
     counts them without draining.
     """
@@ -816,12 +803,14 @@ class _RLMInboxNamespace:
         inbox_class: str | None = None,
         since_ms: int | None = None,
         before_ms: int | None = None,
+        key: str | None = None,
     ) -> list[RLMInboxMessage]:
         return await inbox_read(
             sender=sender,
             inbox_class=inbox_class,
             since_ms=since_ms,
             before_ms=before_ms,
+            key=key,
         )
 
     async def count(self) -> RLMInboxCount:

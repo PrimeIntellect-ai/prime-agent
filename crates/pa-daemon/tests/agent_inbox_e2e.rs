@@ -904,8 +904,8 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
         "the journal holds the three message records: {journal}"
     );
     assert!(
-        journal.contains("\"kind\":\"drained\""),
-        "the read appended its drain marker: {journal}"
+        journal.contains("\"kind\":\"removed\""),
+        "the read journaled its removal: {journal}"
     );
 
     // THE KILL SWITCH: `agentInbox.enabled: false` restores the direct
@@ -1323,8 +1323,8 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
         "the delivered message journaled with its class: {journal}"
     );
     assert!(
-        journal.contains("\"kind\":\"drained\""),
-        "the read appended its drain marker: {journal}"
+        journal.contains("\"kind\":\"removed\""),
+        "the read journaled its removal: {journal}"
     );
 
     // THE KILL SWITCH: `agentInbox.enabled: false` restores the direct
@@ -1451,7 +1451,7 @@ print(('CHILD_NOTICE_READ', after.count))"
 }
 
 /// The agent-lifecycle class: a settled child's terminal notice lands in
-/// the parent's durable inbox (class `child-exited`, sender = the child
+/// the parent's durable inbox (class `child-exited`, key = the child
 /// name, status in the metadata), ONE coalesced short notice wakes the
 /// parent and shows the entry inline, its delivery consumes the record,
 /// no full `rlm_child_terminal_notice` row steers, and the journal keeps
@@ -1607,12 +1607,12 @@ fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
     );
     assert!(
         journal.contains("\"class\":\"child-exited\"")
-            && journal.contains("\"sender\":\"f20-worker\"")
+            && journal.contains("\"sessionName\":\"f20-worker\"")
             && journal.contains("completed_without_reply"),
-        "the journal names the class, the sender, and the kind: {journal}"
+        "the journal names the class, the child, and the kind: {journal}"
     );
     assert!(
-        journal.contains("\"kind\":\"withdrawn\""),
+        journal.contains("\"kind\":\"removed\""),
         "the delivery journaled its consumption: {journal}"
     );
 

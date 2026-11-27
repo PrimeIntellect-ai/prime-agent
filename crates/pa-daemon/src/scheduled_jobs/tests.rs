@@ -593,8 +593,8 @@ async fn a_seam_set_heartbeat_fire_routes_into_the_inbox() {
     let (count, _, classes) = inbox.count();
     assert_eq!(count, 1, "one waiting fire per job");
     assert_eq!(classes["heartbeat"], 1);
-    let messages = inbox.drain();
-    assert_eq!(messages[0].sender.as_deref(), Some(steer.id.as_str()));
+    let messages = inbox.read(&pa_core::session_engine::inbox::InboxReadFilter::default());
+    assert!(messages[0].is_heartbeat_fire(&steer.id));
     assert!(messages[0].text.contains("[heartbeat: every 10s run#0]"));
     assert!(messages[0].text.contains("steer the new mission"));
     assert_eq!(messages[0].meta["jobId"], steer.id);
@@ -743,7 +743,7 @@ async fn a_retired_slot_refuses_the_heartbeat_withdrawal() {
     engine.set_inbox(Arc::clone(&inbox));
     let job = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
     let row = pa_core::session_engine::messages::create_heartbeat_prompt_message(&job, 1);
-    let fields = pa_core::session_engine::inbox::heartbeat_notice_fields(&job.id, &row).unwrap();
+    let fields = pa_core::session_engine::inbox::heartbeat_notice_fields(&row).unwrap();
     inbox.push(fields, 1);
 
     engine.clear_inbox();
