@@ -370,6 +370,10 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
                 "--a2a-public-url <url>",
                 "Public URL of a TLS front for --mode a2a",
             ),
+            (
+                "--a2a-clients <file>",
+                "JSON file of --mode a2a client names to tokens",
+            ),
         ],
     },
     OptionGroup {

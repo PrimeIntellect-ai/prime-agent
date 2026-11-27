@@ -143,14 +143,32 @@ fn run_a2a_mode(options: &RunOptions) -> Result<i32, String> {
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty());
     std::env::remove_var(crate::config::ENV_A2A_TOKEN);
-    let (bearer_token, minted_token_dir) = match configured {
-        Some(token) => (token, None),
-        None => (
-            format!(
+    // A single token is one implicit client.
+    let single = |token: String| std::collections::BTreeMap::from([("default".to_string(), token)]);
+    let (clients, minted_token_dir) = match (&options.a2a.clients_file, configured) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "--a2a-clients and {} both name the A2A clients; set one",
+                crate::config::ENV_A2A_TOKEN
+            ))
+        }
+        (Some(path), None) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| format!("reading --a2a-clients {path}: {error}"))?;
+            let clients = serde_json::from_str(&text).map_err(|error| {
+                format!(
+                    "--a2a-clients {path} must be a JSON object of client name to token: {error}"
+                )
+            })?;
+            (clients, None)
+        }
+        (None, Some(token)) => (single(token), None),
+        (None, None) => (
+            single(format!(
                 "{}{}",
                 uuid::Uuid::new_v4().simple(),
                 uuid::Uuid::new_v4().simple()
-            ),
+            )),
             Some(options.config.agent_dir.clone()),
         ),
     };
@@ -174,7 +192,7 @@ fn run_a2a_mode(options: &RunOptions) -> Result<i32, String> {
                 .clone()
                 .unwrap_or_else(|| "127.0.0.1".to_string()),
             bind_port: options.a2a.port.unwrap_or(7800),
-            bearer_token,
+            clients,
             minted_token_dir,
             max_contexts: options.a2a.max_contexts.unwrap_or(64),
             public_url: options.a2a.public_url.clone(),
