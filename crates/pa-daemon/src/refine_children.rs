@@ -194,8 +194,8 @@ impl AgentSessionEngine {
         true
     }
 
-    /// Apply the oldest parked outcome at the session's idle boundary.
-    /// `None` when nothing is parked.
+    /// Apply the oldest parked outcome at the session's idle boundary,
+    /// with its flight's source. `None` when nothing is parked.
     pub(crate) async fn apply_pending_refine_outcome(
         &self,
     ) -> Option<(RefinementSource, anyhow::Result<CommittedRefinement>)> {

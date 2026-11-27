@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-/// One parked refinement outcome's idle-boundary apply, with who triggered
-/// the refinement (`None` when the engine has nothing parked).
+/// One parked refinement outcome's idle-boundary apply, with who
+/// triggered the refinement (`None` when the engine has nothing parked).
 pub type PendingRefineApply<'a> = std::pin::Pin<
     Box<
         dyn std::future::Future<
