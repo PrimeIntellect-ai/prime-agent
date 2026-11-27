@@ -1,0 +1,1 @@
+- `rlm.spawn(..., target="sandbox", bots=True)` raised `TypeError` from the kernel REPL: the `rlm` namespace wrapper missed the `bots` parameter that the module-level `spawn()` already forwards. The wrapper now forwards it too.

@@ -1031,6 +1031,7 @@ class _RLMNamespace:
         kind: str | None = None,
         target: str | None = None,
         github: bool | None = None,
+        bots: bool | None = None,
     ) -> RLMSpawnHandle:
         return await spawn(
             prompt,
@@ -1041,6 +1042,7 @@ class _RLMNamespace:
             kind=kind,
             target=target,
             github=github,
+            bots=bots,
         )
 
     async def create_session(
