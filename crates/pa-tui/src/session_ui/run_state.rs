@@ -49,7 +49,6 @@ impl RunState {
                 Idle | Submitted | Admitted | Running,
                 RunEvent::Ended | RunEvent::Attached { streaming: false },
             )
-            | (Submitted | Admitted, RunEvent::Interrupted)
             // A definitive failure with nothing else in flight means no run is
             // coming, so it returns to idle from `Submitted` AND from `Admitted`:
             // a delayed `Admitted` that acknowledged an OLDER submission can
@@ -58,7 +57,8 @@ impl RunState {
             // sets `Running` anyway.
             | (
                 Submitted | Admitted,
-                RunEvent::SubmitFailed {
+                RunEvent::Interrupted
+                | RunEvent::SubmitFailed {
                     others_in_flight: false,
                 },
             ) => Idle,
