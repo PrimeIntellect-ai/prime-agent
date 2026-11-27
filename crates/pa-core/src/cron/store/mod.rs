@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{is_heartbeat_cron_job, AgentCronJob, AgentCronSchedule, DeliveryMode, JobStatus};
+use super::{is_heartbeat_cron_job, AgentCronJob, DeliveryMode, JobStatus};
 
 mod heartbeat;
 mod jobs;
@@ -107,6 +107,9 @@ impl AgentCronJobStore {
         }
     }
 
+    /// The listed heartbeat rows as one comparable string: any change a client renders (a fire
+    /// rolling `nextRunAt`, the run count, the last error) changes it, so a fire broadcasts
+    /// `heartbeats_changed` like a create or pause does.
     pub(crate) fn heartbeat_catalog_signature(jobs: &[AgentCronJob]) -> String {
         let mut heartbeat_jobs: Vec<&AgentCronJob> = jobs
             .iter()
@@ -116,27 +119,7 @@ impl AgentCronJobStore {
             })
             .collect();
         heartbeat_jobs.sort_by(|left, right| left.id.cmp(&right.id));
-        serde_json::to_string(
-            &heartbeat_jobs
-                .into_iter()
-                .map(|job| HeartbeatCatalogEntry {
-                    id: job.id.clone(),
-                    status: job.status,
-                    source: job.source.clone(),
-                    runtime_kind: job.runtime_kind.clone(),
-                    delivery_mode: job.delivery_mode,
-                    active_session_id: job.active_session_id.clone(),
-                    session_id: job.session_id.clone(),
-                    session_file: job.session_file.clone(),
-                    cwd: job.cwd.clone(),
-                    label: job.label.clone(),
-                    prompt: job.prompt.clone(),
-                    schedule: job.schedule.clone(),
-                    created_at: job.created_at.clone(),
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_default()
+        serde_json::to_string(&heartbeat_jobs).unwrap_or_default()
     }
 }
 
@@ -205,24 +188,6 @@ pub struct DispatchResultOptions {
     pub now: Option<u64>,
     pub outcome: &'static str, // "ran" | "skipped"
     pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HeartbeatCatalogEntry {
-    id: String,
-    status: JobStatus,
-    source: Option<String>,
-    runtime_kind: Option<String>,
-    delivery_mode: Option<DeliveryMode>,
-    active_session_id: String,
-    session_id: String,
-    session_file: String,
-    cwd: String,
-    label: Option<String>,
-    prompt: String,
-    schedule: AgentCronSchedule,
-    created_at: String,
 }
 
 /// Shared builder for [`CreateAgentCronJobInput`] used by the store's tests.
