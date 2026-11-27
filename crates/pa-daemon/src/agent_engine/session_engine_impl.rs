@@ -388,14 +388,8 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
-    /// The live-slot identity check: the store a replacement retired is
-    /// not the session's published inbox (the consumed withdrawal's
-    /// re-check consults this under the core lock).
-    fn inbox_is_live(
-        &self,
-        inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
-    ) -> bool {
-        self.is_live_inbox(inbox)
+    fn inbox_store(&self) -> Option<std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>> {
+        self.inbox()
     }
 
     fn configure_service_tier(&self, tier: Option<pa_types::ai::ServiceTier>) {

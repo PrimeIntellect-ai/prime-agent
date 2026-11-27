@@ -31,10 +31,6 @@ pub(super) struct TurnRunner {
     /// runner reads it at every boundary so a create-time rebind is always
     /// current.
     pub(super) herdr: std::sync::Arc<std::sync::Mutex<crate::herdr::HerdrReporter>>,
-    /// The batch the queued inbox arrival row covers (the worker's
-    /// `inbox_arrivals`) and the engine whose live inbox it consumes from.
-    pub(super) inbox_arrivals: pa_core::session_engine::inbox::InboxArrivals,
-    pub(super) inbox_engine: Option<std::sync::Weak<crate::agent_engine::AgentSessionEngine>>,
 }
 
 /// The idle-passivation context on the turn runner: the worker token
@@ -49,13 +45,8 @@ impl TurnRunner {
     pub(super) async fn run(self) {
         loop {
             let engine = self.engine.clone();
-            // The live inbox store, fetched before the core lock (its slot
-            // has its own mutex): a picked arrival row consumes from it.
-            let inbox = self
-                .inbox_engine
-                .as_ref()
-                .and_then(std::sync::Weak::upgrade)
-                .and_then(|engine| engine.inbox());
+            // The live inbox store: a picked arrival row consumes from it.
+            let inbox = engine.inbox_store();
             let mut inbox_hold = None;
             let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
@@ -78,12 +69,12 @@ impl TurnRunner {
                 } else if core.steering.front().is_some() {
                     Some((
                         Lane::Steering,
-                        self.pick(&mut core, Lane::Steering, inbox.as_ref()),
+                        Self::pick(&mut core, Lane::Steering, inbox.as_ref()),
                     ))
                 } else if core.follow_up.front().is_some() {
                     Some((
                         Lane::FollowUp,
-                        self.pick(&mut core, Lane::FollowUp, inbox.as_ref()),
+                        Self::pick(&mut core, Lane::FollowUp, inbox.as_ref()),
                     ))
                 } else {
                     core.busy = false;
@@ -200,7 +191,6 @@ impl TurnRunner {
     /// [`deliver_inbox_arrival_row_locked`]; its accepted row consumes what
     /// it shows.
     fn pick(
-        &self,
         core: &mut SessionCore,
         lane: Lane,
         inbox: Option<&std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>>,
@@ -211,7 +201,7 @@ impl TurnRunner {
                 .iter_mut()
                 .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
             {
-                deliver_inbox_arrival_row_locked(core, item, &self.inbox_arrivals, inbox);
+                deliver_inbox_arrival_row_locked(core, item, inbox);
             }
         }
         core.running_admission_ids = items
@@ -399,17 +389,12 @@ impl TurnRunner {
         let agent_message_wake = matches!(
             first.queue_key.as_deref(),
             Some(INBOX_ARRIVAL_QUEUE_KEY | super::INBOX_REMINDER_QUEUE_KEY)
-        ) && self
-            .inbox_engine
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-            .and_then(|engine| engine.inbox())
-            .is_some_and(|inbox| {
-                inbox
-                    .count()
-                    .2
-                    .contains_key(pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE)
-            });
+        ) && self.engine.inbox_store().is_some_and(|inbox| {
+            inbox
+                .count()
+                .2
+                .contains_key(pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE)
+        });
         if let Some(client_id) = first
             .admission_id
             .as_deref()
@@ -542,12 +527,7 @@ impl TurnRunner {
         let arrival_row = items
             .iter()
             .position(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY));
-        let inbox_arrivals = self.inbox_arrivals.clone();
-        let inbox = self
-            .inbox_engine
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-            .and_then(|engine| engine.inbox());
+        let inbox = self.engine.inbox_store();
         // The accepted prefix must survive an engine panic after persistence.
         let accepted_prefix = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let accepted_prefix_seen = Arc::clone(&accepted_prefix);
@@ -827,7 +807,7 @@ impl TurnRunner {
                         .as_ref()
                         .filter(|_| arrival_row == Some(accepted_rows - 1))
                     {
-                        consume_shown_inbox_items_locked(&mut core, &inbox_arrivals, inbox);
+                        consume_shown_inbox_items_locked(&mut core, inbox);
                     }
                     if accepted_rows == 1 {
                         if let Some(active) = core.active_action.as_mut() {

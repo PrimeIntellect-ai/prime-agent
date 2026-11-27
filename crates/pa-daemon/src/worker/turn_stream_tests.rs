@@ -82,8 +82,6 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
             worker_token: String::new(),
         },
         herdr: std::sync::Arc::new(std::sync::Mutex::new(crate::herdr::HerdrReporter::default())),
-        inbox_arrivals: pa_core::session_engine::inbox::InboxArrivals::default(),
-        inbox_engine: None,
     }
 }
 

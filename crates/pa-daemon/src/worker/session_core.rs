@@ -109,7 +109,7 @@ pub(crate) struct SessionCore {
     pub(crate) active_action: Option<crate::types::SessionActionActive>,
     /// The earliest instant the queued inbox arrival row may start a turn on
     /// an idle session (the success hold or the debounce, see
-    /// `inbox_router::wake_delay`); cleared when the row delivers.
+    /// `inbox_wake_row::wake_delay`); cleared when the row delivers.
     pub(crate) inbox_wake_due: Option<tokio::time::Instant>,
     /// The inbox items the picked arrival row shows: its accepted
     /// transcript row withdraws them, so a turn that never accepts the row

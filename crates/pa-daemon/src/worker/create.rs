@@ -398,6 +398,12 @@ impl Worker {
         if !store.path.as_os_str().is_empty() {
             self.engine.set_session_file(store.path.clone());
         }
+        // The session's inbox opens with the session (before the closed
+        // marker clears below), so notices route into it before the first
+        // build.
+        if let Some(agent_engine) = &self.agent_engine {
+            agent_engine.open_inbox();
+        }
 
         // The `models` patterns (else settings `enabledModels`) resolve once into
         // the scoped list, AFTER the store open (the saved-model restore's wait
@@ -599,6 +605,11 @@ impl Worker {
             core.child_script.clone_from(&child_script);
             (self.summary_locked(&core, inputs), rlm_depth)
         };
+        // Mail that waited while the session was closed (or arrived
+        // before this worker) gets one arrival notice now.
+        if let Some(router) = &self.inbox_router {
+            router.announce_waiting();
+        }
         // The engine's agent-level queues drain per the same modes the
         // worker lane delivers by.
         self.engine

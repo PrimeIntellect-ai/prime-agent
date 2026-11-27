@@ -676,10 +676,6 @@ impl AgentSessionEngine {
             .quota_park
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        // The retired session's inbox goes with it: a replacement's
-        // build installs the next session's store, so a retired store
-        // can never serve reads or take appends across the swap.
-        self.clear_inbox();
         // The retired session's provider target goes with it: a pre-build demand seam resolves the
         // CURRENT model.
         *self.provider_target.write().expect("provider target lock") = None;
@@ -1000,25 +996,14 @@ impl AgentSessionEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        // The session's agent inbox (the worker's notice sink routes
-        // `bash.completed`/`factory.progress` into it; the kernel reads
-        // it through `rlm.inbox.*`): the journal lives in the session's
-        // own artifact dir — the same per-session dir the kernel state
-        // and the harness state use — so a restart replays.
-        let inbox_dir = session_file
-            .as_deref()
-            .and_then(pa_core::session_engine::harness_digest::session_artifact_dir_for_log);
-        // A failed build leaves its published store behind: the next
-        // attempt over the same journal reuses it instead of racing a
-        // fresh open's compaction against its appends.
-        let inbox = pa_core::session_engine::inbox::SessionInbox::open_or_reuse(
-            self.inbox().as_ref(),
-            inbox_dir.as_deref(),
-        );
-        if let Some(hook) = self.inbox_read_hook() {
-            inbox.set_read_hook(hook);
-        }
-        self.set_inbox(std::sync::Arc::clone(&inbox));
+        // The session's agent inbox (the kernel reads it through
+        // `rlm.inbox.*`): the store the session opened. A closed session
+        // keeps the published store: a replacement points it at the new
+        // session before the session file moves.
+        let inbox = match self.inbox().filter(|_| self.session_is_closed()) {
+            Some(inbox) => inbox,
+            None => self.open_inbox(),
+        };
         // The engine session stays non-persisted (the worker owns the
         // durable file); the configured session dir leads, the file's
         // parent is the fallback.

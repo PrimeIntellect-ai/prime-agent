@@ -147,11 +147,14 @@ pub struct AgentSessionEngine {
     /// and the work auto-backgrounds.
     pub(crate) cell_wake: std::sync::Arc<pa_core::kernel::cell_wake::CellWake>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
-    /// The current session's agent inbox store (the notice sink routes
-    /// `bash.completed`/`factory.progress` messages into it); set at
-    /// every session build.
-    pub(crate) inbox:
-        std::sync::Mutex<Option<std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>>>,
+    /// The current session's agent inbox store and the session artifact
+    /// dir it was opened for (see `open_inbox`).
+    pub(crate) inbox: std::sync::Mutex<
+        Option<(
+            Option<std::path::PathBuf>,
+            std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+        )>,
+    >,
     /// The worker's post-drain inbox seam (see `set_inbox_read_hook`).
     pub(crate) inbox_read_hook:
         std::sync::Mutex<Option<pa_core::session_engine::inbox::InboxReadHook>>,
@@ -166,7 +169,7 @@ pub struct AgentSessionEngine {
     pub(crate) registered_jobs_probe:
         std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// The worker-owned session file (conversation-log path), set at create.
-    session_file: std::sync::Mutex<Option<std::path::PathBuf>>,
+    pub(crate) session_file: std::sync::Mutex<Option<std::path::PathBuf>>,
     /// The authoritative model selection: the process fallback, re-bound when
     /// a create carries explicit wire flags.
     selection: std::sync::RwLock<EngineModelSelection>,

@@ -1,9 +1,10 @@
 //! The daemon's inbox wake row: how much one row carries (rule 3), when an
 //! idle session takes it (rules 2 and 4), and what its delivery consumes.
 //! The queue admission in `queue.rs` owns the state: the durable inbox
-//! holds every message, the coalescing batch holds the messages one queued
-//! row covers, and the row itself is the wake. A read before delivery
-//! withdraws the message (rule 1, driven by the kernel's lifecycle in
+//! holds every message, the queued row's covers name the messages it
+//! announces, and the row itself is the wake. Which notices reach the
+//! inbox at all is the router's call (`agent_inbox::InboxRouter`). A read
+//! before delivery withdraws the message (rule 1, driven by the kernel's lifecycle in
 //! `prime-agent-runtime/src/rlm/inbox_lifecycle.py`). Every unread arrival
 //! reaches the agent: a busy session folds it into the live turn, and an
 //! idle session takes the row once its due time passes, so an agent that
@@ -14,7 +15,7 @@ mod tests;
 
 use pa_core::session_engine::inbox::{arrival_notice, arrival_summary, InboxMessage, InboxNotice};
 use pa_core::settings::{Settings, SettingsManager};
-use pa_types::inbox_notice::INBOX_CLASS_BASH_DONE;
+use pa_types::inbox_notice::{INBOX_CLASS_BASH_DONE, INBOX_CLASS_HEARTBEAT};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -26,14 +27,18 @@ const INLINE_TAIL_MAX_LINES: usize = 5;
 const INLINE_TAIL_MAX_BYTES: usize = 400;
 
 /// How long an idle session waits before one arrival's wake row may start
-/// a turn: a successful bash completion is held
-/// (`agentInbox.successHoldMs`), anything else waits out the debounce
-/// window (`agentInbox.idleDebounceMs`); the heartbeat route admits with
-/// no delay. Without an engine (a bare test core), the defaults.
+/// a turn: a heartbeat fire is a scheduled turn and wakes at once, a
+/// successful bash completion is held (`agentInbox.successHoldMs`), and
+/// anything else waits out the debounce window
+/// (`agentInbox.idleDebounceMs`). Without an engine (a bare test core),
+/// the defaults.
 pub(crate) fn wake_delay(
     notice: &InboxNotice,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) -> Duration {
+    if notice.class == INBOX_CLASS_HEARTBEAT {
+        return Duration::ZERO;
+    }
     let settings = match engine {
         Some(engine) => SettingsManager::create(engine.cwd(), &engine.config.agent_dir),
         None => SettingsManager::in_memory(&Settings::default()),

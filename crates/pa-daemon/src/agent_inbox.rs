@@ -1,51 +1,70 @@
-//! The daemon's agent-inbox seams: the settings gate (`agentInbox.*`), the
-//! engine's per-session store slot the worker's notice sink and reminder
-//! read, and the periodic unread-reminder task. The store itself, its
-//! journal, and the `rlm.inbox.*` host requests live in pa-core
-//! (`session_engine::inbox`).
+//! The daemon's agent-inbox routing: the settings gate (`agentInbox.*`),
+//! the engine's per-session store slot, the [`InboxRouter`] every notice
+//! source goes through, and the periodic unread-reminder task. The store
+//! itself, its journal, and the `rlm.inbox.*` host requests live in
+//! pa-core (`session_engine::inbox`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
-use pa_core::session_engine::inbox::SessionInbox;
+use pa_core::session_engine::inbox::{InboxNotice, SessionInbox};
+use pa_types::inbox_notice::{INBOX_CLASS_AGENT_MESSAGE, INBOX_CLASS_HEARTBEAT};
 
 use crate::agent_engine::AgentSessionEngine;
 use crate::journal::WorkerRecoveryJournal;
-use crate::worker::SessionCore;
+use crate::worker::{
+    admit_inbox_reminder, announce_waiting_inbox, checkpoint_queue_recovery,
+    clear_withdrawn_progress_note, refresh_inbox_wake_rows, store_and_announce, wake_delay,
+    EventPump, Lane, QueueCheckpoint, SessionCore,
+};
 
 /// The poll period while the reminder is disabled (`reminderIntervalMs`
 /// of `0`): a later settings flip still arms it.
 const INBOX_REMINDER_DISABLED_POLL_MS: u64 = 60_000;
 
 impl AgentSessionEngine {
-    /// The current session's inbox store, set at every session build.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the inbox slot lock is poisoned.
-    pub(crate) fn set_inbox(&self, inbox: Arc<SessionInbox>) {
-        *self
-            .inbox
+    /// The inbox store for the current session file, opened and
+    /// published on first use (see [`Self::open_inbox_at`]). Runs when a
+    /// session opens (create, replacement), so notices route into the
+    /// inbox before the first build, and at every build of an open session.
+    pub(crate) fn open_inbox(&self) -> Arc<SessionInbox> {
+        let session_file = self
+            .session_file
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(inbox);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        self.open_inbox_at(session_file.as_deref())
     }
 
-    /// Drop the current session's inbox store (the retire seam: a
-    /// retired session's store never serves a replacement's rebuild).
+    /// The inbox store for one session file (`None`: an in-memory
+    /// session), opened and published unless the store already opened for
+    /// the same session dir is published (kept even when its journal could
+    /// not be read).
     ///
     /// # Panics
     ///
     /// Panics when the inbox slot lock is poisoned.
-    pub(crate) fn clear_inbox(&self) {
-        *self
+    pub(crate) fn open_inbox_at(&self, session_file: Option<&Path>) -> Arc<SessionInbox> {
+        let dir = session_file
+            .and_then(pa_core::session_engine::harness_digest::session_artifact_dir_for_log);
+        let mut slot = self
             .inbox
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, open)) = slot.as_ref().filter(|(open_dir, _)| *open_dir == dir) {
+            return Arc::clone(open);
+        }
+        let inbox = Arc::new(SessionInbox::open(dir.as_deref()));
+        if let Some(hook) = self.inbox_read_hook() {
+            inbox.set_read_hook(hook);
+        }
+        *slot = Some((dir, Arc::clone(&inbox)));
+        inbox
     }
 
     /// Install the worker's post-drain seam for the inbox (the wake-row
-    /// refresh): every session build copies it onto the freshly opened
-    /// store, and the kernel's read handler runs it after each drain.
+    /// refresh): every opened store gets it, and the kernel's read
+    /// handler runs it after each drain.
     ///
     /// # Panics
     ///
@@ -69,7 +88,7 @@ impl AgentSessionEngine {
             .clone()
     }
 
-    /// The current session's inbox store, when a session is built.
+    /// The current session's inbox store, once a session opened.
     ///
     /// # Panics
     ///
@@ -78,85 +97,222 @@ impl AgentSessionEngine {
         self.inbox
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Whether the given store is still the session's published inbox: the
-    /// reminder cycle (and any read-and-queue admission) verifies its
-    /// captured store under the slot's own mutex, so a replacement that
-    /// installed the next session's store never admits over the retired
-    /// one's count.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the inbox slot lock is poisoned.
-    pub(crate) fn is_live_inbox(&self, inbox: &Arc<SessionInbox>) -> bool {
-        self.inbox
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, inbox))
+            .map(|(_, inbox)| Arc::clone(inbox))
     }
+}
 
-    /// The identity-checked durable push: the slot identity is re-checked
-    /// and the notice appended under the SLOT's own mutex (the same lock the
-    /// retire's [`Self::clear_inbox`] takes), so a concurrent retire — or a
-    /// `create` replacement that installs the next session's store — either
-    /// waits for this append (the replacement's build can only open the
-    /// journal after the clear, with the record already on disk) or lands
-    /// first and this call answers `None` (the sender retries into the
-    /// replacement store). A retired store never takes an append that could
-    /// race the next build's reopen and compaction of the same journal, and
-    /// a delivery can never succeed against a store the replacement cannot
-    /// read.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the inbox slot lock is poisoned.
-    pub(crate) fn push_to_live_inbox(
-        &self,
-        inbox: &Arc<SessionInbox>,
-        notice: pa_core::session_engine::inbox::InboxNotice,
-        at_ms: u64,
-    ) -> Option<pa_core::session_engine::inbox::InboxMessage> {
-        let slot = self
-            .inbox
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !slot
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, inbox))
-        {
-            return None;
+/// The one place that decides, for every machine notice (bash and
+/// factory notices, agent messages, child exits, heartbeat fires),
+/// whether it lands in the session's inbox or is delivered directly, and
+/// that keeps the inbox wake rows in step with the store.
+///
+/// Every inbox step runs inside one `SessionCore` critical section with
+/// the store looked up under it. A session's store is only swapped while
+/// the session is closed, and a closed session's notice is stored without
+/// a wake row, so a row never announces another session's store.
+#[derive(Clone)]
+pub(crate) struct InboxRouter {
+    engine: Weak<AgentSessionEngine>,
+    core: Arc<Mutex<SessionCore>>,
+    recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
+    work_notify: Arc<crate::worker::WorkNotify>,
+    events: Arc<EventPump>,
+    agent_dir: PathBuf,
+}
+
+impl InboxRouter {
+    pub(crate) fn new(
+        engine: &Arc<AgentSessionEngine>,
+        core: &Arc<Mutex<SessionCore>>,
+        recovery: &Arc<Mutex<Option<WorkerRecoveryJournal>>>,
+        work_notify: &Arc<crate::worker::WorkNotify>,
+        events: &Arc<EventPump>,
+        agent_dir: &Path,
+    ) -> Self {
+        Self {
+            engine: Arc::downgrade(engine),
+            core: Arc::clone(core),
+            recovery: Arc::clone(recovery),
+            work_notify: Arc::clone(work_notify),
+            events: Arc::clone(events),
+            agent_dir: agent_dir.to_path_buf(),
         }
-        Some(inbox.push(notice, at_ms))
     }
 
-    /// The identity-checked withdrawal of a heartbeat job's waiting
-    /// fires, under the slot's mutex like [`Self::push_to_live_inbox`]:
-    /// a retired store never journals a withdrawal that could race the
-    /// replacement's reopen of the same journal. `None` when the store
-    /// is no longer the session's published inbox.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the inbox slot lock is poisoned.
-    pub(crate) fn withdraw_heartbeat_from_live_inbox(
+    /// The engine while notices route to the inbox (`agentInbox.enabled`).
+    fn routing_engine(&self) -> Option<Arc<AgentSessionEngine>> {
+        let engine = self.engine.upgrade()?;
+        inbox_enabled(&engine.cwd(), &self.agent_dir).then_some(engine)
+    }
+
+    /// Route one notice into the inbox: it is stored, and the queued
+    /// arrival row announces it (a closing session only stores it; the
+    /// next session open announces it). Returns whether the announcement
+    /// waits behind a running turn, or `None` when the caller delivers
+    /// the notice directly (`agentInbox.enabled` is off).
+    pub(crate) fn route(&self, notice: InboxNotice, lane: Lane) -> Option<bool> {
+        // Read before the lock: the settings lookup touches the disk.
+        let wake_delay = wake_delay(&notice, self.engine.upgrade().as_deref());
+        self.admission(|core, inbox, closed| {
+            (
+                store_and_announce(core, inbox, closed, notice, lane, wake_delay),
+                true,
+            )
+        })
+    }
+
+    /// Store one notice in the session's inbox without announcing it: an
+    /// orphaned worker (its supervisor is lost) starts no turn, and the
+    /// session's next open announces what waits. Runs whatever
+    /// `agentInbox.enabled` says, so the notice is never dropped. Returns
+    /// whether the notice was stored.
+    pub(crate) fn store_unannounced(&self, notice: InboxNotice) -> bool {
+        let Some(engine) = self.engine.upgrade() else {
+            return false;
+        };
+        let _core = self.core.lock().unwrap();
+        let Some(inbox) = engine.inbox() else {
+            return false;
+        };
+        inbox.push(notice, pa_core::autonomous::now_millis());
+        true
+    }
+
+    /// Run one inbox admission: `f` gets the locked core, the session's
+    /// store, and whether the session is closing, and answers its result
+    /// and whether it queued or changed a row (which checkpoints the
+    /// queue and wakes the turn runner on an open session). `None` when
+    /// notices do not route to the inbox (`agentInbox.enabled` off, no
+    /// session open).
+    pub(crate) fn admission<R>(
         &self,
-        inbox: &Arc<SessionInbox>,
-        job_id: &str,
-    ) -> Option<Vec<pa_core::session_engine::inbox::InboxMessage>> {
-        let slot = self
-            .inbox
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !slot
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, inbox))
-        {
-            return None;
+        f: impl FnOnce(&mut SessionCore, &SessionInbox, bool) -> (R, bool),
+    ) -> Option<R> {
+        let engine = self.routing_engine()?;
+        let (result, admitted, closed) = {
+            let mut core = self.core.lock().unwrap();
+            let inbox = engine.inbox()?;
+            let closed = engine.session_is_closed();
+            let (result, admitted) = f(&mut core, &inbox, closed);
+            (result, admitted, closed)
+        };
+        if admitted && !closed {
+            self.publish(QueueCheckpoint::Admitted {
+                operation: "steer_queued",
+            });
         }
-        Some(inbox.withdraw_heartbeat(job_id))
+        Some(result)
+    }
+
+    /// Remove messages from the store and refresh the wake rows over what
+    /// is left: `remove` runs inside the core critical section and
+    /// answers whether it removed anything. Runs whatever
+    /// `agentInbox.enabled` says, so rows queued before a flip still
+    /// follow the store.
+    pub(crate) fn withdraw(&self, remove: impl FnOnce(&mut SessionCore, &SessionInbox) -> bool) {
+        let Some(engine) = self.engine.upgrade() else {
+            return;
+        };
+        let changed = {
+            let mut core = self.core.lock().unwrap();
+            let Some(inbox) = engine.inbox() else {
+                return;
+            };
+            let changed = remove(&mut core, &inbox) && refresh_inbox_wake_rows(&mut core, &inbox);
+            // The idle-session progress note clears only once the lanes it
+            // reported on are final.
+            clear_withdrawn_progress_note(&core, engine.as_ref());
+            changed
+        };
+        if changed {
+            self.publish(QueueCheckpoint::Settle {
+                operation: "queue_mutated",
+            });
+        }
+    }
+
+    /// The post-read refresh: `rlm.inbox.read` drained messages, so the
+    /// wake rows that promised them retract or re-render.
+    pub(crate) fn refresh_after_read(&self) {
+        self.withdraw(|_, _| true);
+    }
+
+    /// Announce the messages already waiting when a session opens (a
+    /// wake, a resume, a replacement): one arrival row covers every
+    /// waiting message no queued row announces yet.
+    pub(crate) fn announce_waiting(&self) {
+        self.admission(|core, inbox, _| ((), announce_waiting_inbox(core, inbox)));
+    }
+
+    /// One reminder cycle: queue the unread reminder while the session is
+    /// open and its inbox holds messages.
+    pub(crate) fn remind(&self) {
+        self.admission(|core, inbox, closed| ((), !closed && admit_inbox_reminder(core, inbox)));
+    }
+
+    /// The queue checkpoint, the turn runner's wake, and the queue strip
+    /// refresh after a row changed.
+    fn publish(&self, checkpoint: QueueCheckpoint) {
+        checkpoint_queue_recovery(&self.recovery, &self.core, checkpoint);
+        self.work_notify.notify_one();
+        let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
+    }
+}
+
+/// Move the waiting agent messages and heartbeat fires from the outgoing
+/// session's inbox into the successor's (a new session or a fork continues
+/// the conversation, and the session's scheduled jobs rebind onto it, so a
+/// fire follows its job and the job's pause or delete withdraws it). Bash,
+/// child, and factory notices stay with their session: they are about that
+/// session's own work. The successor's
+/// copies are written first and the outgoing records removed after (only
+/// once the copies are durable), so a crash leaves a message in both
+/// inboxes, never in neither. Each copy keeps its arrival time and carries
+/// `meta.movedFrom` (`<session id>/<inbox id>`), so a repeated move after
+/// such a crash never adds a second copy.
+pub(crate) fn move_waiting_messages(from: &SessionInbox, to: &SessionInbox, from_session: &str) {
+    let already_moved: Vec<String> = to
+        .waiting_messages()
+        .into_iter()
+        .filter_map(|message| {
+            message
+                .meta
+                .get("movedFrom")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    let mut moved = std::collections::BTreeSet::new();
+    for (class, message) in from.waiting_messages().into_iter().filter_map(|message| {
+        let class = [INBOX_CLASS_AGENT_MESSAGE, INBOX_CLASS_HEARTBEAT]
+            .into_iter()
+            .find(|class| *class == message.class)?;
+        Some((class, message))
+    }) {
+        let origin = format!("{from_session}/{}", message.id);
+        if !already_moved.contains(&origin) {
+            let mut meta = message.meta;
+            if !meta.is_object() {
+                meta = serde_json::json!({});
+            }
+            meta["movedFrom"] = serde_json::json!(origin);
+            to.push(
+                InboxNotice {
+                    class,
+                    sender: message.sender,
+                    text: message.text,
+                    meta,
+                },
+                message.arrived_at_ms,
+            );
+        }
+        moved.insert(message.id);
+    }
+    // A memory-only successor (its journal write failed) keeps the
+    // outgoing records: a crash must not lose what it cannot persist.
+    if to.persistence_error().is_none() {
+        from.withdraw_ids(&moved);
     }
 }
 
@@ -174,26 +330,15 @@ pub(crate) fn reminder_interval_ms(cwd: &Path, agent_dir: &Path) -> u64 {
 
 /// The periodic unread reminder: while the session's inbox stays
 /// non-empty, one steering row repeats the waiting count every
-/// `reminderIntervalMs`; the interval re-reads each cycle — including
-/// after the wait, so a flip to `0` never admits — and an empty inbox,
-/// a `0` interval, a closed session, or `agentInbox.enabled: false`
-/// skips the cycle (the period resets when it drains; a closed session
-/// keeps polling so a later session on the worker re-arms the loop).
-pub(crate) fn spawn_inbox_reminder(
-    engine: Weak<AgentSessionEngine>,
-    core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<crate::worker::WorkNotify>,
-    recovery: &Arc<Mutex<Option<WorkerRecoveryJournal>>>,
-    agent_dir: &std::path::Path,
-) {
-    let core = Arc::clone(core);
-    let work_notify = Arc::clone(work_notify);
-    let recovery = Arc::clone(recovery);
-    let agent_dir = agent_dir.to_path_buf();
+/// `reminderIntervalMs`. The interval re-reads each cycle (also after
+/// the wait, so a flip to `0` never admits); a `0` interval, an empty
+/// inbox, a closed session, or `agentInbox.enabled: false` skips the
+/// cycle.
+pub(crate) fn spawn_inbox_reminder(router: InboxRouter) {
     tokio::spawn(async move {
         loop {
-            let interval_ms = match engine.upgrade() {
-                Some(engine) => reminder_interval_ms(&engine.cwd(), &agent_dir),
+            let interval_ms = match router.engine.upgrade() {
+                Some(engine) => reminder_interval_ms(&engine.cwd(), &router.agent_dir),
                 None => return,
             };
             let wait_ms = if interval_ms == 0 {
@@ -202,48 +347,16 @@ pub(crate) fn spawn_inbox_reminder(
                 interval_ms
             };
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-            // `0` disables the reminder: this cycle admits nothing; the
-            // poll re-reads the interval next cycle, so a later settings
-            // flip re-arms it.
             if interval_ms == 0 {
                 continue;
             }
-            let Some(engine) = engine.upgrade() else {
+            let Some(engine) = router.engine.upgrade() else {
                 return;
             };
-            // The interval re-reads after the wait too: a flip to `0`
-            // while this cycle slept never admits (the sample above only
-            // chose the wait).
-            if reminder_interval_ms(&engine.cwd(), &agent_dir) == 0 {
+            if reminder_interval_ms(&engine.cwd(), &router.agent_dir) == 0 {
                 continue;
             }
-            // A closed session skips the cycle instead of ending the
-            // loop: the worker outlives its sessions, so a later session
-            // on the same worker must re-arm the reminder.
-            if engine.session_is_closed() {
-                continue;
-            }
-            let Some(inbox) = engine.inbox() else {
-                continue;
-            };
-            // The kill switch re-reads each cycle: `agentInbox.enabled:
-            // false` never wakes the agent (the notice sink applies the
-            // same setting per notice).
-            if !inbox_enabled(&engine.cwd(), &agent_dir) {
-                continue;
-            }
-            let closed = {
-                let engine = std::sync::Arc::clone(&engine);
-                move || engine.session_is_closed()
-            };
-            crate::worker::admit_inbox_reminder(
-                &recovery,
-                &core,
-                &work_notify,
-                &inbox,
-                closed,
-                Some(engine.as_ref()),
-            );
+            router.remind();
         }
     });
 }

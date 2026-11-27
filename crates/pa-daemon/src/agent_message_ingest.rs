@@ -144,48 +144,43 @@ impl Worker {
             }
         }
         core.follow_up = retained_follow_up;
+        drop(core);
         // The inbox-routed deliveries: every waiting agent message leaves
         // the store (a clear that reports the messages gone must take them
         // out of `rlm.inbox.read()`), announced or not, and the wake rows
         // that referred to them refresh over what is left (an emptied
-        // inbox leaves no stale notice or reminder). The withdraw and the
-        // refresh run under the same core lock as the admission, so a
-        // delivery that raced the clear either lands before it (and
-        // leaves) or waits for it (and stays). A pause blocks new
+        // inbox leaves no stale notice or reminder). The router runs the
+        // withdraw and the refresh under the same core lock as the
+        // admission, so a delivery that raced the clear either lands before
+        // it (and leaves) or waits for it (and stays). A pause blocks new
         // deliveries only: accepted inbox records keep their success
         // receipts.
         let mut withdrawn_texts = Vec::new();
         let mut wake_on_follow_up = false;
-        let inbox = self
-            .agent_engine
-            .as_ref()
-            .and_then(|engine| engine.inbox())
-            .filter(|_| withdraw_inbox);
-        if let Some(inbox) = inbox {
-            // The batch rides ONE wake row (it never splits), so the
-            // row's lane before the refresh is the withdrawn prompts'
-            // lane in the reply; no row means older unread records only,
-            // and they follow the delivery default (steering).
-            wake_on_follow_up = core.follow_up.iter().any(|item| {
-                item.queue_key.as_deref() == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
+        if let Some(router) = self.inbox_router.as_ref().filter(|_| withdraw_inbox) {
+            router.withdraw(|core, inbox| {
+                // The batch rides ONE wake row, so the row's lane is the
+                // withdrawn prompts' lane in the reply; no row means older
+                // unread records only, and they follow the delivery default
+                // (steering).
+                wake_on_follow_up = core.follow_up.iter().any(|item| {
+                    item.queue_key.as_deref() == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
+                });
+                let ids = inbox
+                    .waiting_messages()
+                    .into_iter()
+                    .filter(|message| {
+                        message.class == pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE
+                    })
+                    .map(|message| message.id)
+                    .collect();
+                withdrawn_texts = inbox
+                    .withdraw_ids(&ids)
+                    .into_iter()
+                    .map(|message| message.text)
+                    .collect();
+                !withdrawn_texts.is_empty()
             });
-            let ids = inbox
-                .waiting_messages()
-                .into_iter()
-                .filter(|message| {
-                    message.class == pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE
-                })
-                .map(|message| message.id)
-                .collect();
-            let withdrawn = inbox.withdraw_ids(&ids);
-            if !withdrawn.is_empty() {
-                withdrawn_texts = withdrawn.into_iter().map(|message| message.text).collect();
-                crate::worker::refresh_inbox_wake_rows_locked(
-                    &mut core,
-                    &self.inbox_arrivals,
-                    &inbox,
-                );
-            }
         }
         // The withdrawn prompts report like the direct route's marker
         // rows: the reply says what the clear took, never an empty set
@@ -197,8 +192,10 @@ impl Worker {
         } else {
             steering.extend(withdrawn_texts);
         }
-        crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
-        drop(core);
+        crate::worker::clear_withdrawn_progress_note(
+            &self.core.lock().unwrap(),
+            self.engine.as_ref(),
+        );
         // The sweep may have settled the session: the verdict follows the remaining lanes.
         self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
             operation: "queue_mutated",

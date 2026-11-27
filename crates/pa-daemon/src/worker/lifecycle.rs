@@ -210,17 +210,16 @@ impl Worker {
     /// swapping onto the replacement file: the queued actions cancel, the runs
     /// abort and settle, then the runtime retires and the RLM children close.
     /// Tree moves never run this (the kernel stays warm).
-    pub(crate) async fn teardown_for_replacement(&self) -> anyhow::Result<()> {
-        // Mark the session closed before the children close: the marker keeps
-        // settle retries from minting continuations into the retiring session.
-        if let Some(agent_engine) = &self.agent_engine {
-            agent_engine.mark_session_closed();
-        }
-        {
-            let mut core = self.core.lock().unwrap();
-            core.steering.clear();
-            core.follow_up.clear();
-        }
+    /// `moves_agent_messages` hands the outgoing session's waiting agent
+    /// messages and heartbeat fires to the successor (a new session or a
+    /// fork continues the conversation; a switch to a saved session leaves
+    /// them for their own session's next open).
+    pub(crate) async fn teardown_for_replacement(
+        &self,
+        successor: &std::path::Path,
+        moves_agent_messages: bool,
+    ) -> anyhow::Result<()> {
+        self.retire_for_replacement(successor, moves_agent_messages);
         self.compaction.abort();
         self.tree_navigation.abort();
         self.await_replacement_settled().await;
@@ -229,6 +228,54 @@ impl Worker {
         // replacement fails with the old runtime already retired.
         self.close_rlm_children(crate::rlm_children::ChildCloseReason::Replaced)
             .await
+    }
+
+    /// The replacement's first step, one critical section: the session
+    /// closes, new mail routes to the successor's inbox, the waiting agent
+    /// messages move there when `moves_agent_messages`, the running turn
+    /// stops accepting rows, and the queued actions cancel.
+    pub(super) fn retire_for_replacement(
+        &self,
+        successor: &std::path::Path,
+        moves_agent_messages: bool,
+    ) {
+        let mut core = self.core.lock().unwrap();
+        // Mark the session closed before the children close: the marker keeps
+        // settle retries from minting continuations into the retiring session.
+        // From the same critical section on, mail for this worker lands in
+        // the successor's inbox (the successor's open announces it).
+        if let Some(agent_engine) = &self.agent_engine {
+            agent_engine.mark_session_closed();
+            let outgoing = agent_engine.inbox();
+            let outgoing_session = agent_engine
+                .session_file
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_deref()
+                .and_then(std::path::Path::file_stem)
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let successor_inbox = agent_engine
+                .open_inbox_at(Some(successor).filter(|path| !path.as_os_str().is_empty()));
+            if let Some(outgoing) = outgoing.filter(|outgoing| {
+                moves_agent_messages && !std::sync::Arc::ptr_eq(outgoing, &successor_inbox)
+            }) {
+                crate::agent_inbox::move_waiting_messages(
+                    &outgoing,
+                    &successor_inbox,
+                    &outgoing_session,
+                );
+            }
+        }
+        // The abort lands with the move: a row the running turn accepted
+        // after it would consume the moved mail from the outgoing inbox while
+        // the successor announces the copies.
+        if core.busy || core.compacting {
+            core.abort_requested = true;
+            core.turn_cancelled = true;
+        }
+        core.steering.clear();
+        core.follow_up.clear();
     }
 
     /// Close this session's supervisor-backed RLM children: every runtime
@@ -329,9 +376,15 @@ impl Worker {
     /// TS dispatch handlers that call `rebindCronJobsToState` after the
     /// runtime call.
     pub(crate) async fn refresh_replaced_session_state(&self) {
-        // The teardown closed the retired session; its successor starts live.
+        // The teardown closed the retired session; its successor starts
+        // live with its own inbox (opened before the closed marker
+        // clears), and mail already waiting there gets one notice.
         if let Some(agent_engine) = &self.agent_engine {
+            agent_engine.open_inbox();
             agent_engine.clear_session_closed();
+        }
+        if let Some(router) = &self.inbox_router {
+            router.announce_waiting();
         }
         let (rlm_depth, summary, child_script) = {
             let (mut core, inputs) = self.summary_inputs();

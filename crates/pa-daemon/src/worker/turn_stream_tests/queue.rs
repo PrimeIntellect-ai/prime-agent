@@ -1194,7 +1194,6 @@ mod withdrawal;
 struct DrainSweepEngine {
     core: std::sync::OnceLock<Arc<Mutex<SessionCore>>>,
     recovery: std::sync::OnceLock<Arc<Mutex<Option<WorkerRecoveryJournal>>>>,
-    arrivals: pa_core::session_engine::inbox::InboxArrivals,
     inbox: Arc<pa_core::session_engine::inbox::SessionInbox>,
     prompts: Mutex<Vec<String>>,
     mid_turn_snapshot: Mutex<Vec<crate::journal::WorkerQueueItemRecord>>,
@@ -1213,13 +1212,16 @@ impl SessionEngine for DrainSweepEngine {
         // and fired the drain seam: the sweep runs inside the read's own
         // host handler.
         self.inbox.drain();
-        withdraw_drained_inbox_notice(
-            self.recovery.get().expect("the runner's recovery"),
-            self.core.get().expect("the runner's core"),
-            &self.arrivals,
-            &self.inbox,
-            self,
-        );
+        let core = self.core.get().expect("the runner's core");
+        if refresh_inbox_wake_rows(&mut core.lock().unwrap(), &self.inbox) {
+            checkpoint_queue_recovery(
+                self.recovery.get().expect("the runner's recovery"),
+                core,
+                QueueCheckpoint::Settle {
+                    operation: "queue_mutated",
+                },
+            );
+        }
         // The durable snapshot read back MID-TURN (the crash window):
         // the swept reminder must already be gone from the journal.
         let snapshot = {
@@ -1295,7 +1297,6 @@ async fn a_draining_turn_sweeps_the_queued_reminder_and_parks_settled() {
     let engine = Arc::new(DrainSweepEngine {
         core: std::sync::OnceLock::new(),
         recovery: std::sync::OnceLock::new(),
-        arrivals: pa_core::session_engine::inbox::InboxArrivals::default(),
         inbox: Arc::clone(&inbox),
         prompts: Mutex::new(Vec::new()),
         mid_turn_snapshot: Mutex::new(Vec::new()),
@@ -1312,13 +1313,16 @@ async fn a_draining_turn_sweeps_the_queued_reminder_and_parks_settled() {
         core.steering
             .push_back(queued_prompt("drain the inbox", TurnPolicy::Queued));
     }
-    admit_inbox_reminder(
+    assert!(admit_inbox_reminder(
+        &mut runner.core.lock().unwrap(),
+        &inbox
+    ));
+    checkpoint_queue_recovery(
         &runner.recovery,
         &runner.core,
-        &runner.work_notify,
-        &inbox,
-        || false,
-        None,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
     );
     let running = tokio::spawn(async move { runner.run().await });
     // The park readiness: exactly one prompt ran (the reminder never

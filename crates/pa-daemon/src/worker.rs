@@ -21,23 +21,23 @@ mod connection;
 pub(crate) use connection::{AuthOutcome, ConnectionSink, EventPump, OutboundFrame};
 pub(crate) use summary::emit_action_update_fresh;
 
-mod inbox_router;
+mod inbox_wake_row;
 mod queue;
 
-pub(crate) use queue::admit_inbox_notice_locked;
+pub(crate) use inbox_wake_row::wake_delay;
 pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
-    admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_notice, admit_inbox_reminder,
-    admit_kernel_notice, checkpoint_queue_recovery, clear_withdrawn_progress_note,
+    admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_reminder, admit_kernel_notice,
+    announce_waiting_inbox, checkpoint_queue_recovery, clear_withdrawn_progress_note,
     consume_shown_inbox_items_locked, continues_session_work, deliver_inbox_arrival_row_locked,
     enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
     queue_lanes, queued_bash_completion_notices, queued_cell_completion_deliveries,
-    refresh_inbox_wake_rows_locked, restore_queue_snapshot, restored_turn_policy, row_wakes_a_cell,
-    withdraw_bash_completion_notice, withdraw_drained_inbox_notice, QueueCheckpoint, QueueLanes,
-    QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
-    INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
-    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    refresh_inbox_wake_rows, remove_keyed, restore_queue_snapshot, restored_turn_policy,
+    row_wakes_a_cell, store_and_announce, withdraw_bash_completion_notice, QueueCheckpoint,
+    QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
+    INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY,
+    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -190,9 +190,9 @@ pub struct Worker {
     pub(crate) agent_messages: crate::agent_message_ingest::AgentMessageIngest,
     /// Session input-pause leases: the admission gate the turn runner consults.
     pub(crate) input_pauses: crate::session_input_pause::InputPauseTable,
-    /// The inbox arrival batch the queued short notice covers: shared by
-    /// the kernel-notice sink and the agent-message delivery route.
-    pub(crate) inbox_arrivals: pa_core::session_engine::inbox::InboxArrivals,
+    /// The inbox router every machine notice source goes through (`None`
+    /// for scripted engines, which have no inbox).
+    pub(crate) inbox_router: Option<crate::agent_inbox::InboxRouter>,
     /// Session navigation: `new_session` / `switch_session` / `import_jsonl`,
     /// the shared replacement flow.
     pub(crate) navigation: crate::session_navigation::SessionNavigation,
@@ -423,10 +423,6 @@ impl Worker {
         // refinement engine instead of the agent engine.
         let refine_child =
             std::env::var_os(WORKER_REFINE_CHILD_ENV).is_some_and(|value| value == "1");
-        // The coalescing arrival batch the queued short notice covers:
-        // shared by the kernel-notice sink and the agent-message
-        // delivery route, so both classes extend the same batch.
-        let inbox_arrivals = pa_core::session_engine::inbox::InboxArrivals::default();
         // The turn runner's passivation context: shared by the engine
         // branches below (the roster context after them moves the worker
         // token into its queue; the refinement and decision engines take a
@@ -446,9 +442,10 @@ impl Worker {
         if decision_child {
             core.lock().unwrap().decision_child = true;
         }
-        let (engine, agent_engine): (
+        let (engine, agent_engine, inbox_router): (
             std::sync::Arc<dyn SessionEngine>,
             Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
+            Option<crate::agent_inbox::InboxRouter>,
         ) = if refine_child {
             // The refinement child runs the refinement engine, the
             // decision child the decision engine; every other session
@@ -460,7 +457,7 @@ impl Worker {
                     config.active_session_id.clone(),
                     worker_token.clone(),
                 ));
-            (engine, None)
+            (engine, None, None)
         } else if decision_child {
             // The Decision API child runs the decision engine.
             let engine: std::sync::Arc<dyn SessionEngine> =
@@ -471,7 +468,7 @@ impl Worker {
                     config.active_session_id.clone(),
                     worker_token.clone(),
                 ));
-            (engine, None)
+            (engine, None, None)
         } else {
             // Scripted sessions serve the integration harness; sessions
             // without a script run the real agent engine.
@@ -543,9 +540,19 @@ impl Worker {
                     }
                 }
             };
+            let inbox_router = agent_engine.as_ref().map(|concrete| {
+                crate::agent_inbox::InboxRouter::new(
+                    concrete,
+                    &core,
+                    &recovery,
+                    &work_notify,
+                    &events,
+                    &config.agent_dir,
+                )
+            });
             // The goal continuation seam (TS `getContinuationMessages`):
             // the worker owns the queue and gates, the engine owns the mint.
-            if let Some(concrete) = agent_engine.as_ref() {
+            if let (Some(concrete), Some(router)) = (agent_engine.as_ref(), inbox_router.as_ref()) {
                 // The in-run autonomous continuation seam: the hook holds
                 // itself weakly through the registered arc.
                 concrete.register_arc();
@@ -567,12 +574,7 @@ impl Worker {
                     std::sync::Arc::new(move || {
                         {
                             let mut core = purge_core.lock().unwrap();
-                            core.follow_up.retain(|item| {
-                                item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
-                            });
-                            core.steering.retain(|item| {
-                                item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
-                            });
+                            remove_keyed(&mut core, AUTONOMOUS_QUEUE_KEY);
                             if let Some(engine) = purge_engine.upgrade() {
                                 clear_withdrawn_progress_note(&core, engine.as_ref());
                             }
@@ -709,21 +711,13 @@ impl Worker {
                 // The kernel-notice wake seam (TS `_promptInjectedMessage`
                 // for `bash.completed` and `factory.progress`): the handlers
                 // validate, the sinks admit/withdraw through the queue lanes.
-                // With the agent inbox enabled (default), the notice's message
-                // lands in the session's durable inbox and ONE short steering
-                // notice wakes instead of the full row.
+                // The router lands the notice in the session's inbox; with
+                // `agentInbox.enabled: false` the full row steers directly.
                 let notice_engine = std::sync::Arc::downgrade(concrete);
                 let notice_core = Arc::clone(&core);
                 let notice_notify = Arc::clone(&work_notify);
                 let notice_recovery = Arc::clone(&recovery);
-                let notice_agent_dir = config.agent_dir.clone();
-                // The coalescing batch the queued notice row covers (routing
-                // state, reset when the row delivers or clears). The
-                // consumed-bash withdrawal shares it: a collected handle
-                // trims the same batch its arrival grew. The worker field
-                // keeps the batch shared with the agent-message route too.
-                let arrivals_for_sink = std::sync::Arc::clone(&inbox_arrivals);
-                let arrivals_for_consumed = std::sync::Arc::clone(&arrivals_for_sink);
+                let notice_router = router.clone();
                 let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |mut notice| {
                     let Some(engine) = notice_engine.upgrade() else {
                         return;
@@ -732,49 +726,29 @@ impl Worker {
                         return;
                     }
                     // An orphaned worker runs no turn nobody watches: the
-                    // notice waits in the durable inbox for the next open.
-                    // The inbox holds text, so a rich notice keeps its text.
+                    // notice waits in the durable inbox, unannounced, for
+                    // the next open. The inbox holds text, so a rich notice
+                    // keeps its text.
                     if notice_core.lock().unwrap().supervisor_lost {
                         notice.row.content =
                             pa_types::ai::UserContent::Text(notice.row.content.text());
-                        if let (Some(inbox), Some(fields)) = (
-                            engine.inbox(),
-                            pa_core::session_engine::inbox::inbox_notice_fields(&notice),
-                        ) {
-                            let now = pa_core::autonomous::now_millis();
-                            if engine.push_to_live_inbox(&inbox, fields, now).is_some() {
+                        if let Some(fields) =
+                            pa_core::session_engine::inbox::inbox_notice_fields(&notice)
+                        {
+                            if notice_router.store_unannounced(fields) {
                                 return;
                             }
+                        }
+                    } else if let Some(fields) =
+                        pa_core::session_engine::inbox::inbox_notice_fields(&notice)
+                    {
+                        if notice_router.route(fields, Lane::Steering).is_some() {
+                            return;
                         }
                     }
                     // Revalidated inside the admission's lock section: the
                     // close paths mark the session BEFORE clearing the lanes.
                     let closed = || engine.session_is_closed();
-                    if crate::agent_inbox::inbox_enabled(&engine.cwd(), &notice_agent_dir) {
-                        if let (Some(inbox), Some(fields)) = (
-                            engine.inbox(),
-                            pa_core::session_engine::inbox::inbox_notice_fields(&notice),
-                        ) {
-                            let admitted = admit_inbox_notice(
-                                &notice_recovery,
-                                &notice_core,
-                                &notice_notify,
-                                &inbox,
-                                &arrivals_for_sink,
-                                fields,
-                                Lane::Steering,
-                                closed,
-                                Some(engine.as_ref()),
-                            );
-                            if admitted.is_ok() {
-                                return;
-                            }
-                            // The store moved on between the capture and
-                            // the identity-checked push (a replacement
-                            // retired it): the notice must never vanish —
-                            // steer the full row like the inbox-off lane.
-                        }
-                    }
                     admit_kernel_notice(
                         &notice_recovery,
                         &notice_core,
@@ -783,27 +757,18 @@ impl Worker {
                         closed,
                     );
                 });
-                crate::agent_inbox::spawn_inbox_reminder(
-                    std::sync::Arc::downgrade(concrete),
-                    &core,
-                    &work_notify,
-                    &recovery,
-                    &config.agent_dir,
-                );
+                crate::agent_inbox::spawn_inbox_reminder(router.clone());
                 let withdraw_core = Arc::clone(&core);
                 let withdraw_recovery = Arc::clone(&recovery);
                 let withdraw_engine = Arc::downgrade(concrete);
                 let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
                     let engine = withdraw_engine.upgrade();
-                    // The consumed collection drains the pushed inbox
-                    // message too (the auto-read-on-collection parity):
-                    // a handle collected through its result leaves no
+                    // The collection removes the inbox message too: a
+                    // handle collected through its result leaves no
                     // waiting bash-done.
-                    let inbox = engine.as_ref().and_then(|engine| engine.inbox());
                     withdraw_bash_completion_notice(
                         &withdraw_recovery,
                         &withdraw_core,
-                        inbox.as_ref().map(|store| (store, &arrivals_for_consumed)),
                         &notice,
                         engine.as_deref().map(|engine| engine as &dyn SessionEngine),
                     );
@@ -826,7 +791,7 @@ impl Worker {
                     });
                 concrete.set_progress_note_emit(note_emit);
             }
-            (engine, agent_engine)
+            (engine, agent_engine, inbox_router)
         };
         if let Some(concrete) = agent_engine.as_ref() {
             concrete.set_usage_store(std::sync::Arc::new(CoreUsageStore {
@@ -876,8 +841,6 @@ impl Worker {
             user_bash: std::sync::Arc::clone(&user_bash),
             passivation,
             herdr: std::sync::Arc::clone(&herdr_slot),
-            inbox_arrivals: std::sync::Arc::clone(&inbox_arrivals),
-            inbox_engine: agent_engine.as_ref().map(std::sync::Arc::downgrade),
         };
         tokio::spawn(async move {
             runner.run().await;
@@ -920,47 +883,16 @@ impl Worker {
             std::sync::Arc::clone(&engine),
             Arc::clone(&core),
         );
-        // The scheduling seam: heartbeat fires route into the session's
-        // durable inbox (class `heartbeat`) instead of injecting the full
-        // delivery row, once the worker's engine exists.
-        if let Some(engine) = &agent_engine {
-            scheduled.set_inbox_seam(
-                std::sync::Arc::downgrade(engine),
-                std::sync::Arc::clone(&inbox_arrivals),
-                config.agent_dir.clone(),
-            );
-        }
-        // The worker's post-drain inbox seam: every session build copies
-        // it onto the freshly opened store, and the kernel's read handler
-        // runs it so drained wake rows retract or re-render (the drain
-        // sweep: the batch trim, the reminder re-render, the twin
-        // re-sync, the progress-note clear, the settled checkpoint) —
-        // and the queue strip refreshes for subscribed clients.
-        let hook_engine = std::sync::Arc::clone(&engine);
-        if let Some(engine) = &agent_engine {
-            let hook_core = Arc::clone(&core);
-            let hook_arrivals = std::sync::Arc::clone(&inbox_arrivals);
-            let hook_events = Arc::clone(&events);
-            let hook_recovery = Arc::clone(&recovery);
-            engine.set_inbox_read_hook(std::sync::Arc::new(
-                move |inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>| {
-                    if withdraw_drained_inbox_notice(
-                        &hook_recovery,
-                        &hook_core,
-                        &hook_arrivals,
-                        inbox,
-                        hook_engine.as_ref(),
-                    ) {
-                        // The projection recomputes under the emission
-                        // lock, so a concurrent admission's strip state
-                        // is never overwritten by a stale copy.
-                        let _ = crate::worker::summary::emit_action_update_fresh(
-                            &hook_core,
-                            &hook_events,
-                        );
-                    }
-                },
-            ));
+        if let (Some(engine), Some(router)) = (&agent_engine, &inbox_router) {
+            // Heartbeat fires route through the inbox router too.
+            scheduled.set_inbox_router(router.clone());
+            // The kernel's `rlm.inbox.read` runs this after each drain, so
+            // the wake rows that promised the drained messages retract or
+            // re-render.
+            let hook_router = router.clone();
+            engine.set_inbox_read_hook(std::sync::Arc::new(move |_| {
+                hook_router.refresh_after_read();
+            }));
         }
         Worker {
             config,
@@ -995,7 +927,7 @@ impl Worker {
             roster_pushes,
             agent_messages: crate::agent_message_ingest::AgentMessageIngest::new(),
             input_pauses,
-            inbox_arrivals,
+            inbox_router,
             navigation,
             prompt_admissions,
             scheduled,

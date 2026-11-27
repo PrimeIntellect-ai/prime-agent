@@ -337,7 +337,14 @@ impl Worker {
         // are one critical section against a concurrent replacement.
         let _replacement_gate = self.replacement_gate.lock().await;
         // A failed retire fails the command with the old runtime already torn down.
-        if let Err(error) = self.teardown_for_replacement().await {
+        // A new session continues the conversation, so the waiting agent
+        // messages and heartbeat fires move with it; a switch to a saved session (or an import)
+        // leaves them for the outgoing session's next open.
+        let moves_agent_messages = command == "new_session";
+        if let Err(error) = self
+            .teardown_for_replacement(&target.file.path, moves_agent_messages)
+            .await
+        {
             return response_failure(None, command, &format!("{error:#}"), None);
         }
         if let Some(cwd) = target.cwd.as_deref() {
