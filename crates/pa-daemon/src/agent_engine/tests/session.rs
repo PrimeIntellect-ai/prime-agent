@@ -537,7 +537,8 @@ fn a_batched_bare_skill_row_admits_on_the_floored_text() {
     let (engine, events) =
         run_skill_prompt_body("Run the demo protocol.", "hello", &["/skill:demo-skill"]);
     let texts = user_texts(&events);
-    // The primary accepted row, then the batched row, in delivery order.
+    // The primary row, then the batched row, in delivery order, each once.
+    assert_eq!(texts.len(), 2, "one row per admitted message: {texts:?}");
     assert_eq!(
         texts.first().map(String::as_str),
         Some("hello"),

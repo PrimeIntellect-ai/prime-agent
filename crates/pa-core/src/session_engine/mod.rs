@@ -39,7 +39,6 @@ mod refinement_gate;
 pub mod request_timing;
 pub mod rlm_host;
 pub mod rlm_notices;
-pub mod rlm_usage;
 pub mod runtime;
 pub mod runtime_wiring;
 pub mod semantic_edges;
@@ -53,6 +52,7 @@ pub mod state_restore_notice;
 pub mod telemetry;
 pub mod tool_bridge;
 pub mod turn_boundary;
+pub mod usage_store;
 
 mod admission;
 mod compaction_arms;
@@ -204,7 +204,7 @@ pub struct AgentSession {
     /// Where the session's own model calls outside the agent loop record
     /// their `model_usage` rows: the session file unless the host binds
     /// its durable store (the daemon worker's).
-    usage_store: std::sync::Arc<dyn rlm_usage::RlmChildUsageStore>,
+    usage_store: std::sync::Arc<dyn usage_store::UsageStore>,
 }
 
 impl AgentSession {
@@ -242,7 +242,7 @@ impl AgentSession {
         harness_digest: Option<harness_digest::HarnessDigestContext>,
     ) -> anyhow::Result<Self> {
         let persistence = session.clone();
-        let usage_store = std::sync::Arc::new(rlm_usage::SessionUsageStore(session.clone()));
+        let usage_store = std::sync::Arc::new(usage_store::SessionUsageStore(session.clone()));
         agent
             .subscribe(move |event, _signal| {
                 let persistence = persistence.clone();

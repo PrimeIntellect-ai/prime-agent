@@ -137,6 +137,79 @@ impl Supervisor {
         response_success(Some(command_id), type_name, None)
     }
 
+    /// `worker_usage`: one usage row a worker persisted. The report is
+    /// authenticated like a roster delta; the ledger dedupes it by entry id,
+    /// then every roster row whose total moved (the session's and each
+    /// ancestor's, a passive parent's included) is re-stamped and pushed.
+    pub(crate) async fn handle_worker_usage(
+        self: &Arc<Self>,
+        command_id: &str,
+        type_name: &str,
+        worker_token: &str,
+        session_id: &str,
+        entry_id: &str,
+        usage: pa_types::ai::Usage,
+    ) -> DaemonResponse {
+        if self.registry.find_by_token(worker_token).await.is_none() {
+            return response_failure(
+                Some(command_id),
+                type_name,
+                "Worker authentication failed",
+                None,
+            );
+        }
+        // The id names a shard file: a durable session id is one plain file stem.
+        if session_id.is_empty() || session_id.starts_with('.') || session_id.contains(['/', '\\'])
+        {
+            return response_failure(Some(command_id), type_name, "Invalid session id", None);
+        }
+        let ledger = Arc::clone(&self.usage_ledger);
+        let (session_id, entry_id) = (session_id.to_string(), entry_id.to_string());
+        let recorded =
+            tokio::task::spawn_blocking(move || ledger.record(&session_id, &entry_id, usage)).await;
+        match recorded {
+            Ok(Ok(moved)) => {
+                self.push_spend(&moved);
+                response_success(Some(command_id), type_name, None)
+            }
+            Ok(Err(error)) => {
+                response_failure(Some(command_id), type_name, &format!("{error:#}"), None)
+            }
+            Err(error) => response_failure(Some(command_id), type_name, &error.to_string(), None),
+        }
+    }
+
+    /// Bring the shards of a session and every descendant the spawn ledger
+    /// recorded up to their transcripts (off the async runtime): a
+    /// registration (lost reports), a stop (a crash between an append and
+    /// its report), and a sweep or delete about to unlink transcripts.
+    /// Returns the sessions whose totals moved; the caller pushes their rows,
+    /// together with any row change of its own.
+    pub(crate) async fn reconcile_usage(self: &Arc<Self>, session_file: &Path) -> Vec<String> {
+        let ledger = Arc::clone(&self.usage_ledger);
+        let file = session_file.to_path_buf();
+        match tokio::task::spawn_blocking(move || ledger.reconcile_family(&file)).await {
+            Ok(Ok(moved)) => moved,
+            Ok(Err(error)) => {
+                self.log_line(&format!("usage ledger reconcile failed: {error:#}"));
+                Vec::new()
+            }
+            Err(error) => {
+                self.log_line(&format!("usage ledger reconcile failed: {error}"));
+                Vec::new()
+            }
+        }
+    }
+
+    /// Re-stamp and push the roster rows of the sessions whose totals moved.
+    pub(crate) fn push_spend(&self, moved: &[String]) {
+        if moved.is_empty() {
+            return;
+        }
+        let changed = self.roster.lock().unwrap().restamp_spend(moved);
+        self.push_roster_update(changed, Vec::new());
+    }
+
     /// Test-support arm: production paths write through the sequence-gated
     /// [`Self::write_roster_summary_for_resident`].
     #[cfg(test)]
@@ -267,6 +340,17 @@ impl Supervisor {
             roster.forget_worker_sequences(worker_id);
             (owned, unowned_at_start)
         };
+        // The worker is gone: rows it persisted but never reported reconcile
+        // before its rows settle.
+        let owned_files: HashSet<PathBuf> = owned
+            .iter()
+            .filter_map(|entry| entry.summary.get("sessionFile").and_then(Value::as_str))
+            .map(PathBuf::from)
+            .collect();
+        let mut moved = Vec::new();
+        for file in owned_files {
+            moved.extend(self.reconcile_usage(&file).await);
+        }
         // The stopping worker's family view — live edges and surviving
         // resident roots — decides each subagent row's fate; a ledger
         // failure degrades to an empty view.
@@ -279,12 +363,6 @@ impl Supervisor {
             .map(|edges| edges.into_iter().map(|edge| edge.child.into()).collect());
         let empty_view = HashSet::new();
         let anchored_children = ledger_view.as_ref().unwrap_or(&empty_view);
-        // The stop's own ledger event: an RLM delete tombstoned its child
-        // before the stop began, and the shutdown route was the
-        // transcript's flush barrier, so the fold beside the ledger view
-        // reads the final bucket - the later capture amendment yields the
-        // same value, so no second push follows it.
-        let bucket_fold = self.deleted_descendant_usage_bucket().await;
         // The ledger/roots awaits opened a late-write window. Only
         // rows that carry the STOPPED generation settle here: the
         // stopped worker's own in-flight delta can have written a row
@@ -303,20 +381,13 @@ impl Supervisor {
             .await
             .is_some_and(|resident| !resident.route_state().retired());
         if replacement_live {
+            self.push_spend(&moved);
             return;
         }
         let mut changed = Vec::new();
         let mut removed = Vec::new();
         {
             let mut roster = self.roster.lock().unwrap();
-            // The refreshed bucket applies FIRST: the settle loop's
-            // passivated rewrites then attach the new value at store
-            // time, and the rewritten rows ship in this same push - the
-            // child's removal and its parent's new bucket together, with
-            // no frame in between where the spend dips.
-            if let Some((ticket, bucket)) = bucket_fold {
-                changed.extend(roster.set_deleted_descendant_usage(ticket, bucket));
-            }
             let mut settle: Vec<AgentRosterEntry> = owned;
             for late in roster.entries_for_worker(worker_id).into_iter().cloned() {
                 if !settle
@@ -391,6 +462,13 @@ impl Supervisor {
                         roster.delete(&entry.agent_id);
                         removed.push(entry.agent_id.clone());
                     }
+                }
+            }
+            // The rows whose totals the stop's reconcile moved ride the
+            // same push.
+            for entry in roster.restamp_spend(&moved) {
+                if !changed.iter().any(|row| row.agent_id == entry.agent_id) {
+                    changed.push(entry);
                 }
             }
         }

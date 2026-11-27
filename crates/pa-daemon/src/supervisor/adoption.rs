@@ -581,6 +581,17 @@ impl Supervisor {
                 self.spawn_roster_registration_seed(Path::new(&root));
             }
         }
+        // Reports sent while no supervisor listened are lost (a restart, or a
+        // worker kept across an update that sends none): reconcile the
+        // family's shards with their transcripts, detached from the reply.
+        let usage_root = resident.descriptor.lock().await.session_file.clone();
+        if let Some(root) = usage_root {
+            let supervisor = Arc::clone(self);
+            drop(tokio::spawn(async move {
+                let moved = supervisor.reconcile_usage(Path::new(&root)).await;
+                supervisor.push_spend(&moved);
+            }));
+        }
         // Registration rebuilt the resident: refresh its roster entry from
         // the live worker so the roster reflects the re-registered state.
         self.refresh_roster_entry(&resident).await;
@@ -736,9 +747,13 @@ impl Supervisor {
         let Some(metadata) = runtime_metadata else {
             return Ok(());
         };
-        if metadata.get("kind").and_then(Value::as_str) != Some("subagent") {
-            return Ok(());
-        }
+        // A refine child records its edge too: the parent's spend folds its
+        // planning call, while every edge listing skips the flagged edge.
+        let refine_child = match metadata.get("kind").and_then(Value::as_str) {
+            Some("subagent") => false,
+            Some("refine") => true,
+            _ => return Ok(()),
+        };
         let child_id = metadata
             .get("rlmChildId")
             .and_then(Value::as_str)
@@ -791,6 +806,7 @@ impl Supervisor {
                     .and_then(|config| config.get("decisionChild"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                refine_child,
             })
             .inspect_err(|error| {
                 self.log_line(&format!("failed to append RLM ledger spawn: {error:#}"));

@@ -882,6 +882,26 @@ class ReplTest(unittest.TestCase):
             events = fresh.execute("r2", "x")
             self.assertEqual(one(events, "result")["text"], "42")
 
+    def test_stdin_eof_final_snapshot_keeps_a_running_cells_last_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            self.assertEqual(one(self.repl.execute("s1", "x = 1"), "done")["status"], "ok")
+            self.repl.send({"type": "snapshot", "id": "s2", "path": path, "manifest_path": manifest_path})
+            self.assertEqual(one(self.repl.until_done("s2"), "done")["status"], "ok")
+            self.repl.send({"type": "execute", "id": "s3", "code": "import asyncio\nawait asyncio.sleep(0.2)\nx = 42"})
+            assert self.repl.proc.stdin is not None
+            self.repl.proc.stdin.close()
+            self.assertEqual(self.repl.proc.wait(timeout=10), 0)
+
+            fresh = ReplProcess()
+            self.addCleanup(fresh.close)
+            fresh.ready()
+            fresh.send({"type": "restore", "id": "r1", "path": path})
+            self.assertEqual(one(fresh.until_done("r1"), "done")["status"], "ok")
+            events = fresh.execute("r2", "x")
+            self.assertEqual(one(events, "result")["text"], "42")
+
     def test_stdin_eof_without_prior_snapshot_keeps_payload(self):
         # Until this process committed a snapshot of its own, an EOF must
         # not overwrite the on-disk payload with a namespace the host never
@@ -2121,6 +2141,136 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(done["reason"], "snapshot not found")
 
 
+class ConcurrentCellTest(unittest.TestCase):
+    """A new cell runs beside a running cell that waits at an await point,
+    and is refused while the running cell executes synchronous code."""
+
+    def setUp(self) -> None:
+        self.repl = ReplProcess()
+        self.addCleanup(self.repl.close)
+        self.repl.ready()
+
+    def until_started(self, cell: str, events: list[dict]) -> None:
+        """Read events until `cell` printed its start marker: the cell is
+        past compile and into its body."""
+        while True:
+            event = self.repl.read_event()
+            events.append(event)
+            if event.get("event") == "stdout" and event.get("id") == cell and "started" in event.get("text", ""):
+                return
+
+    def until_both_done(self, events: list[dict]) -> list[dict]:
+        pending = {"slow", "next"} - {e.get("id") for e in events if e.get("event") == "done"}
+        while pending:
+            event = self.repl.read_event()
+            events.append(event)
+            if event.get("event") == "done":
+                pending.discard(event.get("id"))
+        return events
+
+    def test_a_new_cell_runs_while_a_running_cell_awaits(self):
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nprint('started')\nawait asyncio.sleep(3)\nprint('slow done')"})
+        self.until_started("slow", events)
+        self.repl.send({"type": "execute", "id": "next", "code": "print('next ran')"})
+        self.until_both_done(events)
+        dones = [e["id"] for e in events if e.get("event") == "done"]
+        self.assertEqual(dones, ["next", "slow"])
+        by_cell = {cell: "".join(e["text"] for e in events if e.get("event") == "stdout" and e.get("id") == cell) for cell in ("slow", "next")}
+        self.assertEqual(by_cell, {"slow": "started\nslow done\n", "next": "next ran\n"})
+
+    def test_a_new_cell_is_refused_while_a_running_cell_runs_synchronous_code(self):
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import time\nprint('started')\ntime.sleep(7)"})
+        self.until_started("slow", events)
+        self.repl.send({"type": "execute", "id": "next", "code": "print('next ran')"})
+        self.until_both_done(events)
+        dones = [(e["id"], e["status"]) for e in events if e.get("event") == "done"]
+        self.assertEqual(dones, [("next", "error"), ("slow", "ok")])
+        refusal = next(e for e in events if e.get("event") == "error" and e.get("id") == "next")
+        self.assertEqual(refusal["ename"], "KernelBusy")
+        self.assertIn("cell 'slow' is running blocking code", refusal["evalue"])
+        self.assertNotIn("next ran", stream_text(events, "stdout"))
+
+    def test_the_refusal_names_the_running_cell_inside_an_earlier_cells_function(self):
+        self.repl.execute("define", "import time\ndef block():\n    print('started')\n    time.sleep(30)")
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "holder", "code": "block()"})
+        self.until_started("holder", events)
+        refused = self.repl.execute("next", "print('next ran')")
+        refusal = next(e for e in refused if e.get("event") == "error" and e.get("id") == "next")
+        self.assertEqual(refusal["ename"], "KernelBusy")
+        self.assertIn("cell 'holder' is running blocking code", refusal["evalue"])
+        self.repl.send({"type": "interrupt", "id": "holder"})
+        self.assertEqual(one(self.repl.until_done("holder"), "done")["status"], "error")
+
+    def test_interrupting_the_awaiting_cell_leaves_the_synchronous_cell_running(self):
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nprint('started')\nawait asyncio.sleep(30)"})
+        self.until_started("slow", events)
+        self.repl.send({"type": "execute", "id": "next", "code": "import time\nprint('started')\ntime.sleep(2)\nprint('next ran')"})
+        self.until_started("next", events)
+        self.repl.send({"type": "interrupt", "id": "slow"})
+        self.until_both_done(events)
+        outcomes = {e["id"]: e["status"] for e in events if e.get("event") == "done"}
+        self.assertEqual(outcomes, {"slow": "error", "next": "ok"})
+        interrupted = next(e for e in events if e.get("event") == "error" and e.get("id") == "slow")
+        self.assertEqual(interrupted["ename"], "KeyboardInterrupt")
+        self.assertIn("next ran", stream_text(events, "stdout"))
+
+    def test_a_cells_degraded_await_writes_its_note_beside_a_newer_cell(self):
+        # The note belongs to the calling cell, not the newest running one.
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import rlm\nrlm._set_completion_notices_wired(True)\nh = rlm.bash('sleep 3')\nprint('started')\nawait h"})
+        self.until_started("slow", events)
+        self.repl.send({"type": "execute", "id": "next", "code": "import asyncio\nawait asyncio.sleep(2)"})
+        self.until_both_done(events)
+        notes = "".join(e["text"] for e in events if e.get("event") == "stderr" and e.get("id") == "slow")
+        self.assertIn("do not await it again this turn", notes)
+
+
+class EofFinalFlushTest(unittest.TestCase):
+    """In-process check of the EOF shutdown's second final flush."""
+
+    def test_a_cell_that_settles_during_the_mcp_status_wait_is_flushed(self):
+        import rlm.repl as repl_module
+
+        ns = {"x": 1}
+        flushed: list[int] = []
+
+        async def run() -> None:
+            mcp_cancelled = asyncio.Event()
+            cell_wrote = asyncio.Event()
+
+            async def mcp_status() -> None:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    mcp_cancelled.set()
+                    await cell_wrote.wait()
+
+            async def cell() -> None:
+                await mcp_cancelled.wait()
+                ns["x"] = 42
+                cell_wrote.set()
+
+            for tasks, coro in ((repl_module._mcp_status_tasks, mcp_status()), (repl_module._cell_tasks, cell())):
+                task = asyncio.get_running_loop().create_task(coro)
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+            # Both tasks reach their first await before the shutdown cancels.
+            await asyncio.sleep(0)
+            queue: asyncio.Queue[dict] = asyncio.Queue()
+            queue.put_nowait({"type": "shutdown", "eof": True})
+            await repl_module._serve(queue, ns)
+
+        handler = signal.getsignal(signal.SIGINT)
+        self.addCleanup(signal.signal, signal.SIGINT, handler)
+        with mock.patch.object(repl_module, "_flush_final_snapshot", lambda flushed_ns: flushed.append(flushed_ns["x"])):
+            asyncio.run(run())
+        self.assertEqual(flushed, [1, 42])
+
+
 class FinishRequestTest(unittest.TestCase):
     """In-process checks of the parked-interrupt bookkeeping on request finish."""
 
@@ -2135,9 +2285,57 @@ class FinishRequestTest(unittest.TestCase):
         self.repl_module._pending_interrupts["ids"].clear()
         self.repl_module._pending_interrupts["any"] = False
         self.repl_module._finishing_rid = None
-        self.repl_module._handoff_interrupted = False
-        self.repl_module._sigint_target = None
-        self.repl_module._active.update({"task": None, "rid": None, "interrupted": False})
+        self.repl_module._handoff_interrupted.clear()
+        self.repl_module._sigint_targets.clear()
+        self.repl_module._active.clear()
+        self.repl_module._interrupted.clear()
+
+    def test_interrupt_without_pthread_kill_in_the_finishing_phase_raises_nothing(self):
+        repl = self.repl_module
+        repl._inflight.add("fin")
+        repl._finishing_rid = "fin"
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+
+        async def main() -> list[dict]:
+            loop = asyncio.get_running_loop()
+            repl._loop = loop
+            errors: list[dict] = []
+            loop.set_exception_handler(lambda _loop, context: errors.append(context))
+            # A stand-in signal module without pthread_kill, as on Windows.
+            with mock.patch.object(repl, "signal", object()):
+                repl._request_interrupt(None)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return errors
+
+        self.assertEqual(asyncio.run(main()), [])
+
+    @unittest.skipUnless(hasattr(signal, "pthread_kill"), "the SIGINT delivery path needs pthread_kill")
+    def test_two_interrupts_before_the_handler_runs_cancel_both_cells(self):
+        # The host stops every running cell at once. SIGINTs sent before the
+        # main thread runs the handler coalesce into one handler call, which
+        # must still cancel each targeted cell.
+        repl = self.repl_module
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+
+        async def main() -> list[object]:
+            loop = asyncio.get_running_loop()
+            repl._loop = loop
+            cells = {rid: loop.create_task(asyncio.sleep(30)) for rid in ("a", "b")}
+            repl._inflight.update(cells)
+            repl._active.update(cells)
+            # No signal is sent: the one handler call below stands in for both.
+            with mock.patch.object(signal, "pthread_kill", lambda *_: None):
+                repl._request_interrupt("a")
+                repl._request_interrupt("b")
+            loop.call_soon(repl._sigint_handler, signal.SIGINT, None)
+            return await asyncio.wait_for(asyncio.gather(*cells.values(), return_exceptions=True), 2)
+
+        outcomes = asyncio.run(main())
+        self.assertTrue(all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes), outcomes)
+        self.assertEqual(repl._interrupted, {"a", "b"})
 
     def test_parked_any_survives_while_another_request_is_inflight(self):
         repl = self.repl_module
@@ -2190,9 +2388,9 @@ class FinishRequestTest(unittest.TestCase):
         async def run_guarded_then_sigint(task, rid):
             outcome = await real_run_guarded(task, rid)
             with repl._interrupt_lock:
-                repl._sigint_target = rid
+                repl._sigint_targets.add(rid)
             # Synchronous SIGINT in the post-run window: the handler sees
-            # _sigint_target == _finishing_rid and raises right here.
+            # the target is _finishing_rid and raises right here.
             signal.raise_signal(signal.SIGINT)
             return outcome
 
@@ -2274,7 +2472,7 @@ class FinishRequestTest(unittest.TestCase):
         self.assertEqual(dict(ns), {"a": 1, "b": 2})
         done_next = next(e for e in sent if e.get("event") == "done" and e["id"] == "next")
         self.assertEqual(done_next["status"], "ok")
-        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._sigint_targets)
         self.assertFalse(repl._pending_interrupts["any"])
         self.assertFalse(repl._pending_interrupts["ids"])
 
@@ -2310,7 +2508,7 @@ class FinishRequestTest(unittest.TestCase):
 
         def restore_then_interrupt(*args, **kwargs):
             result = real_restore(*args, **kwargs)
-            repl._sigint_target = "restore"
+            repl._sigint_targets.add("restore")
             repl._sigint_handler(signal.SIGINT, None)  # raises into the still-running task
             return result
 
@@ -2339,13 +2537,13 @@ class FinishRequestTest(unittest.TestCase):
         self.assertEqual(ns, {"a": 1, "b": 2})
         done_next = next(e for e in sent if e.get("event") == "done" and e["id"] == "next")
         self.assertEqual(done_next["status"], "ok")
-        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._sigint_targets)
         self.assertFalse(repl._pending_interrupts["any"])
         self.assertFalse(repl._pending_interrupts["ids"])
 
     def test_nonprotocol_keyboardinterrupt_after_committed_restore_is_not_recovered(self):
         # A user-originated KeyboardInterrupt (no _sigint_handler provenance:
-        # _active["interrupted"] stays False) after the restore committed must
+        # the rid never joins _interrupted) after the restore committed must
         # keep the interrupted error, not be converted to snapshot success.
         from unittest import mock
 
@@ -2396,7 +2594,7 @@ class FinishRequestTest(unittest.TestCase):
 
         def snapshot_then_interrupt(*args, **kwargs):
             result = real_snapshot(*args, **kwargs)
-            repl._sigint_target = "snap"
+            repl._sigint_targets.add("snap")
             repl._sigint_handler(signal.SIGINT, None)  # raises into the still-running task
             return result
 
@@ -2425,7 +2623,7 @@ class FinishRequestTest(unittest.TestCase):
         self.assertEqual(done["saved"], ["small"])
         self.assertEqual(done["pruned"], ["big"])
         self.assertEqual(ns, {"small": 1})
-        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._sigint_targets)
 
     def test_untargeted_interrupt_in_done_task_handoff_is_not_parked(self):
         # The cell task is done but _run_guarded's finally has not run yet
@@ -2444,16 +2642,16 @@ class FinishRequestTest(unittest.TestCase):
                 raise AssertionError("a done task must not be cancelled")
 
         repl._inflight.update({"handoff", "other"})
-        repl._active.update({"task": DoneTask(), "rid": "handoff", "interrupted": False})
+        repl._active["handoff"] = DoneTask()
         previous = signal.signal(signal.SIGINT, repl._sigint_handler)
         self.addCleanup(signal.signal, signal.SIGINT, previous)
         repl._request_interrupt(None)
         deadline = time.monotonic() + 5
         while not repl._handoff_interrupted and time.monotonic() < deadline:
             time.sleep(0.01)
-        self.assertEqual(repl._sigint_target, "handoff")
+        self.assertEqual(repl._sigint_targets, {"handoff"})
         self.assertFalse(repl._pending_interrupts["any"])
-        self.assertTrue(repl._consume_handoff_interrupt())
+        self.assertTrue(repl._consume_handoff_interrupt("handoff"))
         self.assertFalse(repl._handoff_interrupted)
         self.assertIn("other", repl._inflight)
 
@@ -3360,7 +3558,7 @@ class ProtocolFrameAtomicityTest(unittest.TestCase):
                 "        sent = real_write(fd, bytes(data[:4096]))",
                 # The request-interrupt path: mark the rid, then SIGINT the
                 # main thread while the frame is only partly on the wire.
-                "        repl_module._request_interrupt(repl_module._active['rid'])",
+                "        repl_module._request_interrupt('tear')",
                 "        return sent",
                 "    return real_write(fd, data)",
                 "repl_module.os.write = write",

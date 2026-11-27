@@ -7,6 +7,19 @@ use super::{
     AgentMessage, DaemonClientCapability, DaemonClientId, DaemonCommandId, DaemonProtocolInfo,
     DaemonResumeCursor, Deserialize, JsonMap, Serialize, Value,
 };
+use std::time::Duration;
+
+/// The activity poll cadence: the interval the TUI fires its periodic
+/// refreshes at — the session's shells and factory refreshes, the
+/// agents view's activity counts, and the factory
+/// page's overview re-ask of the supervisor's `overview` action
+/// ([`DaemonCommand::FactoryActivity`]). The daemon's factory
+/// live-freshness bound is two of these windows — serving runs one
+/// read behind the cadence, the second window is the slack that keeps
+/// a healthy owner's rows live — so every poll, the daemon's bound,
+/// and the cadence tests read this one constant instead of matching
+/// copies.
+pub const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// One page of the display transcript (the branch in order, each compaction as its
 /// summary row), bounded by entry-id cursors.
@@ -220,6 +233,19 @@ pub enum DaemonCommand {
         /// one generation slot per worker and drops a predecessor's deltas.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worker_instance_id: Option<String>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// Worker -> supervisor: one persisted transcript row that carried usage,
+    /// for the supervisor's usage ledger. `entry_id` keys the record, so a
+    /// repeated report never counts twice.
+    WorkerUsage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        worker_token: String,
+        session_id: String,
+        entry_id: String,
+        usage: crate::ai::Usage,
         #[serde(flatten)]
         rest: JsonMap,
     },
@@ -604,7 +630,13 @@ pub enum DaemonCommand {
         rest: JsonMap,
     },
     /// The `/factory` view's bridge lane over the session kernel's factory
-    /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`).
+    /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`, and the
+    /// arming-free `peek` the all-session overview's live reads ride),
+    /// plus the supervisor-owned read-only `overview` action: every
+    /// daemon-known session's active runs, assembled by the supervisor
+    /// (the live halves through each owner kernel's non-arming `peek`,
+    /// the saved halves from the durable run records), never forwarded
+    /// to a kernel as `overview`.
     /// Rust-native extension, advertised by the `factory_activity` capability.
     FactoryActivity {
         #[serde(default, skip_serializing_if = "Option::is_none")]

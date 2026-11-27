@@ -15,6 +15,9 @@
 //! message.
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -68,17 +71,11 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Daemon {
-                child,
-                socket: socket.to_path_buf(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(15));
+    Daemon {
+        child,
+        socket: socket.to_path_buf(),
     }
-    panic!("daemon socket never appeared");
 }
 
 /// Open a session file as a live daemon worker (create with sessionPath),

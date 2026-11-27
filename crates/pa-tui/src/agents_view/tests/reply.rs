@@ -340,11 +340,13 @@ fn the_reply_hints_follow_the_target_state() {
     );
     let mut with_text = armed_live();
     with_text.handle_key("h");
-    let alt = crate::keybindings::format_key_text("alt");
-    assert_eq!(
-        flat(&with_text.render_hints(120, None)),
-        format!("Enter send   {alt}+Enter queue   Esc/Ctrl+C cancel")
+    // The queue key renders with the host platform's `alt` label
+    // (macOS: Option, elsewhere: Alt).
+    let follow_up = format!(
+        "Enter send   {}+Enter queue   Esc/Ctrl+C cancel",
+        crate::keybindings::host_alt_label()
     );
+    assert_eq!(flat(&with_text.render_hints(120, None)), follow_up);
     let saved = armed_saved();
     assert_eq!(
         flat(&saved.render_hints(120, None)),

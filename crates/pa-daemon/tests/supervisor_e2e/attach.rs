@@ -90,6 +90,42 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
         attached2["success"], true,
         "disabled attach to disabled worker failed: {attached2}"
     );
+
+    // A session whose worker is gone wakes on a telemetry-disabled attach with the
+    // client's opt-out, so the attach that woke it is admitted.
+    let durable_id2 = created2["data"]["sessionId"]
+        .as_str()
+        .expect("durable session id in create 2 response")
+        .to_string();
+    client.send_command(
+        "tp3",
+        &serde_json::json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": session_id2,
+            "message": "hello",
+        }),
+    );
+    let prompted = client.read_response("tp3");
+    assert_eq!(prompted["success"], true, "prompt failed: {prompted}");
+    client.send_command(
+        "tk3",
+        &serde_json::json!({ "type": "kill", "activeSessionId": session_id2 }),
+    );
+    let killed = client.read_response("tk3");
+    assert_eq!(killed["success"], true, "kill failed: {killed}");
+    client.send_command(
+        "ta4",
+        &serde_json::json!({
+            "type": "attach",
+            "activeSessionId": durable_id2,
+            "telemetryDisabled": true,
+        }),
+    );
+    let woken = client.read_response("ta4");
+    assert_eq!(
+        woken["success"], true,
+        "disabled attach to a woken session failed: {woken}"
+    );
 }
 
 /// Chunked snapshot streaming on the attach path (live TS goldens in

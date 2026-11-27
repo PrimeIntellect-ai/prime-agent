@@ -1,0 +1,1 @@
+- Attached windows now get the update notice before the daemon stops their sessions, so an update no longer prints "Daemon connection lost; reconnecting…" first, and the notice no longer shows a made-up duration.

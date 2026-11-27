@@ -331,72 +331,13 @@ impl Supervisor {
             ),
             PrepareOp::Applied(_) => {
                 let residents = self.registry.list().await;
-                let verdicts = stop_workers_gracefully(self, &residents, &self.update_budget).await;
-                let refused: Vec<&str> = verdicts
-                    .iter()
-                    .filter(|(_, verdict)| *verdict == WorkerStopVerdict::Refused)
-                    .map(|(worker_id, _)| worker_id.as_str())
-                    .collect();
-                if !refused.is_empty() {
-                    // Abandon (I3): the sessions that refused keep running;
-                    // the ones that already stopped relaunch over their own
-                    // session files.
-                    if let Some(abort) = self.update_prepare.abandon_stopping(&update_id) {
-                        self.finish_update_abort(&abort);
-                    }
-                    for (resident, (_, verdict)) in residents.iter().zip(&verdicts) {
-                        match verdict {
-                            WorkerStopVerdict::Stopped => {
-                                // The old monitor may only now observe its
-                                // child's exit. Retire that watch before
-                                // reopening supervision: the bump lands
-                                // before the stop flag is cleared, so a
-                                // watch woken at the exit reads either the
-                                // intentional stop or the new generation.
-                                resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
-                                resident.transition(WorkerTransition::ResumeStopped);
-                                match self.relaunch_supervised(resident).await {
-                                    Ok(()) => {
-                                        resident.consecutive_failures.store(0, Ordering::SeqCst);
-                                    }
-                                    Err(error) => {
-                                        self.log_line(&format!(
-                                            "worker {} abandon relaunch failed: {error:#}",
-                                            resident.worker_id
-                                        ));
-                                    }
-                                }
-                            }
-                            WorkerStopVerdict::Refused => {
-                                // Restore normal supervision: the stop request may still land late,
-                                // in which case the monitor treats the exit as a crash and
-                                // relaunches with backoff (the session file is the truth).
-                                resident.transition(WorkerTransition::ResumeStopped);
-                            }
-                        }
-                    }
-                    self.log_line(&format!(
-                        "update {update_id} abandoned: worker(s) {refused:?} did not stop in budget; sessions untouched"
-                    ));
-                    return (
-                        vec![response_line(&response_failure(
-                            Some(command_id),
-                            type_name,
-                            &format!(
-                                "Update abandoned: session worker(s) {refused:?} did not stop within the budget; sessions are untouched and the daemon keeps serving"
-                            ),
-                            None,
-                        ))],
-                        false,
-                    );
-                }
-                let stopped = verdicts.len();
-                self.log_line(&format!(
-                    "update {update_id}: all {stopped} worker(s) stopped; exiting for the update"
-                ));
                 // Spec §10.1: every client learns the update resume contract BEFORE the
-                // sockets close - the close frame is an instruction (reattach by durable id
-                // after the restart), not an error.
+                // workers stop - the close frame is an instruction (reattach by durable id
+                // after the restart), not an error, and a client whose direct worker link
+                // dropped first would report a lost connection instead. While the workers
+                // stop, the admission gate refuses attaching with the typed `update_restarting`
+                // refusal, so a reconnecting window retries until the successor (or, after an
+                // abandon, this supervisor) serves.
                 let mut sessions: Vec<Value> = Vec::new();
                 for resident in &residents {
                     let descriptor = resident.descriptor.lock().await;
@@ -436,6 +377,73 @@ impl Supervisor {
                 let _ = self
                     .events
                     .send((ClientRouting::Broadcast, std::sync::Arc::new(closing)));
+                let verdicts = stop_workers_gracefully(self, &residents, &self.update_budget).await;
+                let refused: Vec<&str> = verdicts
+                    .iter()
+                    .filter(|(_, verdict)| *verdict == WorkerStopVerdict::Refused)
+                    .map(|(worker_id, _)| worker_id.as_str())
+                    .collect();
+                if !refused.is_empty() {
+                    // Abandon (I3): the sessions that refused keep running;
+                    // the ones that already stopped relaunch over their own
+                    // session files.
+                    if let Some(abort) = self.update_prepare.abandon_stopping(&update_id) {
+                        self.finish_update_abort(&abort);
+                    }
+                    for (resident, (_, verdict)) in residents.iter().zip(&verdicts) {
+                        // The old monitor may only now observe its child's exit. Retire that
+                        // watch before reopening supervision: the bump lands before the stop
+                        // flag is cleared, so a watch woken at the exit reads either the
+                        // intentional stop or the new generation. A refused stop can still
+                        // land late (or already did, read as the stop's own exit), so this
+                        // loop owns every worker's next exit: a gone process relaunches, a
+                        // live one gets a fresh watch that relaunches it on a crash.
+                        resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
+                        resident.transition(WorkerTransition::ResumeStopped);
+                        let (pid, start_id) = {
+                            let descriptor = resident.descriptor.lock().await;
+                            (descriptor.pid, descriptor.process_start_id.clone())
+                        };
+                        let gone = *verdict == WorkerStopVerdict::Stopped
+                            || super::worker_lifecycle::worker_process_gone(pid, start_id).await;
+                        if !gone {
+                            // Pid 0 records no process to watch.
+                            if pid != 0 {
+                                self.spawn_monitor(Arc::clone(resident), None, pid, None);
+                            }
+                            continue;
+                        }
+                        match self.relaunch_supervised(resident).await {
+                            Ok(()) => {
+                                resident.consecutive_failures.store(0, Ordering::SeqCst);
+                            }
+                            Err(error) => {
+                                self.log_line(&format!(
+                                    "worker {} abandon relaunch failed: {error:#}",
+                                    resident.worker_id
+                                ));
+                            }
+                        }
+                    }
+                    self.log_line(&format!(
+                        "update {update_id} abandoned: worker(s) {refused:?} did not stop in budget; sessions untouched"
+                    ));
+                    return (
+                        vec![response_line(&response_failure(
+                            Some(command_id),
+                            type_name,
+                            &format!(
+                                "Update abandoned: session worker(s) {refused:?} did not stop within the budget; sessions are untouched and the daemon keeps serving"
+                            ),
+                            None,
+                        ))],
+                        false,
+                    );
+                }
+                let stopped = verdicts.len();
+                self.log_line(&format!(
+                    "update {update_id}: all {stopped} worker(s) stopped; exiting for the update"
+                ));
                 // The response is written before the accept loop exits; the 100ms drain only
                 // orders the exit behind it — the coordinator's Booting phase recovers a lost
                 // ack by design.

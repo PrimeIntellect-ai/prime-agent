@@ -168,6 +168,9 @@ pub trait IpythonKernelProvisioner: Send + Sync {
 
     /// Kill the kernel immediately, losing all in-memory state.
     fn kill(&self) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    /// Stop the backgrounded cell `cell_id` and resolve once it settled or
+    /// its kernel was retired for ignoring the interrupt.
+    fn stop_cell(&self, cell_id: &str) -> Pin<Box<dyn Future<Output = CellStop> + Send>>;
     /// Whether the kernel this provisioner serves restarted because a
     /// forced stop retired its predecessor (a cell that ignored its stop
     /// interrupt); reading takes the note, so exactly one foreground
@@ -175,6 +178,17 @@ pub trait IpythonKernelProvisioner: Send + Sync {
     fn take_kernel_restart_note(&self) -> bool {
         false
     }
+}
+
+/// The outcome of a `stop_cell` request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellStop {
+    /// No backgrounded cell with that id is running.
+    NotRunning,
+    /// The cell stopped on its interrupt.
+    Stopped,
+    /// The cell ignored its interrupt, so its kernel was retired.
+    KernelRetired,
 }
 
 pub fn kernel_restart_notice() -> &'static str {
@@ -320,8 +334,9 @@ pub fn settled_cell_details(details: &mut serde_json::Value, result: &ExecuteRes
 
 /// The model-facing note for a call that returned early while its cell keeps
 /// running (the auto-background): names the cause, the cell, and the
-/// completion contract — another cell cannot start until the cell settles,
-/// the completion arrives as a notice, and backgrounded work is stoppable.
+/// completion contract — a new cell can run while it waits at an await
+/// point, the completion arrives as a notice, and backgrounded work is
+/// stoppable.
 fn background_cell_message(detached: &crate::kernel::shared::DetachedCell) -> String {
     use crate::kernel::shared::DetachReason;
     let cause = match detached.reason {
@@ -335,9 +350,9 @@ fn background_cell_message(detached: &crate::kernel::shared::DetachedCell) -> St
     };
     format!(
         "{cause}; the cell was auto-backgrounded (cell {}) and keeps running — nothing was killed. \
-No other cell can start until it settles, so do not call python_repl again: answer the incoming \
-message or end the turn, and read the cell's state only after its completion notice arrives (the \
-inbox carries it, or a full session row when it carries rich output). The user can cancel \
+Answer the incoming message or continue the turn: a new cell can run while it waits at an await \
+point, but not while it runs synchronous code. Read the cell's results only after its completion notice arrives (the inbox carries it, or a full \
+session row when it carries rich output). The user can cancel \
 backgrounded work; a cell that ignores the cancel's interrupt has its kernel retired, which may \
 lose unsnapshotted state.",
         detached.cell_id
@@ -392,6 +407,10 @@ pub fn ipython_tool_schema() -> serde_json::Value {
                     "Seconds this call waits before auto-backgrounding a still-running cell (default {} unless the user configured otherwise, max {PYTHON_REPL_TIMEOUT_MAX_S}). The cell keeps running and its completion notice arrives in the inbox, or as a full session row when it carries rich output.",
                     DEFAULT_PYTHON_CELL_TIMEOUT_MS / 1000
                 )
+            },
+            "stop_cell": {
+                "type": "string",
+                "description": "Id of a backgrounded cell to stop before this code runs, as named in a KernelBusy refusal or in the cell's auto-background notice. The cell is interrupted; if it ignores the interrupt, the kernel restarts and unsnapshotted state is lost."
             }
         }
     })
@@ -545,7 +564,19 @@ pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("python_repl tool requires a code string"))?
                     .to_string();
-                execute_ipython(
+                let stop_note = match params.get("stop_cell").and_then(serde_json::Value::as_str) {
+                    None => None,
+                    Some(cell_id) => Some(match options.provisioner.stop_cell(cell_id).await {
+                        CellStop::NotRunning => anyhow::bail!(
+                            "No running backgrounded cell '{cell_id}', so this cell did not run."
+                        ),
+                        CellStop::Stopped => format!("Stopped cell '{cell_id}'."),
+                        CellStop::KernelRetired => format!(
+                            "Cell '{cell_id}' ignored the interrupt; the kernel restarted and unsnapshotted state was lost."
+                        ),
+                    }),
+                };
+                let result = execute_ipython(
                     &options,
                     &code,
                     timeout_arg_ms(&params),
@@ -553,7 +584,19 @@ pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -
                     on_update,
                     on_late_sent_agent_message,
                 )
-                .await
+                .await;
+                let Some(note) = stop_note else {
+                    return result;
+                };
+                let mut result = result.map_err(|err| anyhow::anyhow!("{note}\n{err:#}"))?;
+                if let Some(ToolContentBlock::Text { text }) = result.content.first_mut() {
+                    *text = if text.is_empty() {
+                        note
+                    } else {
+                        format!("{note}\n{text}")
+                    };
+                }
+                Ok(result)
             })
         })
     };

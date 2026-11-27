@@ -1,0 +1,1 @@
+- Opening a machine on the machines page no longer resumes interrupted factory runs, and a node's template files no longer time out while the session's kernel starts.

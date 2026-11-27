@@ -134,6 +134,7 @@ class CaptureTests(unittest.TestCase):
         server = DockSupervisor.__new__(DockSupervisor)
         server.write_lock = threading.Lock()
         server.roster = [parent(), child('c1', 'running', 0.42), child('c2', 'running', 0.49)]
+        server.spent = {'c1': 0.42, 'c2': 0.49}
         server.context_responses = []
         sock = Mock()
         server.send(sock, {'type': 'response', 'command': 'get_context_tree', 'success': True, 'data': {}})

@@ -253,12 +253,6 @@ impl LinkAgentMessageController {
         if input.target == self.active_session_id {
             anyhow::bail!("Agent messaging cannot target the sending session");
         }
-        // A delivery to one of this session's own children starts a follow-up turn there:
-        // re-arm that child's usage observation BEFORE the delivery (a fast child can
-        // settle before the await returns; a late-armed observation never bills).
-        if let Some(children) = &self.children {
-            children.observe_child_usage(&input.target).await;
-        }
         let receipt = match self.deliver_direct(&input, cancelled).await {
             DirectDelivery::Delivered(receipt) => receipt,
             DirectDelivery::Cancelled => {

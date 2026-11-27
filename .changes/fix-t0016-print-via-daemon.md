@@ -1,0 +1,1 @@
+- A peer can now message a session driven by `prime-agent -r <id> -p` while its turn runs: print mode runs through the daemon when one is running, and the daemon holds the session lease.

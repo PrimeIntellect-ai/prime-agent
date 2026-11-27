@@ -36,10 +36,9 @@ pub const KERNEL_BUSY_INTERRUPT_INTERVAL_MS: u64 = 500;
 pub const KERNEL_LEVEL_WAKE_SETTLE_MS: u64 = 250;
 pub const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS: usize = 256;
 pub const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE: &str = "The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh.";
-/// The message when a new cell cannot start because a backgrounded cell is
-/// still running: another cell cannot start until it settles, so the wait
-/// answers with the state the model needs instead of dead ends.
-pub const KERNEL_BUSY_BACKGROUND_CELL_MESSAGE: &str = "The Python kernel is still running a backgrounded cell, so no other cell can start until it settles. Do not call python_repl again: end the turn, and read the cell's completion notice when it arrives. The user can cancel backgrounded work; a cell that ignores the cancel's interrupt has its kernel retired.";
+/// The message when a state request or the runtime bootstrap cannot start
+/// because a backgrounded cell is still running (user cells run beside it).
+pub const KERNEL_BUSY_BACKGROUND_CELL_MESSAGE: &str = "The Python kernel is still running a backgrounded cell, so this request cannot start until it settles. Read the cell's completion notice when it arrives. The user can cancel backgrounded work; a cell that ignores the cancel's interrupt has its kernel retired.";
 
 /// Cap for unattributed background output buffered between and during cells.
 pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;
@@ -47,9 +46,15 @@ pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;
 pub const MAX_KERNEL_STDERR_CHARS: usize = 8 * 1024;
 
 /// The `factory_activity` out-of-band frame's action vocabulary, mirroring
-/// the kernel executor's `ACTIVITY_ACTIONS` (the `/factory` view's bridge).
-pub const FACTORY_ACTIVITY_ACTIONS: [&str; 6] =
-    ["graph", "status", "watch", "run", "stop", "resume"];
+/// the kernel executor's `ACTIVITY_ACTIONS` (the `/factory` view's bridge):
+/// one run's graph/status/watch/stop/resume, a run by spec id, the machine
+/// library's list/graph reads (the `/factory` view's library page),
+/// `peek` (the all-session overview's foreign live read: the unscoped
+/// graph minus the rehydration re-arm), and `node` (one run state's detail
+/// for the node view).
+pub const FACTORY_ACTIVITY_ACTIONS: [&str; 9] = [
+    "graph", "status", "watch", "run", "stop", "resume", "library", "peek", "node",
+];
 
 /// Upper bound on one `factory_activity` watch's `timeoutMs` (the kernel
 /// caps its own at 60s; the host bridge pins the view's polling cadence
@@ -347,6 +352,12 @@ pub struct ExecuteOptions {
     /// `None` and zero disable it; the runtime bootstrap and state ops never
     /// arm it.
     pub cell_timeout_ms: Option<u64>,
+    /// The runtime's OWN bootstrap execute: the host sends it after every
+    /// restore attempt (a refused restore included), so it is internal
+    /// machinery, never a gate-permitted command. The runtime's only use
+    /// of the flag is to skip `boot_arm_persisted_runs()`, so this execute
+    /// never releases the factory boot arm.
+    pub runtime_bootstrap: bool,
 }
 
 /// A typed request from Python code running in the kernel to the host.

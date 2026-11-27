@@ -1468,7 +1468,7 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
         cell = asyncio.current_task()
         with (
             mock.patch.object(sys, "stderr", notes),
-            mock.patch.object(bash_module, "_live_cell_owner", lambda: cell),
+            mock.patch.object(bash_module, "_current_cell_completion_context", lambda: (asyncio.Event(), cell)),
         ):
             snapshots = [await handle for _ in range(5)]
 

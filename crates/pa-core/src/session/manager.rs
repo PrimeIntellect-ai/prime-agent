@@ -6,8 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use pa_types::session::{
-    AgentMessage, ChildUsageOrigin, EntryBase, FileEntry, GitContext, SessionHeader, SessionState,
-    SessionStateStatus,
+    AgentMessage, EntryBase, FileEntry, GitContext, SessionHeader, SessionState, SessionStateStatus,
 };
 
 use super::tree::SessionTree;
@@ -71,8 +70,6 @@ pub struct SessionManager {
     labels_by_id: HashMap<String, String>,
     label_timestamps_by_id: HashMap<String, String>,
     leaf_id: Option<String>,
-    /// Exact worker-owned rows replayed by the current prompt admission.
-    admitted_user_rows: std::collections::VecDeque<String>,
     persist_listeners: Vec<SessionPersistListener>,
     /// Told about each appended row that bills a model call.
     billed_row_sink: Option<super::billed_row::BilledRowSink>,
