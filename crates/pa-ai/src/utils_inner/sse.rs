@@ -72,7 +72,12 @@ impl SseDecoder {
 
     /// Feed a chunk of decoded text; returns complete events in order.
     pub fn push_text(&mut self, text: &str) -> Vec<ServerSentEvent> {
-        let mut index = self.buffer.len();
+        // Scan from the start of the retained tail, not from the new chunk: the
+        // tail can end in a `\r` that this chunk's first byte completes as CRLF,
+        // and a scan that began at the new chunk would see a bare `\n` and keep
+        // the `\r` inside the line. Completed lines are drained below, so the
+        // retained tail is one partial line.
+        let mut index = 0;
         self.buffer.push_str(text);
         let mut events = Vec::new();
         let mut line_start = 0;
@@ -80,6 +85,12 @@ impl SseDecoder {
         while index < bytes.len() {
             let break_len = match bytes[index] {
                 b'\r' if bytes.get(index + 1) == Some(&b'\n') => 2,
+                // A chunk-final `\r` may be the first half of a CRLF that the
+                // next chunk completes. Ending the line here would make that
+                // `\n` a false blank line, which dispatches the event early and
+                // splits one response into two (or drops the text entirely when
+                // the provider's chunk boundary lands between them).
+                b'\r' if bytes.get(index + 1).is_none() => break,
                 b'\r' | b'\n' => 1,
                 _ => {
                     index += 1;
@@ -101,7 +112,13 @@ impl SseDecoder {
         let mut events = Vec::new();
         // Remaining buffer without a line break is the last line.
         if !self.buffer.is_empty() {
-            let line = std::mem::take(&mut self.buffer);
+            let mut line = std::mem::take(&mut self.buffer);
+            // A lone `\r` at end of stream is a line terminator (SSE spec); it
+            // was held back by `push_text` only because the next chunk could
+            // have completed it as CRLF.
+            if line.ends_with('\r') {
+                line.pop();
+            }
             if let Some(event) = self.state.decode_line(&line) {
                 events.push(event);
             }
@@ -150,9 +167,30 @@ mod tests {
     }
 
     #[test]
+    fn a_crlf_split_across_chunks_is_one_line_ending_not_two() {
+        // Discussion #4299: the HTTP chunk boundary fell between `\r` and `\n`,
+        // so the decoder ended the line at `\r` and the `\n` became a false
+        // blank line - dispatching "a" alone and dropping the joined text.
+        let mut decoder = SseDecoder::new();
+        assert!(decoder.push_text("data: a\r").is_empty());
+        let events = decoder.push_text("\ndata: b\r\n\r\n");
+        let extra = decoder.finish();
+        let data: Vec<&str> = events
+            .iter()
+            .chain(extra.iter())
+            .map(|event| event.data.as_str())
+            .collect();
+        assert_eq!(data, ["a\nb"], "one event carrying both data lines");
+    }
+
+    #[test]
     fn preserves_fragmented_line_breaks_and_raw_lines() {
         let mut decoder = SseDecoder::new();
         assert!(decoder.push_text("data: first\r").is_empty());
+        // A chunk-final `\r` is held until the next chunk says whether it is a
+        // CRLF: `\r` + `\n` is ONE line ending, so the event dispatches on the
+        // blank line that follows, not on the `\n` that completes the CRLF.
+        assert!(decoder.push_text("\n").is_empty());
         assert_eq!(
             decoder.push_text("\n"),
             vec![ServerSentEvent {

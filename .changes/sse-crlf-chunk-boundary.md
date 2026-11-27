@@ -1,0 +1,1 @@
+- The SSE decoder holds a chunk-final carriage return until the next chunk completes or rules out a CRLF, so a split line ending no longer dispatches an event early and drops the response text.
