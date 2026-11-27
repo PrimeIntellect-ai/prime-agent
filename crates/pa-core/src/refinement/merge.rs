@@ -227,7 +227,11 @@ fn rfc3339_nanos(stamp: &str) -> Option<i64> {
             let offset = rest.get(1..6)?;
             let offset_hours = offset.get(0..2)?.parse::<i64>().ok()?;
             let offset_minutes = offset.get(3..5)?.parse::<i64>().ok()?;
-            if offset.as_bytes().get(2) != Some(&b':') || offset_hours > 23 || offset_minutes > 59 {
+            if rest.len() != 6
+                || offset.as_bytes().get(2) != Some(&b':')
+                || offset_hours > 23
+                || offset_minutes > 59
+            {
                 return None;
             }
             let magnitude = offset_hours * 3_600 + offset_minutes * 60;
@@ -518,6 +522,8 @@ mod tests {
         }
         // A space separator parses, like the sibling parsers.
         assert_eq!(rfc3339_nanos("2026-03-01 23:00:00Z").unwrap(), zulu);
+        // Trailing junk after the offset is not a timestamp.
+        assert!(rfc3339_nanos("2026-03-01T00:00:00+00:00junk").is_none());
     }
 
     #[test]

@@ -77,6 +77,9 @@ pub(crate) struct FakeState {
     pub harness_files: HashMap<String, BTreeMap<String, Vec<u8>>>,
     /// How many guest file downloads ran.
     pub harness_downloads: usize,
+    /// The next download answers, then rewrites the stored file: a guest
+    /// harness save that lands mid-sync.
+    pub harness_write_after_download: bool,
 }
 
 /// An in-memory Prime account: sandboxes are running as soon as they exist.
@@ -408,14 +411,32 @@ impl BotPlatform for FakePlatform {
                     None => super::harness_sync::NO_STATE_MARKER.to_string(),
                 };
             } else if script == super::harness_sync::HARNESS_MOVE_SCRIPT {
+                // The real script only replaces an unchanged state file.
                 let files = state
                     .harness_files
                     .entry(sandbox_id.to_string())
                     .or_default();
-                let bytes = files
-                    .remove(&env["PA_HARNESS_TMP"])
-                    .expect("the uploaded temp harness state");
-                files.insert(env["PA_HARNESS_STATE"].clone(), bytes);
+                let current = files.get(&env["PA_HARNESS_STATE"]).cloned();
+                // The real script's `[ -n ]` reads an empty value as no
+                // expectation at all.
+                let expected = env
+                    .get("PA_EXPECTED_SHA")
+                    .filter(|sha| !sha.is_empty())
+                    .cloned();
+                let unchanged = match (&expected, &current) {
+                    (Some(expected), Some(bytes)) => super::sha256_hex(bytes) == *expected,
+                    (Some(_), None) | (None, Some(_)) => false,
+                    (None, None) => true,
+                };
+                if unchanged {
+                    let bytes = files
+                        .remove(&env["PA_HARNESS_TMP"])
+                        .expect("the uploaded temp harness state");
+                    files.insert(env["PA_HARNESS_STATE"].clone(), bytes);
+                } else {
+                    output.exit_code = 3;
+                    output.stderr = "the bot's harness changed during the sync".to_string();
+                }
             } else {
                 assert!(env.contains_key("BOT_CLIENT"), "unexpected guest script");
                 let file = env
@@ -468,12 +489,23 @@ impl BotPlatform for FakePlatform {
                 return Err(PlatformError::Transient("gateway not ready".into()));
             }
             state.harness_downloads += 1;
-            state
+            let bytes = state
                 .harness_files
                 .get(sandbox_id)
                 .and_then(|files| files.get(path))
                 .cloned()
-                .ok_or_else(|| PlatformError::NotFound(format!("no {path} in the bot")))
+                .ok_or_else(|| PlatformError::NotFound(format!("no {path} in the bot")))?;
+            if std::mem::take(&mut state.harness_write_after_download) {
+                // A guest harness save lands between the download and the
+                // push: the stored file moves past the downloaded bytes.
+                state
+                    .harness_files
+                    .get_mut(sandbox_id)
+                    .and_then(|files| files.get_mut(path))
+                    .expect("the downloaded guest state")
+                    .extend_from_slice(b" ");
+            }
+            Ok(bytes)
         }
         .boxed()
     }

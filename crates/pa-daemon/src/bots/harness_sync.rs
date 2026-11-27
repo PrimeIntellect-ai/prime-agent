@@ -45,9 +45,19 @@ if [ -f "$p" ]; then sha256sum "$p" | cut -d' ' -f1; else echo __NO_STATE__; fi
 "#;
 
 /// Moves an uploaded temp file onto the state file and seals its mode.
-pub(crate) const HARNESS_MOVE_SCRIPT: &str = r#"mkdir -p "$(dirname "$PA_HARNESS_STATE")"
-mv -f "$PA_HARNESS_TMP" "$PA_HARNESS_STATE"
-chmod 600 "$PA_HARNESS_STATE"
+/// The move happens only while the state file still holds the bytes the
+/// merge was built from: a guest write that landed mid-sync makes the
+/// script exit 3, so the sync retries on the newer state instead of
+/// burying it.
+pub(crate) const HARNESS_MOVE_SCRIPT: &str = r#"p="$PA_HARNESS_STATE"
+mkdir -p "$(dirname "$p")"
+if [ -n "$PA_EXPECTED_SHA" ]; then
+  [ -f "$p" ] && [ "$(sha256sum "$p" | cut -d' ' -f1)" = "$PA_EXPECTED_SHA" ] || exit 3
+else
+  [ ! -e "$p" ] || exit 3
+fi
+mv -f "$PA_HARNESS_TMP" "$p"
+chmod 600 "$p"
 "#;
 
 /// The per-bot sync base: the entry versions of the guest file at its
@@ -275,7 +285,7 @@ impl BotManager {
                 None => guest_sha.as_deref() != Some(final_sha.as_str()),
             };
             if needed {
-                self.push_guest_harness(sandbox_id, &final_bytes, deadline)
+                self.push_guest_harness(sandbox_id, &final_bytes, guest_sha.as_deref(), deadline)
                     .await?;
                 pushed = true;
             }
@@ -305,9 +315,16 @@ impl BotManager {
             "PA_HARNESS_STATE".to_string(),
             GUEST_HARNESS_STATE.to_string(),
         )]);
-        let output = self
-            .exec_ready(sandbox_id, HARNESS_PROBE_SCRIPT, &env, None, deadline)
-            .await?;
+        // One hung gateway call can outlive the budget (exec_ready only
+        // checks the deadline between attempts), so the probe rides the
+        // same remaining-deadline timeout as the download.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let output = tokio::time::timeout(
+            remaining,
+            self.exec_ready(sandbox_id, HARNESS_PROBE_SCRIPT, &env, None, deadline),
+        )
+        .await
+        .map_err(|_| anyhow!("the harness probe timed out"))??;
         let digest = output.stdout.trim();
         if digest == NO_STATE_MARKER {
             return Ok(None);
@@ -346,10 +363,14 @@ impl BotManager {
     }
 
     /// Upload the merged state to the temp path and move it into place.
+    /// `expected_sha` is the guest file's sha the merge was built from
+    /// (`None` when the bot had no state file); the move refuses to
+    /// replace a file that moved past it.
     async fn push_guest_harness(
         &self,
         sandbox_id: &str,
         bytes: &[u8],
+        expected_sha: Option<&str>,
         deadline: Instant,
     ) -> Result<()> {
         self.platform
@@ -362,10 +383,17 @@ impl BotManager {
                 "PA_HARNESS_STATE".to_string(),
                 GUEST_HARNESS_STATE.to_string(),
             ),
+            (
+                "PA_EXPECTED_SHA".to_string(),
+                expected_sha.unwrap_or_default().to_string(),
+            ),
         ]);
         let output = self
             .exec_ready(sandbox_id, HARNESS_MOVE_SCRIPT, &env, None, deadline)
             .await?;
+        if output.exit_code == 3 {
+            bail!("the bot's harness changed during the sync; retrying on the newer state");
+        }
         check_exit("install the synced harness in the bot", &output)
     }
 }
@@ -697,6 +725,55 @@ mod tests {
             guest_state(&platform, &sandbox_id).entries[&RefinementKind::Memory]
                 .contains_key("keep")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_guest_write_mid_sync_is_never_buried() {
+        let (dir, platform, manager) = setup();
+        save_owner(&dir, &state_with(&[("owner-memory", 1)]));
+        let record = manager.spawn(&spec("bot-a")).await.unwrap();
+        let sandbox_id = record.sandbox_id.clone().unwrap();
+
+        // The bot refines a new entry; the owner adds one of its own.
+        let mut guest = guest_state(&platform, &sandbox_id);
+        let mut entry = guest.entries[&RefinementKind::Memory]["owner-memory"].clone();
+        entry.id = "bot-memory".to_string();
+        entry.title = "Entry bot-memory".to_string();
+        guest
+            .entries
+            .get_mut(&RefinementKind::Memory)
+            .unwrap()
+            .insert("bot-memory".to_string(), entry);
+        write_guest_state(&platform, &sandbox_id, &guest);
+        save_owner(&dir, &state_with(&[("owner-memory", 1), ("owner-new", 1)]));
+
+        // A guest harness save lands between the download and the push.
+        platform.state().harness_write_after_download = true;
+        let refused = manager
+            .sync_global_harness(&record, deadline())
+            .await
+            .expect_err("the moved guest file refuses the push");
+
+        // The push refused instead of burying the newer guest bytes, and
+        // the owner still took the bot's entry from the download.
+        assert!(refused
+            .to_string()
+            .contains("the bot's harness changed during the sync"));
+        let guest_now =
+            platform.state().harness_files[&sandbox_id][super::GUEST_HARNESS_STATE].clone();
+        assert!(guest_now.ends_with(b" "), "the mid-sync write survives");
+        let owner = load_owner(&dir);
+        assert!(owner.entries[&RefinementKind::Memory].contains_key("bot-memory"));
+
+        // The next round converges on the newer state.
+        manager
+            .sync_global_harness(&record, deadline())
+            .await
+            .unwrap();
+        let guest = guest_state(&platform, &sandbox_id);
+        for id in ["owner-memory", "owner-new", "bot-memory"] {
+            assert!(guest.entries[&RefinementKind::Memory].contains_key(id));
+        }
     }
 
     #[tokio::test(start_paused = true)]
