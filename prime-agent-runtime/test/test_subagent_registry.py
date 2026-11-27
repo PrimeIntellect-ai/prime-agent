@@ -137,6 +137,34 @@ class RlmSubagentRegistryTest(unittest.TestCase):
             },
         )
 
+    def test_forwards_bots_flag_to_host_for_sandbox_targets(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "rlm_child_id": "bot-spawner",
+                "name": "nesting-bot",
+                "session_dir": "bot://bot-spawner",
+                "model": "prime-inference/z-ai/glm-5.3",
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request):
+            asyncio.run(
+                rlm_module.rlm.spawn(
+                    "spawn your own bots",
+                    name="nesting-bot",
+                    target="sandbox",
+                    bots=True,
+                )
+            )
+
+        host_request.assert_awaited_once_with(
+            "rlm.run",
+            {
+                "prompt": "spawn your own bots",
+                "kwargs": {"name": "nesting-bot", "target": "sandbox", "bots": True},
+            },
+        )
+
     def test_requires_an_explicit_child_name(self) -> None:
         host_request = AsyncMock()
         with patch.object(rlm_module, "host_request", host_request):
