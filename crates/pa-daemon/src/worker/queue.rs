@@ -109,6 +109,18 @@ impl TurnWaiter {
     }
 }
 
+/// Answer the queued prompts waiting on their run's start.
+pub(crate) fn release_start_waiters(core: &mut SessionCore) {
+    for item in core.steering.iter_mut().chain(core.follow_up.iter_mut()) {
+        if let Some(TurnWaiter::Started(started)) = item
+            .done
+            .take_if(|waiter| matches!(waiter, TurnWaiter::Started(_)))
+        {
+            let _ = started.send(());
+        }
+    }
+}
+
 impl TurnSettle {
     /// The wire-facing failure text of the settle (`None` when the
     /// settle is a success).

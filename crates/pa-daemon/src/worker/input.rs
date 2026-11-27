@@ -134,13 +134,16 @@ impl Worker {
                 queue_key: None,
                 admission_id: admission_id.clone(),
                 images: images.clone(),
-                // The ack of a prompt the runner takes now waits for its run's
+                // The ack of a prompt the runner takes next waits for its run's
                 // `agent_start`: the response's flush gate then delivers that
                 // frame first, so a client never holds the ack of a run it
                 // cannot see yet. A parked runner answers at once.
                 done: if wait {
                     Some(TurnWaiter::Settled(done_tx))
-                } else if !queued_behind_work && !core.queued_input_parked(&self.input_pauses) {
+                } else if !queued_behind_work
+                    && core.steering.is_empty()
+                    && !core.queued_input_parked(&self.input_pauses)
+                {
                     let (started_tx, started_rx) = oneshot::channel();
                     started = Some(started_rx);
                     Some(TurnWaiter::Started(started_tx))

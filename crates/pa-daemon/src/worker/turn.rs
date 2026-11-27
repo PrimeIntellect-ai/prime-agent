@@ -70,6 +70,9 @@ impl TurnRunner {
                 // compaction is a busy state the resume sites do NOT clear.
                 if core.queued_input_parked(&self.input_pauses) {
                     core.busy = false;
+                    // A parked runner starts nothing: a prompt waiting on its
+                    // run's start answers now, like a parked admission.
+                    super::queue::release_start_waiters(&mut core);
                     None
                 } else if let Some(due) = core.inbox_wake_hold(tokio::time::Instant::now()) {
                     core.busy = false;
