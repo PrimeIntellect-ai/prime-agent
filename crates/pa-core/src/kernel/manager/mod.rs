@@ -415,7 +415,9 @@ struct Guarded {
     flushing_snapshot_for_dispose: bool,
     protocol_repair: Option<Arc<RepairHandle>>,
     kernel_stderr: String,
-    background_bash_handles: HashMap<String, i32>,
+    /// Live background `bash()` handles by activity id: the pid and the
+    /// cell that created the handle.
+    background_bash_handles: HashMap<String, (i32, Option<String>)>,
     handled_host_request_ids: (HashSet<String>, VecDeque<String>),
     /// Late agent-message handlers keyed by request id, insertion-ordered with eviction.
     late_handlers: VecDeque<(String, LateSentAgentMessageCallback)>,
@@ -719,6 +721,31 @@ impl ReplKernelManager {
     #[must_use]
     pub fn background_bash_handle_count(&self) -> usize {
         lock(&self.inner.guarded).background_bash_handles.len()
+    }
+
+    /// The cell that created the live background `bash()` handle with
+    /// this pid. The kernel admits a handle's completion notice before it
+    /// releases the handle, so the notice route can still read it.
+    #[must_use]
+    pub fn background_bash_handle_cell(&self, pid: i64) -> Option<String> {
+        lock(&self.inner.guarded)
+            .background_bash_handles
+            .values()
+            .find(|(handle_pid, _)| i64::from(*handle_pid) == pid)
+            .and_then(|(_, cell)| cell.clone())
+    }
+
+    /// Whether a live background `bash()` handle was created by one of
+    /// these cells.
+    #[must_use]
+    pub fn has_background_bash_handle_from(
+        &self,
+        cells: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        lock(&self.inner.guarded)
+            .background_bash_handles
+            .values()
+            .any(|(_, cell)| cell.as_ref().is_some_and(|cell| cells.contains(cell)))
     }
 
     /// Process id of the spawned kernel child, when present. Used by tests and

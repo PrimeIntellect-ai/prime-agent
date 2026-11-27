@@ -30,16 +30,20 @@ impl Inner {
                         {
                             let mut g = lock(&self.guarded);
                             if active == Some(true) {
+                                // The display carries the cell running at emit time:
+                                // the cell that created the handle.
                                 g.background_bash_handles
                                     .entry(activity_id.to_string())
-                                    .or_insert(pid as i32);
-                            } else if g.background_bash_handles.get(activity_id)
-                                == Some(&(pid as i32))
+                                    .or_insert((pid as i32, id));
+                            } else if g
+                                .background_bash_handles
+                                .get(activity_id)
+                                .is_some_and(|(handle_pid, _)| *handle_pid == pid as i32)
                             {
                                 g.background_bash_handles.remove(activity_id);
-                                // The last live handle settled: the completion notice for it is
-                                // already admitted, so owed continuations may resume.
-                                settled = g.background_bash_handles.is_empty();
+                                // A live handle settled: its completion notice is already
+                                // admitted, so owed continuations and held wakes may resume.
+                                settled = true;
                             }
                         }
                         if settled {
@@ -388,6 +392,47 @@ mod tests {
         );
         manager.inner.cleanup_resources(Signal::Term);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    /// Every handle release settles (a held wake re-checks its own cell's
+    /// handles), and the registry answers which cell created a handle.
+    #[test]
+    fn each_handle_release_settles_and_the_registry_keeps_the_creating_cell() {
+        let (fired, on_settled) = settlement_counter();
+        let manager = ReplKernelManager::new(KernelManagerOptions {
+            on_background_work_settled: Some(on_settled),
+            ..Default::default()
+        });
+        let activity = |id: &str, pid: i32, active: bool, cell: &str| {
+            let mut data = serde_json::Map::new();
+            data.insert(
+                BASH_ACTIVITY_DISPLAY_MIME.to_string(),
+                json!({ "id": id.repeat(32), "pid": pid, "active": active }),
+            );
+            manager.inner.handle_event(Event::Display {
+                id: Some(cell.to_string()),
+                data: Value::Object(data),
+            });
+        };
+        activity("a", 42, true, "cell-server");
+        activity("b", 43, true, "cell-jobs");
+        activity("c", 44, true, "cell-jobs");
+        assert_eq!(
+            manager.background_bash_handle_cell(43).as_deref(),
+            Some("cell-jobs")
+        );
+        let jobs = std::collections::BTreeSet::from(["cell-jobs".to_string()]);
+        assert!(manager.has_background_bash_handle_from(&jobs));
+        activity("b", 43, false, "cell-jobs");
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        assert!(manager.has_background_bash_handle_from(&jobs));
+        activity("c", 44, false, "cell-jobs");
+        assert_eq!(fired.load(Ordering::SeqCst), 2);
+        assert!(
+            !manager.has_background_bash_handle_from(&jobs),
+            "the server from another cell does not count"
+        );
+        assert!(manager.has_background_work());
     }
 
     #[test]

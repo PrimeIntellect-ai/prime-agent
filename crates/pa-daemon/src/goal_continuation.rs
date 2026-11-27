@@ -262,6 +262,24 @@ impl AgentSessionEngine {
             .map_or(0, |live| (live.background_work_probe)())
     }
 
+    /// Whether a live background `bash()` handle was created by one of
+    /// these cells: the inbox wake row's hold (`TurnRunner::inbox_row_held`).
+    /// An unbuilt session answers `false`.
+    pub(crate) fn has_background_bash_handle_from(
+        &self,
+        cells: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        self.kernel_manager()
+            .is_some_and(|manager| manager.has_background_bash_handle_from(cells))
+    }
+
+    /// The cell that created the live background `bash()` handle with this
+    /// pid, stamped onto its completion's inbox message at admission.
+    pub(crate) fn background_bash_handle_cell(&self, pid: i64) -> Option<String> {
+        self.kernel_manager()
+            .and_then(|manager| manager.background_bash_handle_cell(pid))
+    }
+
     /// The built session's kernel manager, when a session is built and its
     /// kernel provisioner still lives. `KernelProvisioner::manager` never
     /// boots a kernel, so the abort paths stay nonblocking.

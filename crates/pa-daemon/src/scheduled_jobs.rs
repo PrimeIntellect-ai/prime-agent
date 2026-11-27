@@ -175,13 +175,11 @@ impl QueueHooks {
             } else {
                 Lane::Steering
             };
-            // A fired heartbeat is a scheduled turn: it wakes at once.
             admit_inbox_notice_locked(
                 &mut core,
                 &inbox,
                 &seam.arrivals,
                 fields,
-                std::time::Duration::ZERO,
                 lane,
                 closed,
                 Some(engine.as_ref()),
