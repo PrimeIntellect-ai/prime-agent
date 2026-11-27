@@ -22,6 +22,7 @@
     clippy::struct_excessive_bools,
     clippy::struct_field_names
 )]
+pub mod a2a;
 pub mod acp;
 pub mod agent_engine;
 pub mod agent_inbox;
@@ -76,7 +77,6 @@ pub mod protocol;
 pub(crate) mod queue_commands;
 pub(crate) mod recovery_pacing;
 mod refine_children;
-mod refine_engine;
 pub mod registration;
 pub(crate) mod registry;
 mod revival_gate;

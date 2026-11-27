@@ -161,6 +161,7 @@ fn assemble_breakdown(
             // A fresh daemon root session.
             rlm_depth: 0,
             factory_child: None,
+            refine_child: false,
             daemonless: false,
             can_spawn: true,
         },

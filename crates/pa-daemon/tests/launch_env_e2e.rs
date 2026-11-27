@@ -538,6 +538,7 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
         session_file: Some(agent_dir.join("parent.jsonl").to_string_lossy().to_string()),
         thinking: None,
         child_script: Some(script.to_string_lossy().to_string()),
+        refine_child: false,
     });
     let handle = children
         .spawn(RlmSpawnRequest {

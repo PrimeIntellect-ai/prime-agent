@@ -173,12 +173,12 @@ impl TurnRunner {
         }
     }
 
-    /// Apply the parked refine child replies at the idle boundary through
+    /// Apply the parked refinement outcomes at the idle boundary through
     /// the engine's shared commit, then emit each one's durable rows and
     /// event here — sequenced by this runner so they never interleave with
     /// a turn's rows.
     async fn apply_parked_refine_replies(&self) {
-        while let Some(outcome) = self.engine.apply_pending_refine_reply().await {
+        while let Some((source, outcome)) = self.engine.apply_pending_refine_outcome().await {
             let origin = {
                 let core = self.core.lock().unwrap();
                 core.store
@@ -191,6 +191,7 @@ impl TurnRunner {
                     &self.events,
                     &session_id,
                     &generation,
+                    source,
                     outcome,
                 );
             }
@@ -391,6 +392,39 @@ impl TurnRunner {
         self.roster_pushes.push();
     }
 
+    /// The run's `agent_start`, tagged with its anchor row: the client's
+    /// own admission id for an admitted prompt, or `continuation` for a row
+    /// that continues the session's own work. An inbox wake (arrival or
+    /// reminder) while the inbox holds an agent message brings a new
+    /// delivery, so it is no continuation.
+    fn agent_start_frame(&self, first: &QueuedItem) -> Value {
+        let mut frame = json!({ "type": "agent_start" });
+        let agent_message_wake = matches!(
+            first.queue_key.as_deref(),
+            Some(INBOX_ARRIVAL_QUEUE_KEY | super::INBOX_REMINDER_QUEUE_KEY)
+        ) && self
+            .inbox_engine
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .and_then(|engine| engine.inbox())
+            .is_some_and(|inbox| {
+                inbox
+                    .count()
+                    .2
+                    .contains_key(pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE)
+            });
+        if let Some(client_id) = first
+            .admission_id
+            .as_deref()
+            .and_then(|id| self.prompt_admissions.client_id(id))
+        {
+            frame["clientAdmissionId"] = json!(client_id);
+        } else if super::continues_session_work(first) && !agent_message_wake {
+            frame["continuation"] = json!(true);
+        }
+        frame
+    }
+
     /// One delivery: the first item anchors the turn and the rest ride
     /// as co-delivered user rows of the same run.
     pub(super) async fn run_turn(
@@ -402,7 +436,8 @@ impl TurnRunner {
         let Some((first, batched)) = items.split_first() else {
             return;
         };
-        self.emit_turn_event(json!({ "type": "agent_start" }));
+        let agent_start = self.agent_start_frame(first);
+        self.emit_turn_event(agent_start.clone());
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The pane reporter's run boundary (TS `agent_start`): working.
         self.herdr.lock().unwrap().run_started();
@@ -978,9 +1013,10 @@ impl TurnRunner {
                         "type": "refine_complete",
                         "result": result,
                     })],
-                    EngineEvent::RefineFailed { error } => vec![json!({
+                    EngineEvent::RefineFailed { error, source } => vec![json!({
                         "type": "refine_failed",
                         "error": error,
+                        "source": source.as_str(),
                     })],
                     // The loop's run-boundary frames (TS `agent_start`/
                     // `agent_end`): the run's whole message set rides
@@ -992,7 +1028,7 @@ impl TurnRunner {
                     // original `toolUse` turn_end, so the marker is the one
                     // wire fact that separates the aborted settle from a
                     // normal one.
-                    EngineEvent::AgentStart => vec![json!({ "type": "agent_start" })],
+                    EngineEvent::AgentStart => vec![agent_start.clone()],
                     EngineEvent::AgentEnd { messages, aborted } => {
                         let mut frame = json!({
                             "type": "agent_end",
@@ -1334,8 +1370,8 @@ impl TurnRunner {
         // The compact-trigger round services off the settle as a
         // background task: the queued next prompt's admission never waits
         // on it. The round is the refinement child's spawn — fire-and-wake;
-        // the child's proposal applies on its reply's arrival (the reply's
-        // wake emits the outcome rows and the `refine_complete` event).
+        // the child's proposal applies when it settles (the apply emits the
+        // outcome rows and the `refine_complete` event).
         {
             let engine = review_engine;
             let core = Arc::clone(&self.core);

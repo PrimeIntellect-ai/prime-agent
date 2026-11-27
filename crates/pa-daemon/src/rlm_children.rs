@@ -98,6 +98,9 @@ pub struct ParentIdentity {
     pub thinking: Option<String>,
     /// Verification seam: create children with a scripted engine file.
     pub child_script: Option<String>,
+    /// This session is a refinement child: it spawns no children (they
+    /// would be ordinary sessions that can write the harness).
+    pub refine_child: bool,
 }
 
 impl ParentIdentity {
@@ -194,8 +197,10 @@ struct ChildRecord {
     /// turn's terminal status so resident child sessions remain resident.
     factory_task_busy: Option<bool>,
     /// The refinement child (the daemon's `refine_child` spawn): a
-    /// one-shot planning pass whose record the registry retires at its
-    /// own settle — no engine-side teardown.
+    /// one-shot refinement run whose record the registry retires at its
+    /// own settle — no engine-side teardown — and whose terminal outcome
+    /// goes to the engine's refine terminal hook, never the parent
+    /// conversation.
     refine_child: bool,
     /// The delete or close of this child, kept apart from `run` so a live run
     /// is never faked settled during a delete's kill.
@@ -325,6 +330,20 @@ pub type DeleteNotifier = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 pub(crate) type ChildUpdateSink = std::sync::Arc<dyn Fn(Value) + Send + Sync>;
 
+/// How a refinement child's run ended, as its parent applies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RefineChildOutcome {
+    /// The run finished: its final message is the proposal.
+    Answered(String),
+    /// The run ended without a proposal: its error or cancel reason, `None`
+    /// for a run that ended without one or without a final message.
+    Failed(Option<String>),
+}
+
+/// The parent engine's refinement-child terminal hook: the child's active
+/// session id and how its run ended.
+pub(crate) type RefineTerminalHook = std::sync::Arc<dyn Fn(&str, RefineChildOutcome) + Send + Sync>;
+
 /// The parent worker's turn state as the detached child prompt tasks read it.
 #[derive(Debug, Clone, Copy, Default)]
 struct ParentTurn {
@@ -360,6 +379,10 @@ struct SupervisorChildSessionsInner {
     parent_turn: tokio::sync::watch::Sender<ParentTurn>,
     /// The parent engine's child-settle hook (goal continuation resume).
     settle_hook: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Where a refinement child's terminal outcome goes instead of the
+    /// parent conversation (the engine fails the refinement it never
+    /// answered).
+    refine_terminal_hook: std::sync::Mutex<Option<RefineTerminalHook>>,
     /// Whether any tracked child run is unsettled (the `any_running`
     /// verdict, re-read at every registry change): a sync read for the
     /// worker's session summary, and a change feed the worker turns into
@@ -422,6 +445,7 @@ impl SupervisorChildSessions {
                 deleted_children: std::sync::Mutex::new(std::collections::HashMap::new()),
                 parent_turn: tokio::sync::watch::Sender::new(ParentTurn::default()),
                 settle_hook: std::sync::Mutex::new(None),
+                refine_terminal_hook: std::sync::Mutex::new(None),
                 running: tokio::sync::watch::Sender::new(false),
                 settle_notify: tokio::sync::Notify::new(),
                 model_refusal_telemetry,
@@ -478,6 +502,16 @@ impl SupervisorChildSessions {
     /// Panics when the settle-hook mutex is poisoned.
     pub fn set_settle_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *self.inner.settle_hook.lock().expect("settle hook lock") = Some(hook);
+    }
+
+    /// Register the refinement-child terminal hook: a refine child's
+    /// terminal outcome reaches it instead of the parent conversation.
+    pub(crate) fn set_refine_terminal_hook(&self, hook: RefineTerminalHook) {
+        *self
+            .inner
+            .refine_terminal_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
 
     /// Wire the parent session's semantic-edge recorder (the per-build
@@ -637,22 +671,8 @@ impl SupervisorChildSessions {
         identities
     }
 
-    /// Whether one child is live: only a record that is present and still
-    /// running can still reply — an absent record (deleted or replaced) and
-    /// a settled run cannot. The refine flight's liveness probe.
-    pub async fn child_live(&self, rlm_child_id: &str) -> bool {
-        let children = self.inner.children.lock().await;
-        for record in children.iter() {
-            let record = record.lock().await;
-            if record.rlm_child_id == rlm_child_id {
-                return record.run.is_running();
-            }
-        }
-        false
-    }
-
     /// Release a refine child's held task prompt: its parent calls this once
-    /// the child's flight is recorded, so the child's reply always finds it.
+    /// the child's flight is recorded, so the child's settle always finds it.
     pub async fn release_child_prompt(&self, rlm_child_id: &str) {
         let children = self.inner.children.lock().await;
         for record in children.iter() {

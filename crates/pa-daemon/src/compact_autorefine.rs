@@ -1,7 +1,7 @@
 //! The compact-trigger auto-refine scheduling (TS `_scheduleAutoRefineAfterCompaction`, armed
 //! after every successful compaction): the daemon worker services the trigger off each turn's
 //! settle in a background task — the round is the refinement child's spawn (fire-and-wake;
-//! the child's proposal applies on its reply's arrival). ACP consumes it at the serialized
+//! the child's proposal applies when it settles). ACP consumes it at the serialized
 //! checkpoint between turns.
 
 use pa_core::session_engine::auto_refine_trigger::CompactAutoRefineSurface;
@@ -10,28 +10,6 @@ use pa_core::session_engine::refine::RefinementSource;
 use crate::agent_engine::AgentSessionEngine;
 
 impl AgentSessionEngine {
-    pub(crate) fn report_background_refinement(
-        &self,
-        pending: tokio::task::JoinHandle<
-            anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
-        >,
-    ) {
-        let sink = self.refinement_completion_sink.lock().unwrap().clone();
-        if let Some(sink) = sink {
-            sink(pending);
-        } else {
-            // Non-worker hosts can omit the stream sink; durable core rows still
-            // persist. Observe errors instead of silently discarding the task.
-            self.runtime.spawn(async move {
-                match pending.await {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(error)) => eprintln!("pa-daemon: refinement failed: {error:#}"),
-                    Err(error) => eprintln!("pa-daemon: refinement task failed: {error}"),
-                }
-            });
-        }
-    }
-
     /// Whether a compaction armed the compact-trigger round on the built
     /// session (TS `_compactAutoRefinePending`).
     pub(crate) fn compact_auto_refine_pending(&self) -> bool {
@@ -88,9 +66,6 @@ impl AgentSessionEngine {
             return Ok(());
         };
         let outcome = self.runtime.block_on(async {
-            // A dead auto child's round releases first, so its in-flight
-            // guard never holds off this take.
-            self.release_dead_refine_child_rounds().await;
             // The round take: the gates decide and stamp the cadence; the
             // in-flight guard holds the trigger while the child runs.
             let Some(options) = core
@@ -100,7 +75,7 @@ impl AgentSessionEngine {
                 return Ok(());
             };
             // Fire: the spawn returns once the child is admitted; the
-            // child's reply applies on arrival (the apply finishes the round
+            // child's proposal applies when it settles (the apply finishes the round
             // either way). A standalone engine refuses visibly; the taken
             // round is released below.
             let Some(children) = children.as_ref() else {

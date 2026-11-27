@@ -367,6 +367,7 @@ impl Worker {
                 // A TS replacement runtime has no semantic spawn.
                 semantic_spawn: None,
                 factory_child: false,
+                refine_child: false,
                 factory_contract: None,
             }) {
             Ok(()) => self.reseed_rlm_children().await,
@@ -541,22 +542,7 @@ impl Worker {
                         // The state change is durable before the announcement: the mint runs
                         // outside a turn, so the store write rides here, not the emit closure.
                         if let Some(goal) = continuation.goal_update {
-                            {
-                                let mut core = self.core.lock().unwrap();
-                                if let Some(store) = core.store.as_mut() {
-                                    let _ = store.persist_entry(
-                                        "custom",
-                                        json!({
-                                            "customType": pa_core::goals::GOAL_STATE_CUSTOM_TYPE,
-                                            "data": goal,
-                                        }),
-                                    );
-                                }
-                            }
-                            self.emit_worker_event(json!({
-                                "type": "goal_update",
-                                "goal": goal,
-                            }));
+                            super::persist_and_emit_goal_update(&self.core, &self.events, &goal);
                         }
                         {
                             let mut core = self.core.lock().unwrap();
@@ -602,9 +588,8 @@ impl Worker {
                 // interleaving before it.
                 let engine = std::sync::Arc::clone(&self.engine);
                 // The round is the refinement child's spawn — fire-and-wake;
-                // the child's proposal applies on its reply's arrival (the
-                // reply's wake emits the outcome rows and the
-                // `refine_complete` event).
+                // the child's proposal applies when it settles (the apply
+                // emits the outcome rows and the `refine_complete` event).
                 let spawned = if goal_continue_scheduled {
                     Ok(())
                 } else {

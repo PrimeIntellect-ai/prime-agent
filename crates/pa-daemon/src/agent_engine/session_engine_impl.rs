@@ -333,27 +333,12 @@ impl SessionEngine for AgentSessionEngine {
         self.consume_compact_auto_refine_round()
     }
 
-    /// The refine child's reply wake, delivery half: an in-flight child's
-    /// reply (or its failure envelope) parks for the idle-boundary
-    /// apply — the child's send never waits on the parent's apply.
-    fn park_refine_child_reply(
-        &self,
-        sender_active_session_id: &str,
-        message: &str,
-    ) -> crate::engine::RefineChildReplyPark<'_> {
-        // The fully-qualified call names the inherent (sync) park over
-        // this same-named trait method: the delivery answers immediately.
-        let parked =
-            AgentSessionEngine::park_refine_child_reply(self, sender_active_session_id, message);
-        Box::pin(async move { parked })
-    }
-
-    /// The oldest parked refine reply's idle-boundary apply, through the
+    /// The oldest parked refinement outcome's idle-boundary apply, through the
     /// shared refinement commit.
-    fn apply_pending_refine_reply(&self) -> crate::engine::PendingRefineApply<'_> {
+    fn apply_pending_refine_outcome(&self) -> crate::engine::PendingRefineApply<'_> {
         // The fully-qualified call names the inherent (async) apply over
         // this same-named trait method.
-        Box::pin(async move { AgentSessionEngine::apply_pending_refine_reply(self).await })
+        Box::pin(async move { AgentSessionEngine::apply_pending_refine_outcome(self).await })
     }
 
     /// The worker's live session summary, rendered into the sender identity block.
@@ -929,6 +914,8 @@ impl SessionEngine for AgentSessionEngine {
         identity
             .factory_contract
             .clone_into(&mut self.factory_contract.lock().expect("factory contract lock"));
+        self.refine_child
+            .store(identity.refine_child, std::sync::atomic::Ordering::Relaxed);
         if let Some(thinking) = &identity.thinking {
             pa_ai::models::thinking_level_from_str(thinking)
                 .ok_or_else(|| anyhow::anyhow!("unknown thinking level \"{thinking}\""))?;
@@ -992,6 +979,7 @@ impl SessionEngine for AgentSessionEngine {
                 session_file: identity.session_file.clone(),
                 thinking: identity.thinking.clone(),
                 child_script: identity.child_script,
+                refine_child: identity.refine_child,
             };
             children.set_identity(parent);
         }
@@ -1321,7 +1309,7 @@ impl SessionEngine for AgentSessionEngine {
         source: pa_core::session_engine::refine::RefinementSource,
     ) -> anyhow::Result<String> {
         // Fire-and-wake: the spawn returns once the child is admitted; the
-        // child's proposal applies on its reply's arrival.
+        // child's proposal applies when it settles.
         self.runtime
             .block_on(async { self.spawn_refine_child(&options, source).await })
     }

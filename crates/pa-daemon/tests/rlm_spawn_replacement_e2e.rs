@@ -222,6 +222,7 @@ fn children(socket: &Path, agent_dir: &Path, script: &Path) -> SupervisorChildSe
         session_file: Some(agent_dir.join("parent.jsonl").to_string_lossy().to_string()),
         thinking: None,
         child_script: Some(script.to_string_lossy().to_string()),
+        refine_child: false,
     });
     sessions
 }

@@ -26,7 +26,7 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Literal
 
-from .factory import require_factory_enabled, validate_factory_spec
+from .factory import check_factory_spec, require_factory_enabled
 
 if sys.platform == "darwin":
     import fcntl
@@ -142,6 +142,16 @@ def _require_refinements_enabled() -> None:
     value = document.get("harnessRefinements") if isinstance(document, dict) else None
     if value is False:
         raise RuntimeError("Harness refinements are disabled in /settings")
+
+
+def _require_harness_writable() -> None:
+    # A refinement child proposes harness edits in its final message; only its
+    # parent commits them, so every store refuses writes in the child's kernel.
+    if os.environ.get("RLM_HARNESS_READ_ONLY") == "1":
+        raise RuntimeError(
+            "Harness writes are refused in a refinement child: put the edits in your "
+            "final JSON proposal; your parent applies them."
+        )
 
 
 def _resolve_global_flag(global_: bool = False, extra: dict[str, Any] | None = None) -> bool:
@@ -315,7 +325,7 @@ def _validate_factory_arguments(entry_name: str, arguments: dict[str, Any]) -> N
         raise ValueError(
             f"factory entry {entry_name!r} rejected: factory entries require a dag or machine object in arguments"
         )
-    errors = validate_factory_spec(spec)
+    errors = check_factory_spec(spec)
     if errors:
         raise ValueError(f"factory entry {entry_name!r} rejected: {'; '.join(errors)}")
 
@@ -436,6 +446,7 @@ class HarnessState:
 
     def _ensure_local_writable(self) -> None:
         _require_refinements_enabled()
+        _require_harness_writable()
         if self._local_write_error is not None:
             raise RuntimeError(self._local_write_error)
 
@@ -1098,7 +1109,7 @@ class HarnessState:
         # dict after creation must not change the live entry (a later update
         # that omits both forms would preserve the mutated, unvalidated spec).
         spec, key = _factory_spec_argument(dag, machine)
-        errors = validate_factory_spec(spec)
+        errors = check_factory_spec(spec)
         if errors:
             raise ValueError("; ".join(errors))
         return self.create(
@@ -1135,7 +1146,7 @@ class HarnessState:
         # update to re-send the full spec, exactly like update_skill treats reference.
         if dag is not None or machine is not None:
             spec, key = _factory_spec_argument(dag, machine)
-            errors = validate_factory_spec(spec)
+            errors = check_factory_spec(spec)
             if errors:
                 raise ValueError("; ".join(errors))
             arguments = {key: copy.deepcopy(spec)}

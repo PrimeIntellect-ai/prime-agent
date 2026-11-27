@@ -3,18 +3,11 @@
 //! launches, the transcript reads, the inbox messages, and the
 //! edit-confirmation and agent-message-receipt suppressions.
 
-use pa_types::inbox_notice::{
-    INBOX_CLASS_AGENT_MESSAGE, INBOX_CLASS_BASH_DONE, INBOX_CLASS_CHILD_EXITED,
-    INBOX_CLASS_CHILD_FAILED, INBOX_CLASS_HEARTBEAT,
-};
+use pa_types::inbox_notice::{custom_type_for_inbox_class, INBOX_CLASS_AGENT_MESSAGE};
 use serde_json::{json, Value};
 
 use crate::chat::ChatEntry;
-use crate::custom_message::{
-    custom_message_entries, AGENT_MESSAGE_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
-    HEARTBEAT_PROMPT_CUSTOM_TYPE, RLM_CHILD_FAILURE_CUSTOM_TYPE,
-    RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
-};
+use crate::custom_message::custom_message_entries;
 
 /// Parsed `details` of one ipython execution result.
 pub(crate) struct IpythonDetails {
@@ -232,8 +225,9 @@ impl IpythonDetails {
 }
 
 /// One `rlm.inbox.read` message as the custom row it replaced in the
-/// transcript, decoded by the transcript's own dispatch. A class without
-/// a dedicated row renders the generic panel under its class name.
+/// transcript, decoded by the transcript's own dispatch. A class the
+/// shared class table does not know renders the generic panel under its
+/// class name.
 fn inbox_message_entries(message: &Value) -> Vec<ChatEntry> {
     let class = message.get("class").and_then(Value::as_str).unwrap_or("");
     let text = message.get("text").and_then(Value::as_str).unwrap_or("");
@@ -242,17 +236,11 @@ fn inbox_message_entries(message: &Value) -> Vec<ChatEntry> {
         .filter(|meta| meta.is_object())
         .cloned()
         .unwrap_or(Value::Null);
-    let custom_type = match class {
-        INBOX_CLASS_AGENT_MESSAGE => {
-            details["message"] = json!(text);
-            AGENT_MESSAGE_CUSTOM_TYPE
-        }
-        INBOX_CLASS_CHILD_EXITED => RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
-        INBOX_CLASS_CHILD_FAILED => RLM_CHILD_FAILURE_CUSTOM_TYPE,
-        INBOX_CLASS_HEARTBEAT => HEARTBEAT_PROMPT_CUSTOM_TYPE,
-        INBOX_CLASS_BASH_DONE => ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
-        _ => class,
-    };
+    // The agent-message row carries its body in the details.
+    if class == INBOX_CLASS_AGENT_MESSAGE {
+        details["message"] = json!(text);
+    }
+    let custom_type = custom_type_for_inbox_class(class).unwrap_or(class);
     custom_message_entries(&json!({
         "role": "custom",
         "customType": custom_type,
@@ -445,6 +433,25 @@ pub(crate) fn read_background_shell(code: &str, details: &Value) -> Option<Backg
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_inbox_class_reads_back_as_a_dedicated_row() {
+        // A class the table routes must never fall through to the
+        // always-expanded generic panel inside the reading cell's card.
+        for (class, _) in pa_types::inbox_notice::INBOX_CLASS_CUSTOM_TYPES {
+            let entries = inbox_message_entries(&json!({
+                "id": "inbox-1", "class": class, "arrivedAtMs": 1, "text": "body",
+                "meta": { "id": "agentmsg_1" },
+            }));
+            assert!(
+                !entries.is_empty()
+                    && !entries
+                        .iter()
+                        .any(|entry| matches!(entry, ChatEntry::CustomPanel(_))),
+                "{class}: {entries:?}"
+            );
+        }
+    }
 
     #[test]
     fn parse_sent_agent_message_shapes() {

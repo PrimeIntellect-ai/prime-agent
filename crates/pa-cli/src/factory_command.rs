@@ -2,25 +2,15 @@
 //!
 //! The library is `pa-factory`'s scan (the same one a session's
 //! `factory.compile` resolves names with), so `list`, `export`, and
-//! `convert` read files only. `import` also asks the kernel Python's
-//! validator to check the spec's structure before the file persists (an
-//! invalid spec never persists; the exact error sentences reach this
-//! command's output verbatim).
+//! `convert` read files only, and `import` checks the spec with
+//! `pa_factory::check_spec` before the file persists (an invalid spec never
+//! persists; the exact error sentences reach this command's output
+//! verbatim).
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 
 use serde_json::{json, Value};
-
-/// The thin runner executed by the kernel Python: one JSON payload in on
-/// stdin, one JSON result out on stdout (`rlm.factory.cli_dispatch`).
-const CLI_DISPATCH_RUNNER: &str = concat!(
-    "import json, sys\n",
-    "from rlm.factory import cli_dispatch\n",
-    "payload = json.loads(sys.stdin.read() or \"{}\")\n",
-    "print(json.dumps(cli_dispatch(payload)))\n",
-);
 
 /// The parsed `prime-agent factory` invocation.
 #[derive(Debug, PartialEq, Eq)]
@@ -328,9 +318,9 @@ fn run_export(name: &str, out: &str, json: bool) -> i32 {
     })
 }
 
-/// `factory import <path>`: parse and bound-check the MACHINE.md here, ask
-/// the kernel validator to check its spec, then copy it byte for byte into
-/// the personal library.
+/// `factory import <path>`: parse and check the MACHINE.md (its spec through
+/// `pa_factory::check_spec`), then copy it byte for byte into the personal
+/// library.
 fn import_machine(source: &Path, user_dir: &Path) -> Result<Value, String> {
     if !source.is_file() {
         return Err(format!("machine file not found: {}", source.display()));
@@ -342,13 +332,6 @@ fn import_machine(source: &Path, user_dir: &Path) -> Result<Value, String> {
             "{} is a machine directory, which the library uses before a MACHINE.md; rename the machine or move the directory first",
             folder.display()
         ));
-    }
-    let checked = resolve_kernel_python().and_then(|python| {
-        dispatch_via_kernel(&python, &json!({"op": "validate", "spec": machine.spec}))
-    })?;
-    let errors = dispatch_error_sentences(&checked);
-    if !errors.is_empty() {
-        return Err(errors.join("; "));
     }
     let bytes = std::fs::read(source)
         .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
@@ -400,71 +383,6 @@ fn print_result(result: Result<Value, String>, json: bool, line: impl Fn(&Value)
             1
         }
     }
-}
-
-/// Resolve the kernel Python (bootstrapping the venv on first use), the
-/// same interpreter the factory gate lives in.
-fn resolve_kernel_python() -> Result<PathBuf, String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("failed to start the CLI runtime: {error}"))?;
-    runtime
-        .block_on(pa_core::kernel::ensure_kernel_python(
-            pa_core::kernel::EnsureKernelPythonOptions::default(),
-        ))
-        .map_err(|error| format!("kernel python unavailable: {error:#}"))
-}
-
-/// Drive one `rlm.factory.cli_dispatch` payload through the kernel Python.
-fn dispatch_via_kernel(python: &std::path::Path, payload: &Value) -> Result<Value, String> {
-    let mut child = Command::new(python);
-    child
-        .args(["-P", "-s", "-c", CLI_DISPATCH_RUNNER])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear()
-        .envs(pa_core::kernel::python_process_environment());
-    // Hidden window on Windows, matching the kernel probes.
-    pa_core::platform::process::set_no_window(&mut child);
-    let mut child = child
-        .spawn()
-        .map_err(|error| format!("failed to run the kernel python: {error}"))?;
-    {
-        let stdin = child.stdin.as_mut().expect("stdin was piped on this child");
-        stdin
-            .write_all(payload.to_string().as_bytes())
-            .map_err(|error| format!("failed to send the payload: {error}"))?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("failed to wait for the kernel python: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail: Vec<&str> = stderr.lines().rev().take(3).collect::<Vec<_>>();
-        let mut lines = tail;
-        lines.reverse();
-        return Err(format!(
-            "the kernel python failed (exit {}): {}",
-            output.status,
-            lines.join(" | ")
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(stdout.trim_end_matches(['\n', '\r']))
-        .map_err(|error| format!("unreadable kernel result: {error}"))
-}
-
-/// The failed dispatch's error sentences (the validator's exact text,
-/// unwrapped from the JSON envelope — printing the `Value` would show the
-/// JSON quoting around every sentence).
-fn dispatch_error_sentences(result: &Value) -> Vec<&str> {
-    result
-        .get("errors")
-        .and_then(Value::as_array)
-        .map(|errors| errors.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -571,12 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_runner_contract_is_the_json_facade() {
-        assert!(CLI_DISPATCH_RUNNER.contains("from rlm.factory import cli_dispatch"));
-        assert!(CLI_DISPATCH_RUNNER.contains("print(json.dumps(cli_dispatch(payload)))"));
-    }
-
-    #[test]
     fn listing_row_renders_name_source_description() {
         let machine = pa_factory::LibraryMachine {
             name: "sweep".to_string(),
@@ -584,7 +496,7 @@ mod tests {
             version: "1".to_string(),
             author: "Tester".to_string(),
             source: "repo".to_string(),
-            path: PathBuf::from("/machines/sweep/MACHINE.md"),
+            path: std::path::PathBuf::from("/machines/sweep/MACHINE.md"),
             kind: pa_factory::MachineKind::File,
         };
         assert_eq!(
@@ -599,7 +511,7 @@ mod tests {
         let source = dir.path().join("MACHINE.md");
         std::fs::write(
             &source,
-            "---\nname: sweep\ndescription: Sweep.\n---\n```machine-spec\n{\"states\": []}\n```\n",
+            "---\nname: sweep\ndescription: Sweep.\n---\n```machine-spec\n{\"states\": [{\"id\": \"a\", \"entry\": true, \"subagent\": \"w\"}]}\n```\n",
         )
         .unwrap();
         let user = dir.path().join("machines");

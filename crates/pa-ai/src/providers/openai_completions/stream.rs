@@ -12,7 +12,9 @@ use crate::event_stream::{
     AssistantMessageEventWriter,
 };
 use crate::providers::openai_completions::convert::{map_stop_reason, parse_chunk_usage};
-use crate::providers::openai_completions::errors::{openai_http_error, openrouter_raw_metadata};
+use crate::providers::openai_completions::errors::{
+    openai_http_error, openai_stream_error, openrouter_raw_metadata,
+};
 use crate::providers::openai_completions::get_compat_cache_control;
 use crate::providers::openai_completions::params::{build_headers, build_params};
 use crate::providers::openai_completions::{
@@ -634,7 +636,7 @@ async fn run_stream(
     if !(200..300).contains(&response.status) {
         let body = response.read_all_text().await.unwrap_or_default();
         return Err(openai_http_error(
-            response.status,
+            Some(response.status),
             &body,
             response.headers.clone(),
         ));
@@ -645,45 +647,16 @@ async fn run_stream(
     });
 
     let mut state = StreamingState::new(output.clone());
-    let mut decoder = SseDecoder::new();
-    loop {
-        let chunk = match response.next_text().await {
-            Ok(Some(chunk)) => chunk,
-            Ok(None) => break,
-            Err(error) => {
-                // TS catch: encode the reasoning-details signature, then settle the partial tool
-                // calls before the error event carries the message.
-                encode_reasoning_details_signature(&mut state);
-                settle_partial_tool_calls(&mut state);
-                repair_unnamed_tool_calls(&mut state.output);
-                *output = state.output;
-                return Err(error);
-            }
-        };
-        let events = decoder.push_text(&chunk);
-        for event in &events {
-            if mark_done_marker(event, &mut state) {
-                // A held-open body past [DONE] never EOFs; the marker
-                // ends the stream.
-                break;
-            }
-            if let Some(chunk) = parse_sse_event_data(event) {
-                handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
-            }
-        }
-        if state.saw_done_marker {
-            break;
-        }
-    }
-    if !state.saw_done_marker {
-        for event in decoder.finish() {
-            if mark_done_marker(&event, &mut state) {
-                continue;
-            }
-            if let Some(chunk) = parse_sse_event_data(&event) {
-                handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
-            }
-        }
+    if let Err(error) =
+        read_stream(&mut response, model, cache_write_cost, &mut state, writer).await
+    {
+        // TS catch: encode the reasoning-details signature, then settle the partial tool
+        // calls before the error event carries the message.
+        encode_reasoning_details_signature(&mut state);
+        settle_partial_tool_calls(&mut state);
+        repair_unnamed_tool_calls(&mut state.output);
+        *output = state.output;
+        return Err(error);
     }
     // The multiplier table is OpenAI's own; gateways price tiers per endpoint
     // (OpenRouter reports its cost in usage instead, see parse_chunk_usage).
@@ -733,6 +706,54 @@ async fn run_stream(
         )));
     }
 
+    Ok(())
+}
+
+/// Read the SSE body into `state` until the `[DONE]` marker or the end of the body.
+async fn read_stream(
+    response: &mut HttpResponse,
+    model: &Model,
+    cache_write_cost: Option<f64>,
+    state: &mut StreamingState,
+    writer: &AssistantMessageEventWriter,
+) -> Result<(), ProviderError> {
+    let mut decoder = SseDecoder::new();
+    while let Some(text) = response.next_text().await? {
+        for event in decoder.push_text(&text) {
+            if mark_done_marker(&event, state) {
+                // A held-open body past [DONE] never EOFs; the marker
+                // ends the stream.
+                return Ok(());
+            }
+            handle_event(&event, response, model, cache_write_cost, state, writer)?;
+        }
+    }
+    for event in decoder.finish() {
+        if mark_done_marker(&event, state) {
+            continue;
+        }
+        handle_event(&event, response, model, cache_write_cost, state, writer)?;
+    }
+    Ok(())
+}
+
+/// Handle one SSE event. A chunk carrying an `error` object fails the request, as the `openai`
+/// SDK's stream reader throws on `data.error`.
+fn handle_event(
+    event: &ServerSentEvent,
+    response: &HttpResponse,
+    model: &Model,
+    cache_write_cost: Option<f64>,
+    state: &mut StreamingState,
+    writer: &AssistantMessageEventWriter,
+) -> Result<(), ProviderError> {
+    let Some(chunk) = parse_sse_event_data(event) else {
+        return Ok(());
+    };
+    if let Some(error) = chunk.get("error").filter(|error| error.is_object()) {
+        return Err(openai_stream_error(error, response.headers.clone()));
+    }
+    handle_chunk(&chunk, model, cache_write_cost, state, writer);
     Ok(())
 }
 

@@ -233,6 +233,7 @@ fn children(socket: &Path, agent_dir: &Path, script: &Path, depth: u32) -> Super
         session_file: Some(agent_dir.join("parent.jsonl").to_string_lossy().to_string()),
         thinking: None,
         child_script: Some(script.to_string_lossy().to_string()),
+        refine_child: false,
     });
     sessions.set_parent_session_name(Some("parent-name".to_string()));
     sessions
@@ -299,6 +300,7 @@ async fn rlm_spawn_cwd_starts_the_child_in_that_directory() {
         session_file: Some(agent_dir.join("parent.jsonl").to_string_lossy().to_string()),
         thinking: None,
         child_script: Some(script.to_string_lossy().to_string()),
+        refine_child: false,
     });
 
     let handle = children
@@ -751,6 +753,7 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
             session_file: Some(parent.session_file.clone()),
             thinking: None,
             child_script: None,
+            refine_child: false,
         });
         sessions
     };
@@ -1009,6 +1012,7 @@ async fn a_passivated_decision_child_revives_as_a_decision_child_and_answers() {
             session_file: Some(parent.session_file.clone()),
             thinking: None,
             child_script: None,
+            refine_child: false,
         });
         sessions
     };

@@ -110,24 +110,12 @@ enum PromptContextBoundary {
     Leaf(String),
 }
 
-/// Transfers completion reporting to the worker without retaining its turn runner.
-pub(crate) type RefinementCompletionSink = std::sync::Arc<
-    dyn Fn(
-            tokio::task::JoinHandle<
-                anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
-            >,
-        ) + Send
-        + Sync,
->;
-
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
     pub(crate) config: AgentEngineConfig,
     /// The session-scoped ACP MCP store, shared with the core engine's prompt gating.
     pub(crate) mcp: std::sync::Arc<std::sync::Mutex<pa_core::mcp::McpManager>>,
-    /// Transfers refinement completion reporting to the worker sink.
-    pub(crate) refinement_completion_sink: std::sync::Mutex<Option<RefinementCompletionSink>>,
     pub(crate) late_agent_message_sink:
         std::sync::Mutex<Option<pa_core::LateSentAgentMessageHandler>>,
     /// Whether this run's usage crossed the goal's token budget: the boundary
@@ -245,22 +233,15 @@ pub struct AgentSessionEngine {
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
     /// The in-flight refinement children, keyed by the child's active
-    /// session id for the child-reply wake.
+    /// session id for the settle's terminal hook.
     pub(crate) refine_flights: std::sync::Mutex<
         std::collections::HashMap<String, crate::refine_children::RefineChildFlight>,
     >,
-    /// The parked refinement replies, oldest first: each waits for the
-    /// session's idle boundary, where it applies — the wake answers the
-    /// delivery at once, and the apply never interleaves with a running
-    /// turn's rows.
-    pub(crate) pending_refine_replies:
-        std::sync::Mutex<Vec<crate::refine_children::PendingRefineReply>>,
-    /// The active session ids of the refinement children that a branch
-    /// move or a replacement abandoned. The cancel cannot recall a reply
-    /// that is already in delivery, so the park drops that late reply and
-    /// removes its id. An id whose child never replied stays, as the child
-    /// registry also keeps its own record of that child.
-    pub(crate) abandoned_refine_children: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The settled refinement children's outcomes, oldest first: each waits
+    /// for the session's idle boundary, where it applies, so the apply
+    /// never interleaves with a running turn's rows.
+    pub(crate) pending_refine_outcomes:
+        std::sync::Mutex<Vec<crate::refine_children::PendingRefineOutcome>>,
     /// Orders refinement-child admissions (prepare, spawn, flight record,
     /// prompt release) against an abandon.
     pub(crate) refine_spawn_lock: tokio::sync::Mutex<()>,
@@ -312,6 +293,10 @@ pub struct AgentSessionEngine {
     /// The factory state's output contract from the create, which the
     /// engine registers as the child's `factory.emit` and `factory.inputs`.
     factory_contract: std::sync::Mutex<Option<serde_json::Value>>,
+    /// Whether this session is a refinement child (its create's
+    /// runtimeMetadata kind is `refine`): its final message is the proposal
+    /// its parent applies, and it neither writes harness entries nor spawns.
+    refine_child: std::sync::atomic::AtomicBool,
     /// The depth bound's source stamp (`default` | `env` | `global` |
     /// `inherited` | `chat`).
     rlm_max_depth_source: std::sync::Mutex<&'static str>,

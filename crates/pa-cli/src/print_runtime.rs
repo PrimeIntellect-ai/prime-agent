@@ -67,6 +67,13 @@ impl crate::mode::Runtime for PrintRuntime {
                     Ok(1)
                 }
             },
+            AppMode::A2a => match run_a2a_mode(options) {
+                Ok(code) => Ok(code),
+                Err(error) => {
+                    eprintln!("Error: {error:#}");
+                    Ok(1)
+                }
+            },
             AppMode::Rpc => match run_rpc_mode(options) {
                 Ok(code) => Ok(code),
                 Err(error) => {
@@ -116,6 +123,87 @@ async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
     .map_err(|error| format!("{error:#}"))
 }
 
+/// The `--mode a2a` server: resolve the bearer token, ensure a supervisor
+/// is listening, and serve until a signal or the daemon goes away.
+fn run_a2a_mode(options: &RunOptions) -> Result<i32, String> {
+    if options.session.fork.is_some()
+        || options.session.resume.is_some()
+        || options.session.resume_bare
+        || options.session.continue_recent
+    {
+        return Err(
+            "--mode a2a gives every conversation its own session; --fork, --resume, and --continue do not apply"
+                .to_string(),
+        );
+    }
+    // The token leaves the environment before the runtime starts threads:
+    // the supervisor spawn and every worker's launch env read it.
+    let configured = std::env::var(crate::config::ENV_A2A_TOKEN)
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
+    std::env::remove_var(crate::config::ENV_A2A_TOKEN);
+    // A single token is one implicit client.
+    let single = |token: String| std::collections::BTreeMap::from([("default".to_string(), token)]);
+    let (clients, minted_token_dir) = match (&options.a2a.clients_file, configured) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "--a2a-clients and {} both name the A2A clients; set one",
+                crate::config::ENV_A2A_TOKEN
+            ))
+        }
+        (Some(path), None) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| format!("reading --a2a-clients {path}: {error}"))?;
+            let clients = serde_json::from_str(&text).map_err(|error| {
+                format!(
+                    "--a2a-clients {path} must be a JSON object of client name to token: {error}"
+                )
+            })?;
+            (clients, None)
+        }
+        (None, Some(token)) => (single(token), None),
+        (None, None) => (
+            single(format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            )),
+            Some(options.config.agent_dir.clone()),
+        ),
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    rt.block_on(async {
+        crate::telemetry_notice::print_if_due(&options.config);
+        let socket_path =
+            crate::config::resolve_daemon_socket_path(options.daemon_socket.as_deref());
+        crate::interactive_mode::ensure_daemon_running(&socket_path, &options.config.cwd)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        let (_, create) = headless_daemon_create(options)?;
+        pa_daemon::a2a::run_daemon_attached_a2a_mode(pa_daemon::a2a::A2aOptions {
+            socket_path,
+            bind_host: options
+                .a2a
+                .host
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+            bind_port: options.a2a.port.unwrap_or(7800),
+            clients,
+            minted_token_dir,
+            max_contexts: options.a2a.max_contexts.unwrap_or(64),
+            public_url: options.a2a.public_url.clone(),
+            product_version: crate::config::version().to_string(),
+            create,
+        })
+        .await
+        .map_err(|error| format!("{error:#}"))
+    })
+}
+
 /// The headless daemon session's create for ACP and print (TS main.ts
 /// `defaultSessionConfig` and the startup create): the session the flags
 /// select, plus the session's cwd. The worker opens and leases the selected file
@@ -128,8 +216,8 @@ pub(crate) fn headless_daemon_create(
     use pa_types::daemon::DaemonSessionLifecycle;
     let config = &options.config;
     let session_dir = replacement_session_dir(options);
-    let acp = options.app_mode == AppMode::Acp;
-    let lifecycle = if acp && !options.session.no_session {
+    let resident = matches!(options.app_mode, AppMode::Acp | AppMode::A2a);
+    let lifecycle = if resident && !options.session.no_session {
         DaemonSessionLifecycle::Resident
     } else {
         DaemonSessionLifecycle::ClientOwned
@@ -170,10 +258,10 @@ pub(crate) fn headless_daemon_create(
     if let Some(model) = &config.model {
         create_config["model"] = serde_json::json!(model);
     }
-    // ACP keeps `--api-key` and `--models` off its resident create, whose
-    // config is persisted; the run-scoped print session carries them like
-    // the interactive create.
-    if !acp {
+    // ACP and A2A keep `--api-key` and `--models` off their resident
+    // creates, whose config is persisted; the run-scoped print session
+    // carries them like the interactive create.
+    if !resident {
         if let Some(api_key) = &config.api_key {
             create_config["apiKey"] = serde_json::json!(api_key);
         }
@@ -905,6 +993,7 @@ pub(crate) async fn build_headless_engine_with(
             rlm_depth,
             factory_child,
             factory_contract,
+            refine_child: false,
             daemonless: true,
             model_info: Some(model.clone()),
             // The kernel boots in the background at creation; a spawned
@@ -1820,6 +1909,12 @@ pub(crate) fn emit_goal_cap_result(
         eprintln!("{cap_reason}");
         *exit_code = 1;
     }
+}
+
+/// The text-mode report of a failed refinement; json mode streams the
+/// `refine_failed` event instead. Both print paths print it.
+pub(crate) fn emit_refinement_failure(error: &str) {
+    eprintln!("pa-cli: refinement failed: {error}");
 }
 
 /// The text-mode terminal output: the selected primary message (an error to

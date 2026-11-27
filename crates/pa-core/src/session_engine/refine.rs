@@ -10,8 +10,8 @@ use serde_json::json;
 use super::model_usage::ModelUsage;
 use super::AgentSession;
 use crate::refinement::executor::{
-    apply_refinement_plan, generate_refinement_id, plan_refinement, planner_reply_proposal,
-    planner_request, review_auto_refine, AutoRefineReview, AutoRefineReviewContext,
+    apply_refinement_plan, generate_refinement_id, plan_refinement, planner_request,
+    review_auto_refine, AutoRefineReview, AutoRefineReviewContext,
     RefineOptions as CoreRefineOptions, RefinementPlan,
 };
 use crate::refinement::{
@@ -102,7 +102,9 @@ pub enum RefinementSource {
 }
 
 impl RefinementSource {
-    fn as_str(self) -> &'static str {
+    /// The wire and history name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             RefinementSource::Auto => "auto",
             RefinementSource::User => "user",
@@ -1070,28 +1072,37 @@ pub fn default_refiner_call(
     })
 }
 
-/// The refinement child's request tag: the JSON envelope its engine parses
-/// off its first prompt.
-pub const REFINEMENT_REQUEST_TYPE: &str = "refinement.request";
-
 /// A refinement whose model pass runs in the refinement child: the basis
 /// captured before the pass, applied through [`commit_refinement`] when the
-/// child replies.
+/// child settles with its proposal.
 pub struct PreparedRefinement {
     basis: RefinementBasis,
-    /// The planning request's output budget, which a `Length` stop names.
-    max_tokens: u64,
     /// Counts this refinement in `refine.status` until it is applied or
     /// dropped.
     _in_flight: RefinementFlightGuard,
 }
 
-/// The refinement child's session-side surface: prepare the planning request
-/// and apply the child's reply on the wake.
+/// The refinement child's task: the planning instructions and request,
+/// plus where the child looks things up. The child is an agent session
+/// with the normal tool surface; its final message is the proposal.
+fn refine_child_task(planning_prompt: &str, session_id: &str, local_dir: Option<&Path>) -> String {
+    let local_store = local_dir.map_or_else(String::new, |dir| {
+        format!(
+            " Its local harness store is `{}`: read it with `rlm.get_harness_state(state_dir=...)`.",
+            dir.display()
+        )
+    });
+    format!(
+        "{}\n\n{planning_prompt}\n\n<refinement_child>\nYou are the refinement child of session {session_id}. The conversation above is the tail of its history; read the full history with `rlm.session.messages(agent=\"{session_id}\")` when you need more.{local_store} Use your tools to check the evidence before you propose edits. You cannot write harness entries or spawn subagents here: your parent applies your proposal. Your final message must be only the JSON object.\n</refinement_child>",
+        crate::refinement::planner::REFINEMENT_SYSTEM_PROMPT
+    )
+}
+
+/// The refinement child's session-side surface: prepare the child's task
+/// and apply its proposal when it settles.
 impl AgentSession {
     /// Prepare one refinement for the child: the same basis and planning
-    /// request the in-process pipeline builds, wrapped in the child's
-    /// request envelope.
+    /// request the in-process pipeline builds, framed as the child's task.
     ///
     /// # Errors
     ///
@@ -1130,37 +1141,34 @@ impl AgentSession {
             model,
             &basis.core_options,
         )?;
-        let max_tokens = request.model.max_tokens;
-        let prompt = json!({
-            "type": REFINEMENT_REQUEST_TYPE,
-            "sessionId": session_id,
-            "maxTokens": max_tokens,
-            "prompt": request.user_prompt,
-        })
-        .to_string();
+        let task = refine_child_task(
+            &request.user_prompt,
+            &session_id,
+            stores.local_dir.as_deref(),
+        );
         let prepared = PreparedRefinement {
             basis,
-            max_tokens,
             _in_flight: RefinementFlightGuard::enter(self.refinements_in_flight.clone()),
         };
-        Ok((prepared, prompt))
+        Ok((prepared, task))
     }
 
-    /// Apply the refinement child's planning reply: parse it like the
-    /// in-process pass does, then commit through [`commit_refinement`].
+    /// Apply the refinement child's final message: parse the proposal, then
+    /// commit through [`commit_refinement`].
     ///
     /// # Errors
     ///
-    /// Returns an error when the reply was cut off, failed, or does not
-    /// parse, or when the commit fails.
+    /// Returns an error when the answer does not parse as a proposal, or
+    /// when the commit fails.
     pub async fn apply_child_refinement(
         &self,
         prepared: PreparedRefinement,
-        reply: &pa_types::ai::AssistantMessage,
+        answer: &str,
         source: RefinementSource,
     ) -> anyhow::Result<CommittedRefinement> {
         let plan = RefinementPlan {
-            proposal: planner_reply_proposal(reply, prepared.max_tokens)?,
+            proposal: crate::refinement::planner::parse_proposal(answer)
+                .map_err(anyhow::Error::msg)?,
             id: generate_refinement_id(),
             rollback_of: None,
             rollback_scope: None,

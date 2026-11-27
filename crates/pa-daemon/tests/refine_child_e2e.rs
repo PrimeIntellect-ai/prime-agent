@@ -1,11 +1,11 @@
 //! The refinement-child e2e (the daemon's `refine_child` spawn): the fire-and-wake
-//! contract end to end. `/refine` spawns one refinement child and answers
-//! immediately — before the child's planning call settles — and the child's
-//! proposal lands as its child-reply: the parent wakes, re-reads the harness
-//! state fresh, applies the proposal, emits the durable outcome rows and the
-//! `refine_complete` event, and tears the child down. A child whose proposal
-//! fails to parse surfaces `refine_failed` — a failed refinement is never
-//! silent.
+//! contract end to end. `/refine` spawns one refinement child — an agent
+//! session with the normal tool surface — and answers immediately, before
+//! the child's run settles. The child's final message is its proposal: at
+//! the child's settle the parent re-reads the harness state fresh, applies
+//! the proposal, emits the durable outcome rows and the `refine_complete`
+//! event, and the child's record retires. A child whose proposal fails to
+//! parse surfaces `refine_failed` — a failed refinement is never silent.
 #![allow(clippy::large_futures)]
 // 64-bit-only targets; the narrowing casts sit at bounded OS/protocol boundaries.
 #![allow(
@@ -44,6 +44,21 @@ const REFINE_ANSWER_BOUND_MS: u64 = 2_000;
 /// store.
 const PROPOSAL: &str = r#"{"summary":"tactic","rationale":"the seed turn repeats a tactic","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
 
+/// The lookup child's proposal: one memory whose content runs past the
+/// registry's capped answer text, so only the whole final message parses.
+fn long_proposal() -> String {
+    json!({
+        "summary": "tactic",
+        "rationale": "the child checked the parent's history and store",
+        "expectedOutcome": "recall",
+        "edits": [{
+            "action": "create", "kind": "memory", "id": "m1", "title": "Tactic",
+            "content": "a".repeat(pa_daemon::rlm_child_model::ANSWER_TEXT_MAX_CHARS),
+        }],
+    })
+    .to_string()
+}
+
 /// What the mock answers the refinement planning call with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanMode {
@@ -52,9 +67,13 @@ enum PlanMode {
     /// Non-JSON text (the failed-proposal path: the wake surfaces the
     /// parse error visibly).
     Garbage,
-    /// An output-limit stop (the truncated-JSON path: the child fails
-    /// with the stop-reason taxonomy, naming the budget the wire carried).
+    /// An output-limit stop (the truncated-JSON path: the child's run
+    /// fails with the cut-off reason).
     Length,
+    /// A `python_repl` lookup cell first (the parent's transcript and
+    /// harness store, and both harness write scopes), then the long proposal
+    /// once the cell's result is back.
+    Lookup,
 }
 
 /// The mock's turn hold: while `holding`, a turn request waits for the
@@ -70,6 +89,17 @@ struct TurnHold {
 struct TurnHoldState {
     holding: bool,
     turn_seen: bool,
+    plan: PlanHold,
+}
+
+/// The planning-request hold: while armed, a planning request waits for
+/// the release instead of answering (the child stays mid-plan).
+#[derive(Default, PartialEq, Eq)]
+enum PlanHold {
+    #[default]
+    Off,
+    Armed,
+    Held,
 }
 
 /// An OpenAI-compatible SSE mock: the refinement child's planning request
@@ -141,6 +171,28 @@ impl RefineMock {
 
     fn release_turns(&self) {
         self.hold.state.lock().expect("mock lock").holding = false;
+        self.hold.changed.notify_all();
+    }
+
+    /// Hold every planning request until [`Self::release_plans`].
+    fn hold_plans(&self) {
+        self.hold.state.lock().expect("mock lock").plan = PlanHold::Armed;
+    }
+
+    /// Wait until a planning request is held (the child is mid-plan).
+    fn wait_for_held_plan(&self) {
+        drop(
+            self.hold
+                .changed
+                .wait_while(self.hold.state.lock().expect("mock lock"), |state| {
+                    state.plan != PlanHold::Held
+                })
+                .expect("mock lock"),
+        );
+    }
+
+    fn release_plans(&self) {
+        self.hold.state.lock().expect("mock lock").plan = PlanHold::Off;
         self.hold.changed.notify_all();
     }
 
@@ -263,6 +315,91 @@ fn write_sse(
     )
 }
 
+/// One streamed `python_repl` tool call.
+fn write_sse_tool_call(stream: &mut TcpStream, code: &str) -> std::io::Result<()> {
+    let mut payload = String::new();
+    for data in [
+        chunk(
+            &json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-lookup-1",
+                    "type": "function",
+                    "function": {
+                        "name": "python_repl",
+                        "arguments": json!({ "code": code }).to_string(),
+                    },
+                }],
+            }),
+            None,
+            &small_usage(),
+        ),
+        chunk(&json!({}), Some("tool_calls"), &small_usage()),
+    ] {
+        let _ = write!(payload, "data: {data}\n\n");
+    }
+    payload.push_str("data: [DONE]\n\n");
+    stream.write_all(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}"
+        )
+        .as_bytes(),
+    )
+}
+
+/// Whether the request carries a tool result (the lookup cell ran).
+fn carries_tool_result(body: &Value) -> bool {
+    body["messages"]
+        .as_array()
+        .is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"))
+}
+
+/// The child's task: its kickoff message.
+fn child_task(body: &Value) -> String {
+    body["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .map(message_text)
+                .find(|text| text.contains("<current_harness_state>"))
+        })
+        .expect("the child's task message")
+}
+
+/// The child's lookup cell: it reads the parent's full transcript through
+/// the family (`rlm.session.messages(agent=...)`), the parent's local
+/// harness store through the path the task names, and tries both harness
+/// write scopes, which must refuse.
+fn lookup_cell(task: &str) -> String {
+    let between = |start: &str, end: &str| -> String {
+        let from = task
+            .find(start)
+            .unwrap_or_else(|| panic!("the task names {start:?}: {task}"))
+            + start.len();
+        let to = from + task[from..].find(end).expect("the task value ends");
+        task[from..to].to_string()
+    };
+    let parent = between("rlm.session.messages(agent=\"", "\")");
+    let local_store = between("Its local harness store is `", "`");
+    format!(
+        r#"import json
+history = await rlm.session.messages(0, 50, agent="{parent}")
+parent_store = rlm.get_harness_state(state_dir="{local_store}")
+writes = {{}}
+for scope, is_global in (("local", False), ("global", True)):
+    try:
+        rlm.harness.create_memory("Child write", "must not land", id="child_" + scope, global_=is_global)
+        writes[scope] = "written"
+    except RuntimeError as error:
+        writes[scope] = str(error)
+print("LOOKUP " + json.dumps({{"history": any("seed turn" in m.text for m in history), "parent_memories": sorted(parent_store.entries["memory"]), "writes": writes}}))
+"#
+    )
+}
+
 fn serve(
     mut stream: TcpStream,
     requests: &Arc<Mutex<Vec<Value>>>,
@@ -273,8 +410,16 @@ fn serve(
     let body = read_body(&mut reader)?;
     requests.lock().expect("mock lock").push(body.clone());
     if is_refinement_plan_request(&body) {
-        let state = hold.state.lock().expect("mock lock");
-        if state.holding {
+        let mut state = hold.state.lock().expect("mock lock");
+        if state.plan != PlanHold::Off {
+            state.plan = PlanHold::Held;
+            hold.changed.notify_all();
+            drop(
+                hold.changed
+                    .wait_while(state, |state| state.plan != PlanHold::Off)
+                    .expect("mock lock"),
+            );
+        } else if state.holding {
             drop(
                 hold.changed
                     .wait_while(state, |state| state.holding && !state.turn_seen)
@@ -284,12 +429,17 @@ fn serve(
             drop(state);
             std::thread::sleep(Duration::from_millis(PLAN_DELAY_MS));
         }
-        let (reply, reason) = match *plan_mode.lock().expect("mock lock") {
-            PlanMode::Proposal => (PROPOSAL, "stop"),
-            PlanMode::Garbage => ("not a plan", "stop"),
-            PlanMode::Length => ("{\"summary\":\"cut", "length"),
+        let mode = *plan_mode.lock().expect("mock lock");
+        if mode == PlanMode::Lookup && !carries_tool_result(&body) {
+            return write_sse_tool_call(&mut stream, &lookup_cell(&child_task(&body)));
+        }
+        let (reply, reason) = match mode {
+            PlanMode::Proposal => (PROPOSAL.to_string(), "stop"),
+            PlanMode::Lookup => (long_proposal(), "stop"),
+            PlanMode::Garbage => ("not a plan".to_string(), "stop"),
+            PlanMode::Length => ("{\"summary\":\"cut".to_string(), "length"),
         };
-        return write_sse(&mut stream, reply, reason, &small_usage());
+        return write_sse(&mut stream, &reply, reason, &small_usage());
     }
     let mut state = hold.state.lock().expect("mock lock");
     if state.holding {
@@ -319,12 +469,23 @@ impl Drop for Supervisor {
     }
 }
 
+fn spawn_supervisor(socket: &Path, agent_dir: &Path, stderr_path: &Path) -> Supervisor {
+    spawn_supervisor_with(socket, agent_dir, stderr_path, |_| {})
+}
+
 // The timeout panic path cannot wait on the child; the test exits and reaps it.
 #[allow(clippy::zombie_processes)]
-fn spawn_supervisor(socket: &Path, agent_dir: &Path, stderr_path: &Path) -> Supervisor {
+fn spawn_supervisor_with(
+    socket: &Path,
+    agent_dir: &Path,
+    stderr_path: &Path,
+    configure: impl FnOnce(&mut Command),
+) -> Supervisor {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
     let stderr_file = std::fs::File::create(stderr_path).expect("daemon stderr file");
-    let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pa-daemon"));
+    configure(&mut command);
+    let child = command
         .arg("supervisor")
         .arg("--socket")
         .arg(socket)
@@ -373,9 +534,10 @@ fn write_fixture(agent_dir: &Path, session_dir: &Path, mock_url: &str) {
         .to_string(),
     )
     .expect("write models.json");
+    // No provider retries: a cut-off child reply fails its run at once.
     std::fs::write(
         agent_dir.join("settings.json"),
-        json!({ "compaction": {"enabled": false} }).to_string(),
+        json!({ "compaction": {"enabled": false}, "retry": {"maxRetries": 0} }).to_string(),
     )
     .expect("write settings.json");
 }
@@ -547,13 +709,14 @@ fn refine(client: &mut TimedClient, id: &str, session_id: &str) -> Value {
     client.read_response(id)
 }
 
-/// Wait until the refinement child's run settled: the child sends its
-/// reply before its turn ends, so by then the parent has parked it.
+/// Wait until the refinement child's record retired: the registry hands
+/// the settled child's outcome to the parent before it retires the record,
+/// so by then the parent has parked it.
 fn wait_for_refine_child_settle(client: &mut TimedClient, parent: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     for attempt in 0.. {
         let rows = rlm_children_rows(client, &format!("settle{attempt}"), parent);
-        if rows.iter().all(|row| row["status"] != "running") {
+        if rows.is_empty() {
             return;
         }
         assert!(
@@ -582,15 +745,14 @@ fn rlm_children_rows(client: &mut TimedClient, id: &str, parent: &str) -> Vec<Va
 }
 
 /// The child's semantic-edge ledger (its registration line carries the
-/// refinement kind).
+/// refinement kind); empty until the child's session opens it.
 fn child_ledger(agent_dir: &Path, durable_session_id: &str, child_id: &str) -> Vec<Value> {
     let ledger_path = agent_dir
         .join("session-artifacts")
         .join(durable_session_id)
         .join(child_id)
         .join("semantic-edges.jsonl");
-    let content = std::fs::read_to_string(&ledger_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", ledger_path.display()));
+    let content = std::fs::read_to_string(&ledger_path).unwrap_or_default();
     content
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -664,10 +826,10 @@ fn wait_for_event(
 }
 
 /// The fire-and-wake round trip: `/refine` answers before the child's
-/// (delayed) planning call settles; the child's reply wakes the parent,
+/// (delayed) model call settles; the child's settle wakes the parent,
 /// which applies the proposal and tears the child down.
 #[test]
-fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
+fn refine_spawns_a_child_that_applies_at_its_settle() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -700,8 +862,8 @@ fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
 
     // The child's own ledger line registers its spawn provenance: the
     // parent edge anchors the refinement child's registration (its
-    // `refineChild` kind rides the durable create's runtimeMetadata,
-    // where the spawn records it once for the whole session).
+    // `refine` kind rides the durable create's runtimeMetadata, where the
+    // spawn records it once for the whole session).
     let deadline = Instant::now() + Duration::from_secs(10);
     let registered = loop {
         let ledger = child_ledger(&agent_dir, &durable_session_id, &child_id);
@@ -719,7 +881,7 @@ fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
     };
     assert_eq!(registered["parent_session_id"], json!(durable_session_id));
 
-    // Wake: the child's proposal lands as its reply, and the parent
+    // Wake: the child's final message is its proposal, and the parent
     // applies it — the durable outcome rows and the refine_complete
     // event.
 
@@ -753,7 +915,7 @@ fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
         "exactly one planning call (the child's, never the parent's)"
     );
 
-    // Teardown: the one-shot child retires after its reply's apply.
+    // Teardown: the one-shot child retires at its settle.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let rows = rlm_children_rows(&mut client, "g1", &session_id);
@@ -766,7 +928,7 @@ fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
-    // The planning pass bills on the parent's totals: the child's answer row
+    // The child's run bills on the parent's totals: its assistant row
     // carries the mock's usage (input 10, output 5), and the retired child's
     // ledger edge folds it into the parent's published total.
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -799,7 +961,7 @@ fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
         }
         assert!(
             Instant::now() < deadline,
-            "the planning call never billed on the parent's total: {parent}"
+            "the child's model call never billed on the parent's total: {parent}"
         );
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -888,8 +1050,8 @@ fn a_slash_refine_records_its_spawn_result_row() {
     }
 }
 
-/// The failed proposal surfaces visibly: the child's unparseable reply
-/// wakes the parent into a `refine_failed` event, and the child still
+/// The failed proposal surfaces visibly: the child's unparseable final
+/// message wakes the parent into a `refine_failed` event, and the child still
 /// tears down (a failed refinement is never silent).
 #[test]
 fn a_failed_child_proposal_surfaces_the_refine_failed_event() {
@@ -917,6 +1079,10 @@ fn a_failed_child_proposal_surfaces_the_refine_failed_event() {
     );
     let error = failed["error"].as_str().unwrap_or_default();
     assert!(!error.is_empty(), "the failure message rides the event");
+    assert_eq!(
+        failed["source"], "user",
+        "the failure names its source: {failed}"
+    );
     assert!(
         client
             .events
@@ -930,7 +1096,7 @@ fn a_failed_child_proposal_surfaces_the_refine_failed_event() {
         "the failed proposal never persisted harness state"
     );
 
-    // The child tears down on the failed reply's wake too.
+    // The child tears down on the failed path too.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let rows = rlm_children_rows(&mut client, "g1", &session_id);
@@ -945,13 +1111,13 @@ fn a_failed_child_proposal_surfaces_the_refine_failed_event() {
     }
 }
 
-/// An output-limit stop fails visibly and names the budget the wire request
-/// carried: the parent's planning request fixes the budget, the child sends
-/// it, and the parent's shared reply check names it. Red when the child
-/// drops the parent's budget (the message would name a number the wire
-/// never carried) or the stop parses as JSON.
+/// An output-limit stop fails the refinement visibly with the reason the
+/// child's run ended on: the cut-off reply fails the child's final turn,
+/// and that error reaches `refine_failed` instead of a parse of the
+/// truncated JSON. Red when the run's error is dropped (the refinement
+/// fails on the truncated text instead) or the stop parses as a proposal.
 #[test]
-fn a_length_stop_names_the_budget_the_wire_carries() {
+fn a_length_stop_fails_the_refinement_with_the_cut_off_reason() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -970,40 +1136,19 @@ fn a_length_stop_names_the_budget_the_wire_carries() {
 
     let failed = wait_for_event(
         &mut client,
-        Duration::from_secs(20),
+        Duration::from_secs(30),
         "refine_failed",
         &dir.path().join("daemon.stderr"),
     );
-    let error = failed["error"].as_str().unwrap_or_default();
-    let marker = "the model hit its output limit (";
-    let start = error
-        .find(marker)
-        .unwrap_or_else(|| panic!("the failure names the output limit: {error}"))
-        + marker.len();
-    let end = match error[start..].find(" tokens") {
-        Some(offset) => start + offset,
-        None => panic!("the failure names the token count: {error}"),
-    };
-    let named: u64 = error[start..end]
-        .parse()
-        .unwrap_or_else(|_| panic!("the token count parses: {error}"));
-
-    // The number the message names is the number the wire carried: the
-    // captured planning request's `max_tokens`.
-    let requests = mock.requests.lock().expect("mock lock");
-    let planning = requests
-        .iter()
-        .find(|body| is_refinement_plan_request(body))
-        .expect("the captured planning request");
-    let wire_budget = planning["max_tokens"]
-        .as_u64()
-        .or_else(|| planning["max_completion_tokens"].as_u64())
-        .expect("the planning request's output budget");
     assert_eq!(
-        named, wire_budget,
-        "the Length failure must name the wire budget: {error}"
+        failed["source"], "user",
+        "the failure names its source: {failed}"
     );
-    drop(requests);
+    let error = failed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("cut off at its output limit"),
+        "the failure names the cut-off reply: {error}"
+    );
     assert!(
         client
             .events
@@ -1013,14 +1158,14 @@ fn a_length_stop_names_the_budget_the_wire_carries() {
     );
 }
 
-/// A reply that lands while the parent's turn is still running parks
-/// instead of applying inside the delivery: the outcome and notice rows
-/// surface only after that turn settled, so the parent's history never
-/// gains a refinement notice between an in-flight assistant message and
-/// its own completion. Red when the apply runs inside the delivery: the
+/// A child that settles while the parent's turn is still running parks
+/// its outcome instead of applying inside the registry's hook: the outcome
+/// and notice rows surface only after that turn settled, so the parent's
+/// history never gains a refinement notice between an in-flight assistant
+/// message and its own completion. Red when the apply runs in the hook: the
 /// notice's `message_end` precedes the turn's final assistant row.
 #[test]
-fn a_reply_that_lands_mid_turn_applies_only_after_the_turn_settles() {
+fn a_child_that_settles_mid_turn_applies_only_after_the_turn_settles() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -1034,8 +1179,8 @@ fn a_reply_that_lands_mid_turn_applies_only_after_the_turn_settles() {
 
     // Fire: the mock holds the parent's next turn open and answers the
     // child's planning request only once that turn is in flight, so the
-    // child's reply lands mid-turn; the turn is released after the child
-    // settled (its reply parked).
+    // child settles mid-turn; the turn is released after the child
+    // settled (its outcome parked).
     mock.hold_turns();
     let response = refine(&mut client, "r1", &session_id);
     assert_eq!(response["success"], true, "refine failed: {response}");
@@ -1071,7 +1216,7 @@ fn a_reply_that_lands_mid_turn_applies_only_after_the_turn_settles() {
             .events
             .iter()
             .any(|(event, _)| event["type"] == "refine_failed"),
-        "no failed refinement surfaced on the parked-reply path"
+        "no failed refinement surfaced on the parked-outcome path"
     );
 
     // The ordering pin: the parent's open turn settled first — its final
@@ -1112,7 +1257,7 @@ fn a_reply_that_lands_mid_turn_applies_only_after_the_turn_settles() {
         );
     }
 
-    // The durable session file carries the same order: the parked reply's
+    // The durable session file carries the same order: the parked outcome's
     // notice row persists after the open turn's final assistant row.
     let session_file = std::fs::read_dir(&session_dir)
         .expect("read session dir")
@@ -1140,10 +1285,10 @@ fn a_reply_that_lands_mid_turn_applies_only_after_the_turn_settles() {
     assert_eq!(
         local_harness_state(&session_dir)["entries"]["memory"]["m1"]["title"],
         "Tactic",
-        "the parked reply's apply wrote the harness state"
+        "the parked outcome's apply wrote the harness state"
     );
 
-    // The one-shot child still retires on the parked reply's apply.
+    // The one-shot child still retires at its settle.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let rows = rlm_children_rows(&mut client, "g2", &session_id);
@@ -1159,7 +1304,7 @@ fn a_reply_that_lands_mid_turn_applies_only_after_the_turn_settles() {
 }
 
 /// A queued follow-up sees the parked refinement before its own turn: the
-/// runner applies the parked reply at each turn's park boundary, not only
+/// runner applies the parked outcome at each turn's park boundary, not only
 /// when the queue drains. Red when the apply lives only in the idle
 /// branch: the follow-up turn runs first and the outcome row lands after
 /// its rows.
@@ -1179,7 +1324,7 @@ fn a_queued_follow_up_sees_the_parked_apply_before_its_turn() {
     // The mock holds the parent's next turn open and answers the child's
     // planning request only once that turn is in flight; the follow-up is
     // queued during that turn, and the turn is released only after the
-    // child settled (its reply parked).
+    // child settled (its outcome parked).
     mock.hold_turns();
     let response = refine(&mut client, "r1", &session_id);
     assert_eq!(response["success"], true, "refine failed: {response}");
@@ -1241,16 +1386,16 @@ fn a_queued_follow_up_sees_the_parked_apply_before_its_turn() {
     assert_eq!(
         local_harness_state(&session_dir)["entries"]["memory"]["m1"]["title"],
         "Tactic",
-        "the parked reply's apply wrote the harness state"
+        "the parked outcome's apply wrote the harness state"
     );
 }
 
 /// A branch move abandons the in-flight refinement child: the move cancels
-/// the child while its planning call is still open and drops its lane, so
-/// no proposal applies to the moved-to branch and no late reply reaches the
+/// the child while its model call is still open and drops its lane, so
+/// no proposal applies to the moved-to branch and no late outcome reaches the
 /// parent's conversation; the next `/refine` spawns at once. Red when the
 /// move keeps the lane (the proposal applies after the move) or skips the
-/// cancel (the child's late reply lands as an agent message).
+/// cancel (the child's settle fails a refinement or lands as a notice).
 #[test]
 fn a_branch_move_cancels_the_in_flight_refine_child() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1317,9 +1462,22 @@ fn a_branch_move_cancels_the_in_flight_refine_child() {
     );
     assert!(
         !client.events.iter().any(|(event, _)| {
-            event["type"] == "message_end" && event["message"]["customType"] == "agent_message"
+            event["type"] == "message_end"
+                && [
+                    pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE,
+                    pa_core::session_engine::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+                    pa_core::session_engine::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE,
+                ]
+                .contains(&event["message"]["customType"].as_str().unwrap_or_default())
         }),
-        "the abandoned child's late reply reached the parent's conversation"
+        "the abandoned child's end reached the parent's conversation"
+    );
+    assert!(
+        client
+            .events
+            .iter()
+            .all(|(event, _)| event["type"] != "refine_failed"),
+        "the abandoned child's settle failed no refinement"
     );
     assert_eq!(
         local_harness_state(&session_dir),
@@ -1353,4 +1511,283 @@ fn a_branch_move_cancels_the_in_flight_refine_child() {
         &stderr_path,
     );
     assert_eq!(complete["result"]["appliedEdits"][0]["applied"], true);
+}
+
+/// The refinement child runs a real agent turn with the normal tool
+/// surface: before it answers, its `python_repl` cell reads the parent's
+/// full transcript through the family (`rlm.session.messages(agent=...)`)
+/// and the parent's local harness store through the path its task names,
+/// and both harness write scopes refuse inside the child. The parent then
+/// commits the child's final message. Red when the child cannot run the
+/// cell (no tool surface), when the parent lookup fails, when a harness
+/// write lands from the child, or when the proposal does not commit.
+#[test]
+fn a_refine_child_looks_things_up_with_its_tools_before_it_proposes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let mock = RefineMock::start();
+    mock.set_plan_mode(PlanMode::Lookup);
+    write_fixture(&agent_dir, &session_dir, &mock.url());
+    let socket = dir.path().join("daemon.sock");
+    let stderr_path = dir.path().join("daemon.stderr");
+    // The child's kernel boots through the real runtime bootstrap out of
+    // this checkout, into a private venv.
+    let kernel_venv = dir.path().join("kernel-venv");
+    let _supervisor = spawn_supervisor_with(&socket, &agent_dir, &stderr_path, |command| {
+        command.env("PRIME_AGENT_KERNEL_VENV", &kernel_venv);
+    });
+    let mut client = TimedClient::connect(&socket);
+    let (session_id, _durable) = create_and_attach(&mut client, &session_dir);
+    prompt_and_wait(&mut client, "p0", &session_id, "seed turn");
+
+    // The parent's local store holds one entry the child must find.
+    let parent_log = std::fs::read_dir(&session_dir)
+        .expect("read session dir")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .expect("the parent's session file");
+    let local_store =
+        pa_core::session_engine::harness_digest::local_harness_dir_for_log(&parent_log)
+            .expect("the parent's local store");
+    let mut seeded = pa_core::refinement::empty_harness_state();
+    seeded
+        .entries
+        .get_mut(&pa_core::refinement::RefinementKind::Memory)
+        .expect("memory entries")
+        .insert(
+            "seeded".to_string(),
+            pa_core::refinement::HarnessEntry {
+                id: "seeded".to_string(),
+                kind: pa_core::refinement::RefinementKind::Memory,
+                title: "Seeded".to_string(),
+                content: "An entry the parent already holds".to_string(),
+                path: "general".to_string(),
+                scope: None,
+                reference: serde_json::Map::new(),
+                arguments: serde_json::Map::new(),
+                metadata: serde_json::Map::new(),
+                source: "agent".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                version: 1,
+            },
+        );
+    pa_core::refinement::save_harness_state(&local_store, &seeded).expect("seed the parent store");
+
+    let response = refine(&mut client, "r1", &session_id);
+    assert_eq!(response["success"], true, "refine failed: {response}");
+    assert_eq!(response["data"]["refinementChildSpawned"], true);
+    let complete = wait_for_event(
+        &mut client,
+        Duration::from_secs(180),
+        "refine_complete",
+        &stderr_path,
+    );
+    assert_eq!(
+        complete["result"]["appliedEdits"][0]["id"], "m1",
+        "the child's final message committed: {complete}"
+    );
+
+    // The child's second model request carries its cell's result.
+    let lookup = {
+        let requests = mock.requests.lock().expect("mock lock");
+        let result = requests
+            .iter()
+            .filter(|body| is_refinement_plan_request(body))
+            .flat_map(|body| body["messages"].as_array().cloned().unwrap_or_default())
+            .filter(|message| message["role"] == "tool")
+            .map(|message| message_text(&message))
+            .find(|text| text.contains("LOOKUP "))
+            .expect("the child's lookup cell ran and its result reached the model");
+        let line = result
+            .lines()
+            .find_map(|line| line.strip_prefix("LOOKUP "))
+            .expect("the lookup line")
+            .to_string();
+        serde_json::from_str::<Value>(&line).expect("the lookup JSON")
+    };
+    assert_eq!(
+        lookup["history"], true,
+        "rlm.session.messages(agent=<parent>) read the parent's transcript: {lookup}"
+    );
+    assert_eq!(
+        lookup["parent_memories"],
+        json!(["seeded"]),
+        "the child read the parent's local store: {lookup}"
+    );
+    for scope in ["local", "global"] {
+        assert!(
+            lookup["writes"][scope]
+                .as_str()
+                .is_some_and(|text| text.contains("refinement child")),
+            "the child's {scope} harness write refused: {lookup}"
+        );
+    }
+
+    // Only the parent's commit wrote: the parent store holds the seeded
+    // entry and the proposal, and no store anywhere holds a child write.
+    let state = local_harness_state(&session_dir);
+    assert_eq!(state["entries"]["memory"]["seeded"]["title"], "Seeded");
+    assert_eq!(
+        state["entries"]["memory"]["m1"]["content"]
+            .as_str()
+            .map(str::len),
+        Some(pa_daemon::rlm_child_model::ANSWER_TEXT_MAX_CHARS),
+        "the whole final message committed, past the capped answer text"
+    );
+    let mut pending = vec![agent_dir];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path != kernel_venv {
+                    pending.push(path);
+                }
+            } else if path.file_name()
+                == pa_core::refinement::get_harness_state_path(Path::new("")).file_name()
+            {
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                assert!(
+                    !content.contains("must not land"),
+                    "a child harness write landed in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// A refinement child that ends mid-plan without replying (a user cancel
+/// of its run) fails its refinement: exactly one `refine_failed` names the
+/// child's end, no generic child notice, late reply or follow-up turn
+/// reaches the parent, the flight is released at the child's end, and the
+/// next `/refine` spawns, plans and commits. Red when the child's end is
+/// silent (no `refine_failed`), or when it still rides the generic
+/// child-terminal notice into the parent.
+#[test]
+fn a_refine_child_that_ends_mid_plan_fails_the_refinement() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let mock = RefineMock::start();
+    write_fixture(&agent_dir, &session_dir, &mock.url());
+    let socket = dir.path().join("daemon.sock");
+    let stderr_path = dir.path().join("daemon.stderr");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir, &stderr_path);
+    let mut client = TimedClient::connect(&socket);
+    let (session_id, _durable) = create_and_attach(&mut client, &session_dir);
+    prompt_and_wait(&mut client, "p0", &session_id, "seed turn");
+
+    mock.hold_plans();
+    let response = refine(&mut client, "r1", &session_id);
+    assert_eq!(response["success"], true, "refine failed: {response}");
+    let child_id = response["data"]["rlmChildId"]
+        .as_str()
+        .expect("child id")
+        .to_string();
+    mock.wait_for_held_plan();
+    // The cancel's answer waits for the child's teardown, which the held
+    // planning call blocks: it is not read here.
+    client.send_command(
+        "x1",
+        &json!({
+            "type": "cancel_rlm_child",
+            "activeSessionId": session_id,
+            "childId": child_id,
+        }),
+    );
+    let failed = wait_for_event(
+        &mut client,
+        Duration::from_secs(30),
+        "refine_failed",
+        &stderr_path,
+    );
+    assert_eq!(
+        failed["source"], "user",
+        "the failure names its source: {failed}"
+    );
+    let error = failed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Cancelled by user"),
+        "the failure names the child's end: {error}"
+    );
+    // The planning call may finish and the child may still send its
+    // reply; the one-shot record retires either way, which its delete
+    // row announces.
+    mock.release_plans();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !client.events.iter().any(|(event, _)| {
+        event["type"] == "rlm_child_update"
+            && event["child"]["id"] == json!(child_id)
+            && event["child"]["error"] == "Deleted by parent orchestrator"
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the ended refinement child never retired; stderr: {}",
+            daemon_stderr(&stderr_path)
+        );
+        client.drain_events(100);
+    }
+
+    // The flight is released: the next refinement spawns, plans and
+    // commits.
+    let response = refine(&mut client, "r2", &session_id);
+    assert_eq!(response["success"], true, "refine failed: {response}");
+    let complete = wait_for_event(
+        &mut client,
+        Duration::from_secs(30),
+        "refine_complete",
+        &stderr_path,
+    );
+    assert_eq!(complete["result"]["appliedEdits"][0]["applied"], true);
+    assert_eq!(
+        client
+            .events
+            .iter()
+            .filter(|(event, _)| event["type"] == "refine_failed")
+            .count(),
+        1,
+        "exactly one refine_failed"
+    );
+
+    // No generic child notice, no late reply and no follow-up turn reached
+    // the parent: its durable file holds only the seed turn's assistant
+    // reply.
+    let session_file = std::fs::read_dir(&session_dir)
+        .expect("read session dir")
+        .filter_map(std::result::Result::ok)
+        .find(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .expect("the parent's session file")
+        .path();
+    let rows: Vec<Value> = std::fs::read_to_string(&session_file)
+        .expect("read session file")
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let child_notices: Vec<&Value> = rows
+        .iter()
+        .filter(|row| {
+            [
+                pa_core::session_engine::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE,
+                pa_core::session_engine::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+                pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE,
+            ]
+            .iter()
+            .any(|kind| row["customType"] == json!(kind))
+        })
+        .collect();
+    assert!(
+        child_notices.is_empty(),
+        "a child notice or a late reply reached the parent: {child_notices:?}"
+    );
+    let assistant_rows = rows
+        .iter()
+        .filter(|row| row["type"] == "message" && row["message"]["role"] == "assistant")
+        .count();
+    assert_eq!(assistant_rows, 1, "no extra parent turn ran: {rows:?}");
 }
