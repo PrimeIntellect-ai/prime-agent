@@ -121,13 +121,19 @@ _handoff_interrupted: set[str] = set()
 # Execute handlers run as tasks so a new cell can start while a backgrounded
 # one waits at an await point; shutdown cancels the set.
 _cell_tasks: "set[asyncio.Task[None]]" = set()
+# The request behind each running cell's `<cell-N>` code file: names the cell
+# that holds the kernel in a KernelBusy refusal.
+_cell_files: dict[str, str] = {}
 # How long a new cell waits for a running cell's synchronous code to reach
 # an await point before the kernel refuses it.
 _SYNC_CELL_ADMISSION_WAIT_S = 5.0
 _KERNEL_BUSY_SYNC_CELL = (
-    "A backgrounded cell is running synchronous code, so this cell did not run. "
-    "A new cell can start while the backgrounded cell waits at an await point. "
-    "Try again later, or end the turn and read the cell's completion notice when it arrives."
+    "cell '{holder}' is running blocking code and holds the kernel, so this cell did not run. "
+    'Retry with `stop_cell: "{holder}"` to stop it and run this cell.'
+)
+_KERNEL_BUSY_UNKNOWN_CELL = (
+    "a backgrounded cell is running blocking code and holds the kernel, so this cell did not run. "
+    "Retry with `stop_cell` set to the cell id from its auto-background notice to stop it and run this cell."
 )
 
 
@@ -216,22 +222,42 @@ def active_cell_task() -> asyncio.Task[Any] | None:
     return next((task for task in reversed(tasks) if not task.done()), None)
 
 
-def _beside_sync_cell() -> bool:
-    """Whether a cell is running and the loop thread is inside cell code.
+def _loop_cell_files() -> list[str]:
+    """The `<cell-N>` code files on the loop thread's stack, innermost first.
 
     A cell waiting at an await point has no frame on the main thread's
     stack; a cell running synchronous code (or blocked in a sync call) does.
     Read from the reader thread, so the answer is a snapshot.
     """
-    with _interrupt_lock:
-        if not _active:
-            return False
+    files: list[str] = []
     frame = sys._current_frames().get(threading.main_thread().ident)  # noqa: SLF001
     while frame is not None:
         if frame.f_code.co_filename.startswith("<cell-"):
-            return True
+            files.append(frame.f_code.co_filename)
         frame = frame.f_back
-    return False
+    return files
+
+
+def _beside_sync_cell() -> bool:
+    """Whether a cell is running and the loop thread is inside cell code."""
+    with _interrupt_lock:
+        if not _active:
+            return False
+    return bool(_loop_cell_files())
+
+
+def _kernel_busy_message() -> str:
+    """The refusal naming the cell whose code holds the loop thread.
+
+    The outermost running cell's frame names it: inner frames can belong to
+    functions defined by earlier cells, finished or still running.
+    """
+    files = _loop_cell_files()
+    with _interrupt_lock:
+        holders = [_cell_files[name] for name in files if name in _cell_files]
+    if not holders:
+        return _KERNEL_BUSY_UNKNOWN_CELL
+    return _KERNEL_BUSY_SYNC_CELL.format(holder=holders[-1])
 
 
 def _admit_beside_sync_cell(req: dict[str, Any], queue: asyncio.Queue[dict[str, Any]]) -> None:
@@ -253,7 +279,7 @@ def _admit_beside_sync_cell(req: dict[str, Any], queue: asyncio.Queue[dict[str, 
             if interrupted:
                 _send({"event": "error", "id": rid, "ename": "KeyboardInterrupt", "evalue": "", "traceback": ["KeyboardInterrupt\n"]})
             else:
-                _send({"event": "error", "id": rid, "ename": "KernelBusy", "evalue": _KERNEL_BUSY_SYNC_CELL, "traceback": []})
+                _send({"event": "error", "id": rid, "ename": "KernelBusy", "evalue": _kernel_busy_message(), "traceback": []})
             _send({"event": "done", "id": rid, "status": "error"})
             return
         time.sleep(0.02)
@@ -814,6 +840,8 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     cell_id = req["id"]
     _cell_counter += 1
     filename = f"<cell-{_cell_counter}>"
+    with _interrupt_lock:
+        _cell_files[filename] = cell_id
     execution = _CellExecution()
     cell_token = _current_cell.set(cell_id)
     execution_token = _current_cell_execution.set(execution)
@@ -850,6 +878,8 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     finally:
         execution.owner = None
         execution.finished.set()
+        with _interrupt_lock:
+            del _cell_files[filename]
         _current_cell_execution.reset(execution_token)
         _current_cell.reset(cell_token)
 

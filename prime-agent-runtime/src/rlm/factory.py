@@ -3254,12 +3254,13 @@ class FactoryExecutor:
         # refuses with the one refusal message.
         require_factory_enabled()
         # The lane is the factory page's poll: the first frame after a
-        # kernel restart re-arms the rehydrated runs here. ``peek`` is
-        # the one exception: it is the cross-session overview's
-        # read-only live poll, and a display refresh in one session must
-        # never complete another owner's interrupted flows.
+        # kernel restart re-arms the rehydrated runs here. ``peek`` and
+        # ``library`` are the exceptions: the cross-session overview's
+        # read-only live poll must never complete another owner's
+        # interrupted flows, and inspecting a machine's template must
+        # never resume runs as a side effect.
         action = request.get("action")
-        if action != "peek":
+        if action not in ("peek", "library"):
             await self.arm_persisted_runs()
         if action not in ACTIVITY_ACTIONS:
             raise ValueError(f"unknown factory activity action {action!r}")
