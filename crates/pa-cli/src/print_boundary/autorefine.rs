@@ -83,7 +83,7 @@ impl TurnBoundary {
                 Err(error) if json_mode => {
                     sink(&json!({ "type": "refine_failed", "error": format!("{error:#}") }));
                 }
-                Err(error) => eprintln!("pa-cli: refinement failed: {error:#}"),
+                Err(error) => crate::print_runtime::emit_refinement_failure(&format!("{error:#}")),
             }
         }));
     }

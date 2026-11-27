@@ -138,6 +138,10 @@ impl super::SessionUi {
         let request_epoch = self.factory_node_epoch;
         let mut fetch_files = false;
         let mut spec_id = None;
+        // Whether the focused run is listed with no spec id: only then is
+        // there no machine to read files from (a run the cache does not
+        // list yet keeps the fetch for a later refresh).
+        let mut listed_without_spec = false;
         if let Some(factory_view) = view.run_page_mut() {
             let new_mount = !factory_view
                 .node
@@ -155,8 +159,9 @@ impl super::SessionUi {
             if fetch_files {
                 // The machine's spec id rides the focused run: the node's
                 // template files fetch (the library payload) needs it.
-                spec_id = factory_view
-                    .focused_run()
+                let focused = factory_view.focused_run();
+                listed_without_spec = focused.is_some_and(|run| run.spec_id.is_empty());
+                spec_id = focused
                     .map(|run| run.spec_id.clone())
                     .filter(|spec| !spec.is_empty());
             }
@@ -168,7 +173,7 @@ impl super::SessionUi {
             node.set_request_epoch(request_epoch, selector);
             if fetch_files && spec_id.is_some() {
                 node.mark_files_requested(&self.active_session_id);
-            } else if fetch_files {
+            } else if fetch_files && listed_without_spec {
                 // A run with no spec id has no machine to read files from:
                 // the files document reports none instead of loading forever.
                 node.set_files(crate::factory_view::node::NodeFiles::default());

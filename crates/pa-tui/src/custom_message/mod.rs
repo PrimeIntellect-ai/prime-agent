@@ -52,18 +52,19 @@ pub use injected_prompt::{InjectedPromptKind, InjectedPromptRow};
 use crate::chat::{ChatEntry, StatusKind};
 use crate::theme::ThemeColor;
 use pa_types::inbox_notice::INBOX_NOTICE_CUSTOM_TYPE;
+pub use pa_types::inbox_notice::{
+    AGENT_MESSAGE_CUSTOM_TYPE, ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE,
+    ASYNC_BASH_COMPLETION_CUSTOM_TYPE, FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE,
+    HEARTBEAT_PROMPT_CUSTOM_TYPE, RLM_CHILD_FAILURE_CUSTOM_TYPE,
+    RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+};
 use serde_json::Value;
 
 /// Custom types with a dedicated component (pa-core owns the engine-side
 /// vocabulary, the render dispatch owns these).
-pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
-pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
 pub const GOAL_CONTEXT_CUSTOM_TYPE: &str = "goal_context";
 pub const IPYTHON_STATE_RESTORED_CUSTOM_TYPE: &str = "ipython_state_restored";
 pub const PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE: &str = "python_skills_unavailable";
-pub const RLM_CHILD_FAILURE_CUSTOM_TYPE: &str = "rlm_child_failure";
-pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_notice";
-pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
 pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
 pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
 /// The durable single-line outcome of one provider-retry episode (SANCTIONED DIVERGENCE,
@@ -126,13 +127,16 @@ pub struct InboxNoticeRow {
     pub text: String,
 }
 
-/// One background-shell completion row, standalone form (the TS live path attaches
-/// the completion to a tool card, which the Rust engine never emits).
+/// One background completion row, standalone form (the TS live path attaches
+/// the completion to a tool card, which the Rust engine never emits): a
+/// background shell command's or an auto-backgrounded cell's. Collapsed it
+/// paints the one summary line; expanded, the notice text below it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellCompletionRow {
-    pub pid: Option<i64>,
-    pub exit_code: Option<i64>,
-    /// Raw content (`[bash-done pid:N exit:M] ...`).
+    /// The summary after the mark (`Background shell command finished`).
+    pub label: String,
+    pub failed: bool,
+    /// Raw content (`[bash-done pid:N exit:M] ...`, `[cell-done id:… status:…] ...`).
     pub content: String,
 }
 
@@ -239,6 +243,12 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
         ),
         ASYNC_BASH_COMPLETION_CUSTOM_TYPE => vec![ChatEntry::ShellCompletion(Box::new(
             shell_completion_row(message, details),
+        ))],
+        ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE => vec![ChatEntry::ShellCompletion(Box::new(
+            cell_completion_row(message, details),
+        ))],
+        FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE => vec![ChatEntry::ShellCompletion(Box::new(
+            factory_progress_row(message, details),
         ))],
         HEARTBEAT_PROMPT_CUSTOM_TYPE
         | GOAL_CONTEXT_CUSTOM_TYPE
@@ -441,22 +451,89 @@ fn shell_completion_row(message: &Value, details: &Value) -> ShellCompletionRow 
         && pid.is_some_and(|pid| pid > 0)
         && command.is_some()
         && exit_code.is_some();
-    if valid {
-        ShellCompletionRow {
-            pid,
-            exit_code,
-            content: custom_content_text(message),
-        }
-    } else {
-        ShellCompletionRow {
-            pid: None,
-            exit_code: None,
+    if !valid {
+        return ShellCompletionRow {
+            label: "Background shell command finished".to_string(),
+            failed: false,
             content: match message.get("content") {
                 Some(Value::String(_)) => custom_content_text(message),
                 Some(value) => serde_json::to_string(value).unwrap_or_default(),
                 None => String::new(),
             },
-        }
+        };
+    }
+    let failed = exit_code != Some(0);
+    ShellCompletionRow {
+        label: match exit_code {
+            Some(code) if failed => format!("Background shell command failed \u{b7} exit {code}"),
+            _ => "Background shell command finished".to_string(),
+        },
+        failed,
+        content: custom_content_text(message),
+    }
+}
+
+/// One auto-backgrounded cell's completion: the summary names the outcome
+/// and duration from the details; expanded, the notice text (header plus
+/// output tail) and one metadata row per image block.
+fn cell_completion_row(message: &Value, details: &Value) -> ShellCompletionRow {
+    let status = details
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("ok");
+    let mut label = match status {
+        "ok" => "Background cell finished",
+        "aborted" => "Background cell aborted",
+        _ => "Background cell failed",
+    }
+    .to_string();
+    if let Some(duration_ms) = details.get("durationMs").and_then(Value::as_f64) {
+        label.push_str(" \u{b7} ");
+        label.push_str(&crate::tool_card::ipython_details::format_duration(
+            duration_ms,
+        ));
+    }
+    let content = match message.get("content") {
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .map(|block| {
+                if block.get("type").and_then(Value::as_str) == Some("image") {
+                    crate::tool_card::image_block_row_text(block)
+                } else {
+                    block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => custom_content_text(message),
+    };
+    ShellCompletionRow {
+        label,
+        failed: status != "ok",
+        content,
+    }
+}
+
+/// One factory run milestone: the summary names the milestone kind and the
+/// run (`Factory run finished · run-1`); only `finished` reads as success.
+fn factory_progress_row(message: &Value, details: &Value) -> ShellCompletionRow {
+    let kind = details
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("progress");
+    let mut label = format!("Factory run {}", kind.replace('_', " "));
+    if let Some(run_id) = details.get("runId").and_then(Value::as_str) {
+        label.push_str(" \u{b7} ");
+        label.push_str(run_id);
+    }
+    ShellCompletionRow {
+        label,
+        failed: kind != "finished",
+        content: custom_content_text(message),
     }
 }
 
@@ -767,17 +844,24 @@ mod tests {
 
     #[test]
     fn shell_completion_decodes_details() {
-        let entries = decoded(&json!({
-            "role": "custom",
-            "customType": ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
-            "content": "[bash-done pid:4371 exit:0]\n\nCommand: \"ls\"",
-            "display": true,
-            "details": { "pid": 4371, "command": "ls", "exitCode": 0 },
-        }));
+        let completion = |details: serde_json::Value| {
+            decoded(&json!({
+                "role": "custom",
+                "customType": ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+                "content": "[bash-done pid:4371 exit:0]\n\nCommand: \"ls\"",
+                "display": true,
+                "details": details,
+            }))
+        };
         assert!(matches!(
-            entries.as_slice(),
+            completion(json!({ "pid": 4371, "command": "ls", "exitCode": 0 })).as_slice(),
             [ChatEntry::ShellCompletion(row)]
-                if row.pid == Some(4371) && row.exit_code == Some(0)
+                if row.label == "Background shell command finished" && !row.failed
+        ));
+        assert!(matches!(
+            completion(json!({ "pid": 4371, "command": "ls", "exitCode": 2 })).as_slice(),
+            [ChatEntry::ShellCompletion(row)]
+                if row.label == "Background shell command failed \u{b7} exit 2" && row.failed
         ));
         // An invalid details block keeps the default finished row and the JSON
         // content fallback.
@@ -791,7 +875,74 @@ mod tests {
         assert!(matches!(
             entries.as_slice(),
             [ChatEntry::ShellCompletion(row)]
-                if row.pid.is_none() && row.exit_code.is_none()
+                if row.label == "Background shell command finished"
+                    && !row.failed
+                    && row.content.starts_with("[{")
+        ));
+    }
+
+    #[test]
+    fn cell_completion_decodes_into_the_shell_completion_row() {
+        // The full-row lane's rich completion: the summary carries the
+        // outcome and duration, the body the notice text and one metadata
+        // row per image.
+        let entries = decoded(&json!({
+            "role": "custom",
+            "customType": ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE,
+            "content": [
+                { "type": "text", "text": "[cell-done id:c1 status:ok duration:339.9s]\n\nplotted" },
+                { "type": "image", "data": "iVBORwAAAAAAAAAAAAAAAAAAAEAAAAAg", "mimeType": "image/png" },
+            ],
+            "display": true,
+            "details": { "cellId": "c1", "status": "ok", "durationMs": 339_900, "reason": "wait-budget:60000" },
+        }));
+        let [ChatEntry::ShellCompletion(row)] = entries.as_slice() else {
+            panic!("{entries:?}");
+        };
+        assert_eq!(row.label, "Background cell finished \u{b7} 339.9s");
+        assert!(!row.failed);
+        assert_eq!(
+            row.content,
+            "[cell-done id:c1 status:ok duration:339.9s]\n\nplotted\n[image/png \u{b7} 64\u{d7}32]"
+        );
+        let entries = decoded(&json!({
+            "role": "custom",
+            "customType": ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE,
+            "content": "[cell-done id:c2 status:error duration:1.2s]\n\nValueError: boom",
+            "display": true,
+            "details": { "cellId": "c2", "status": "error", "durationMs": 1_200, "reason": "interrupted" },
+        }));
+        assert!(matches!(
+            entries.as_slice(),
+            [ChatEntry::ShellCompletion(row)]
+                if row.label == "Background cell failed \u{b7} 1.2s"
+                    && row.failed
+                    && row.content.ends_with("ValueError: boom")
+        ));
+    }
+
+    #[test]
+    fn factory_progress_decodes_into_the_shell_completion_row() {
+        let progress = |kind: &str| {
+            decoded(&json!({
+                "role": "custom",
+                "customType": FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE,
+                "content": format!("[factory-progress run:run-1] {kind}: all nodes settled"),
+                "display": true,
+                "details": { "runId": "run-1", "kind": kind, "detail": "all nodes settled" },
+            }))
+        };
+        assert!(matches!(
+            progress("finished").as_slice(),
+            [ChatEntry::ShellCompletion(row)]
+                if row.label == "Factory run finished \u{b7} run-1" && !row.failed
+        ));
+        assert!(matches!(
+            progress("budget_exceeded").as_slice(),
+            [ChatEntry::ShellCompletion(row)]
+                if row.label == "Factory run budget exceeded \u{b7} run-1"
+                    && row.failed
+                    && row.content == "[factory-progress run:run-1] budget_exceeded: all nodes settled"
         ));
     }
 
@@ -990,8 +1141,8 @@ mod tests {
             body: Some(body.clone()),
         };
         let shell = ShellCompletionRow {
-            pid: None,
-            exit_code: Some(0),
+            label: "Background shell command finished".to_string(),
+            failed: false,
             content: body.clone(),
         };
         let panel = CustomPanelRow {

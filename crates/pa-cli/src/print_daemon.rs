@@ -104,6 +104,7 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
                 .await
                 .map_err(failed)?;
             let goal_updated_at_start = goal_of(&attached["snapshot"]["state"]).updated_at;
+            let mut refine_failed = false;
             if json_mode {
                 let header = client
                     .request_ok(DaemonCommand::GetSessionHeader {
@@ -156,6 +157,7 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
                     &mut events,
                     json_mode,
                     &active_session_id,
+                    &mut refine_failed,
                 )
                 .await;
                 // A failed session command or turn rejects the prompt wait:
@@ -184,6 +186,7 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
                 &mut events,
                 json_mode,
                 &active_session_id,
+                &mut refine_failed,
             )
             .await
             .map_err(failed)?;
@@ -228,6 +231,9 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
                 pa_core::autonomous::now_millis(),
             ) {
                 eprintln!("{stderr}");
+                exit_code = 1;
+            }
+            if refine_failed {
                 exit_code = 1;
             }
             Ok(exit_code)
@@ -344,23 +350,42 @@ pub(crate) fn live_session_refusal(
 
 /// Await one request while relaying the session's streamed events: json
 /// mode prints each one (TS writes every `session_event`), text mode
-/// drops them. The worker flushes a turn's events before its response, so
-/// every event the request produced is relayed when it returns.
+/// drops them but reports a failed refinement. A `/refine` command's
+/// `refine_failed` (source `user`) sets `refine_failed`, which fails the run
+/// like the daemonless run; a model-requested or compaction-triggered
+/// refinement's failure is only reported. The worker flushes a turn's
+/// events before its response, and the RLM quiescence barrier holds for
+/// the refinement child, so every event the request produced is relayed
+/// when it returns.
 async fn relay_events_until<T>(
     request: impl std::future::Future<Output = T>,
     events: &mut UnboundedReceiver<DaemonClientEvent>,
     json_mode: bool,
     active_session_id: &str,
+    refine_failed: &mut bool,
 ) -> T {
     let mut request = std::pin::pin!(request);
     loop {
         tokio::select! {
             biased;
             Some(event) = events.recv() => {
-                if let DaemonClientEvent::SessionEvent { active_session_id: from, event, .. } = event {
-                    if json_mode && from == active_session_id {
-                        println!("{event}");
+                let DaemonClientEvent::SessionEvent { active_session_id: from, event, .. } = event else {
+                    continue;
+                };
+                if from != active_session_id {
+                    continue;
+                }
+                if json_mode {
+                    println!("{event}");
+                }
+                if event["type"] == "refine_failed" {
+                    if !json_mode {
+                        crate::print_runtime::emit_refinement_failure(
+                            event["error"].as_str().unwrap_or_default(),
+                        );
                     }
+                    *refine_failed |=
+                        event["source"] == pa_core::session_engine::refine::RefinementSource::User.as_str();
                 }
             }
             result = &mut request => return result,
