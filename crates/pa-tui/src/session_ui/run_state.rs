@@ -50,8 +50,14 @@ impl RunState {
                 RunEvent::Ended | RunEvent::Attached { streaming: false },
             )
             | (Submitted | Admitted, RunEvent::Interrupted)
+            // A definitive failure with nothing else in flight means no run is
+            // coming, so it returns to idle from `Submitted` AND from `Admitted`:
+            // a delayed `Admitted` that acknowledged an OLDER submission can
+            // otherwise hold a newer one in `Admitted` after its own failure and
+            // leave the loader up forever. If that run does start, `Started`
+            // sets `Running` anyway.
             | (
-                Submitted,
+                Submitted | Admitted,
                 RunEvent::SubmitFailed {
                     others_in_flight: false,
                 },
@@ -64,17 +70,6 @@ impl RunState {
                 RunEvent::Submitted
                 | RunEvent::SubmitFailed {
                     others_in_flight: true,
-                },
-            )
-            // A definitive failure with nothing else in flight means no run is
-            // coming, so it clears an admitted submit too: a delayed `Admitted`
-            // that acknowledged an OLDER submission can otherwise hold a newer
-            // one in `Admitted` after its own failure, leaving the loader up
-            // forever. If that run does start, `Started` sets `Running` anyway.
-            | (
-                Admitted,
-                RunEvent::SubmitFailed {
-                    others_in_flight: false,
                 },
             )
             | (
