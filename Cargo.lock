@@ -1519,7 +1519,7 @@ checksum = "7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1"
 
 [[package]]
 name = "pa-agent"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "anyhow",
  "serde",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "pa-ai"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "anyhow",
  "base64",
@@ -1564,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "pa-cli"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "anyhow",
  "base64",
@@ -1596,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "pa-core"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "anyhow",
  "base64",
@@ -1636,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "pa-daemon"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "anyhow",
  "filetime",
@@ -1667,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "pa-factory"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "serde",
  "serde_json",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "pa-models"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "hex",
  "hmac",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "pa-perf"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "anyhow",
  "clap",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "pa-telemetry"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "pa-tui"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "anyhow",
  "base64",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "pa-types"
-version = "0.10.5"
+version = "0.10.6-beta.54"
 dependencies = [
  "anyhow",
  "libc",
