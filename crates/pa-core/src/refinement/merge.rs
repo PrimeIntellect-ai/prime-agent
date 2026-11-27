@@ -11,14 +11,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     empty_harness_state, kind_from_name, HarnessEntry, HarnessRefinementEvent, HarnessState,
-    RefinementKind, REFINEMENT_KINDS,
+    RefinementKind,
 };
 
 /// How many refinement events a merged state keeps (the newest ones). The
 /// in-state history has no writer-side cap; repeated syncs cannot grow it
 /// (the union is by id), so this only bounds one merge of two long,
 /// divergent histories.
-pub const MAX_SYNCED_REFINEMENTS: usize = 500;
+const MAX_SYNCED_REFINEMENTS: usize = 500;
 
 /// Merge `owner` and `guest` against `base_versions`, the entry versions
 /// of the guest file at its last sync. Deterministic: entries iterate in
@@ -34,11 +34,6 @@ pub const MAX_SYNCED_REFINEMENTS: usize = 500;
 /// - in both, one side changed since the base: the changed side wins;
 /// - in both, both changed: the higher `version` wins, then the newer
 ///   `updated_at`, then the owner.
-///
-/// # Panics
-///
-/// The `get_mut(kind).expect(...)` cannot panic: the empty state
-/// pre-populates every kind map.
 #[must_use]
 pub fn merge_harness_states(
     owner: &HarnessState,
@@ -47,10 +42,18 @@ pub fn merge_harness_states(
 ) -> HarnessState {
     let mut merged = empty_harness_state();
     merged.schema = owner.schema.max(guest.schema);
-    for kind in REFINEMENT_KINDS {
-        let kind_key = kind_from_name(kind);
-        let owner_entries = &owner.entries[&kind_key];
-        let guest_entries = &guest.entries[&kind_key];
+    // A deserialized state may carry only some kind maps, so the merge
+    // walks the kinds either side names and never indexes a missing one.
+    let kinds: BTreeSet<RefinementKind> = owner
+        .entries
+        .keys()
+        .chain(guest.entries.keys())
+        .copied()
+        .collect();
+    let no_entries = BTreeMap::new();
+    for kind_key in kinds {
+        let owner_entries = owner.entries.get(&kind_key).unwrap_or(&no_entries);
+        let guest_entries = guest.entries.get(&kind_key).unwrap_or(&no_entries);
         let ids: BTreeSet<&String> = owner_entries.keys().chain(guest_entries.keys()).collect();
         for id in ids {
             let base = base_versions.get(&(kind_key, id.clone())).copied();
@@ -70,8 +73,8 @@ pub fn merge_harness_states(
             if let Some(entry) = kept {
                 merged
                     .entries
-                    .get_mut(&kind_key)
-                    .expect("the empty state pre-populates every kind")
+                    .entry(kind_key)
+                    .or_default()
                     .insert(id.clone(), entry.clone());
             }
         }
@@ -82,7 +85,9 @@ pub fn merge_harness_states(
 
 /// The entry both sides keep when they both hold it: an equal pair stays,
 /// a one-sided change travels, and a concurrent edit tie-breaks by
-/// version, then recency, then the owner.
+/// version, then recency, then the owner. A side whose version is at or
+/// below the base did not change the entry, so a stale copy rolling an
+/// entry back never wins on its own.
 fn concurrent_winner<'a>(
     owner: &'a HarnessEntry,
     guest: &'a HarnessEntry,
@@ -91,7 +96,7 @@ fn concurrent_winner<'a>(
     if owner == guest {
         return owner;
     }
-    match (owner.version != base, guest.version != base) {
+    match (owner.version > base, guest.version > base) {
         (true, false) => owner,
         (false, true) => guest,
         // Both changed (or neither did, with diverged content): the
@@ -118,8 +123,8 @@ fn concurrent_winner<'a>(
 /// string prefix comparison.
 fn owner_newer(owner: &HarnessEntry, guest: &HarnessEntry) -> bool {
     match (
-        rfc3339_millis(&owner.updated_at),
-        rfc3339_millis(&guest.updated_at),
+        rfc3339_nanos(&owner.updated_at),
+        rfc3339_nanos(&guest.updated_at),
     ) {
         (Some(owner_at), Some(guest_at)) => owner_at >= guest_at,
         // An unparseable stamp loses to a parseable one; two equally
@@ -147,8 +152,8 @@ fn merged_refinements(
     }
     let mut events: Vec<HarnessRefinementEvent> = by_id.into_values().collect();
     events.sort_by(|left, right| {
-        rfc3339_millis(&left.created_at)
-            .cmp(&rfc3339_millis(&right.created_at))
+        rfc3339_nanos(&left.created_at)
+            .cmp(&rfc3339_nanos(&right.created_at))
             .then_with(|| left.id.cmp(&right.id))
     });
     let over = events.len().saturating_sub(MAX_SYNCED_REFINEMENTS);
@@ -178,11 +183,12 @@ pub fn kind_from_key_name(name: &str) -> RefinementKind {
     kind_from_name(name)
 }
 
-/// Epoch milliseconds of an RFC 3339 timestamp, or `None` when it does
+/// Epoch nanoseconds of an RFC 3339 timestamp, or `None` when it does
 /// not parse. Handles the shapes both harness writers emit: `Z` and
-/// numeric `±HH:MM` offsets, and fractional seconds of any length.
-#[must_use]
-pub fn rfc3339_millis(stamp: &str) -> Option<i64> {
+/// numeric `±HH:MM` offsets, and fractional seconds of any length. The
+/// fraction keeps nanosecond precision, so the tie-break can order two
+/// edits inside one millisecond (the kernel writes microseconds).
+fn rfc3339_nanos(stamp: &str) -> Option<i64> {
     let bytes = stamp.as_bytes();
     if bytes.len() < 20
         || bytes[4] != b'-'
@@ -200,7 +206,7 @@ pub fn rfc3339_millis(stamp: &str) -> Option<i64> {
     let minute = stamp.get(14..16)?.parse::<u32>().ok()?;
     let second = stamp.get(17..19)?.parse::<u32>().ok()?;
     let mut rest = &stamp[19..];
-    let mut millis: i64 = 0;
+    let mut nanos: i64 = 0;
     if let Some(fraction) = rest.strip_prefix('.') {
         let digits: &str = fraction
             .split_once(|byte: char| !byte.is_ascii_digit())
@@ -208,11 +214,11 @@ pub fn rfc3339_millis(stamp: &str) -> Option<i64> {
         if digits.is_empty() {
             return None;
         }
-        let mut scaled = [b'0'; 3];
+        let mut scaled = [b'0'; 9];
         for (slot, digit) in scaled.iter_mut().zip(digits.as_bytes()) {
             *slot = *digit;
         }
-        millis = String::from_utf8_lossy(&scaled).parse::<i64>().ok()?;
+        nanos = String::from_utf8_lossy(&scaled).parse::<i64>().ok()?;
         rest = &rest[1 + digits.len()..];
     }
     let offset_secs = match rest.as_bytes().first() {
@@ -250,7 +256,9 @@ pub fn rfc3339_millis(stamp: &str) -> Option<i64> {
     let days = days_from_civil(year, month, day);
     let secs = days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second)
         - offset_secs;
-    Some(secs * 1_000 + millis)
+    // Nanoseconds overflow i64 past the year 2262; such a stamp reads as
+    // undatable instead of wrapping.
+    secs.checked_mul(1_000_000_000)?.checked_add(nanos)
 }
 
 /// Days from 1970-01-01 (Howard Hinnant's civil algorithm, the one every
@@ -469,27 +477,32 @@ mod tests {
     #[test]
     fn rfc3339_parses_offsets_and_fractions_by_instant() {
         // The same instant in three spellings.
-        let zulu = rfc3339_millis("2026-03-01T23:00:00.000Z").unwrap();
-        assert_eq!(zulu, rfc3339_millis("2026-03-01T23:00:00Z").unwrap());
+        let zulu = rfc3339_nanos("2026-03-01T23:00:00.000Z").unwrap();
+        assert_eq!(zulu, rfc3339_nanos("2026-03-01T23:00:00Z").unwrap());
         assert_eq!(
             zulu,
-            rfc3339_millis("2026-03-01T23:00:00.000+00:00").unwrap()
+            rfc3339_nanos("2026-03-01T23:00:00.000+00:00").unwrap()
         );
         assert_eq!(
             zulu,
-            rfc3339_millis("2026-03-01T15:00:00.000-08:00").unwrap()
+            rfc3339_nanos("2026-03-01T15:00:00.000-08:00").unwrap()
         );
-        // Microsecond fractions scale to milliseconds.
+        // Microsecond fractions keep their full precision.
         assert_eq!(
-            rfc3339_millis("2026-03-01T23:00:00.878719+00:00").unwrap() % 1_000,
-            878
+            rfc3339_nanos("2026-03-01T23:00:00.878719+00:00").unwrap() % 1_000_000_000,
+            878_719_000
+        );
+        // Two stamps inside one millisecond order by their fraction.
+        assert!(
+            rfc3339_nanos("2026-03-01T23:00:00.000400Z").unwrap()
+                > rfc3339_nanos("2026-03-01T23:00:00.000300Z").unwrap()
         );
         // A smaller local hour behind an offset is a later instant:
         // 15:00 at -08:00 is 23:00 UTC, past 20:00 UTC. A raw string
         // compare would order "15:00..." before "20:00...".
         assert!(
-            rfc3339_millis("2026-03-01T20:00:00Z").unwrap()
-                < rfc3339_millis("2026-03-01T15:00:00-08:00").unwrap()
+            rfc3339_nanos("2026-03-01T20:00:00Z").unwrap()
+                < rfc3339_nanos("2026-03-01T15:00:00-08:00").unwrap()
         );
         // Junk and impossible dates read as undatable.
         for bad in [
@@ -501,10 +514,51 @@ mod tests {
             "2026-03-01T00:00:00+25:00",
             "2026-03-01T00:00:00UTC",
         ] {
-            assert!(rfc3339_millis(bad).is_none(), "{bad} must not parse");
+            assert!(rfc3339_nanos(bad).is_none(), "{bad} must not parse");
         }
         // A space separator parses, like the sibling parsers.
-        assert_eq!(rfc3339_millis("2026-03-01 23:00:00Z").unwrap(), zulu);
+        assert_eq!(rfc3339_nanos("2026-03-01 23:00:00Z").unwrap(), zulu);
+    }
+
+    #[test]
+    fn a_guest_copy_below_the_base_version_never_rolls_the_owner_back() {
+        // The base holds version 3; the owner still runs 3; the guest
+        // file is an older checkpoint at 2. The stale copy must not win.
+        let owner = state(&[("shared", 3, "2026-03-01T00:00:00.000Z")]);
+        let guest = state(&[("shared", 2, "2026-03-02T00:00:00.000Z")]);
+        let merged = merge_harness_states(&owner, &guest, &base(&[("shared", 3)]));
+        assert_eq!(merged_entry(&merged, "shared").unwrap().version, 3);
+    }
+
+    #[test]
+    fn a_partial_guest_state_merges_without_panicking() {
+        // A deserialized state may carry no kind maps at all; the merge
+        // walks the kinds either side names instead of indexing them.
+        let owner = state(&[("a", 1, "2026-01-01T00:00:00.000Z")]);
+        let guest = HarnessState {
+            schema: 1,
+            entries: BTreeMap::new(),
+            refinements: Vec::new(),
+        };
+        let merged = merge_harness_states(&owner, &guest, &base(&[]));
+        assert!(merged_entry(&merged, "a").is_some());
+        // A partial owner state is just as welcome.
+        let merged = merge_harness_states(&guest, &owner, &base(&[]));
+        assert!(merged_entry(&merged, "a").is_some());
+    }
+
+    #[test]
+    fn equal_versions_order_by_sub_millisecond_stamps() {
+        // Both sides edited the same base version; the guest's stamp is
+        // 100 microseconds newer, a difference a millisecond truncation
+        // would erase.
+        let owner = state(&[("shared", 5, "2026-03-01T23:00:00.000300Z")]);
+        let guest = state(&[("shared", 5, "2026-03-01T23:00:00.000400Z")]);
+        let merged = merge_harness_states(&owner, &guest, &base(&[("shared", 2)]));
+        assert_eq!(
+            merged_entry(&merged, "shared").unwrap().updated_at,
+            "2026-03-01T23:00:00.000400Z"
+        );
     }
 
     #[test]

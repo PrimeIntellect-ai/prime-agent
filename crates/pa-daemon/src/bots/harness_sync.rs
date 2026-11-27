@@ -16,8 +16,8 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use pa_core::refinement::merge::{entry_versions, kind_from_key_name, merge_harness_states};
 use pa_core::refinement::{
-    empty_harness_state, get_global_harness_state_dir, load_harness_state, update_harness_state,
-    HarnessScope, HarnessState, RefinementKind,
+    empty_harness_state, get_global_harness_state_dir, get_harness_state_path,
+    update_harness_state, HarnessScope, HarnessState, RefinementKind,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -93,18 +93,17 @@ impl SyncBase {
     }
 
     /// Record `state` as the guest file's content, sealed by `sha256`.
+    /// Entries the state no longer lists keep their last recorded
+    /// version: that tombstone is what keeps an older checkpoint from
+    /// resurrecting an entry the owner deleted.
     fn recorded_as(&mut self, state: &HarnessState, sha256: String) {
         self.last_synced_sha256 = Some(sha256);
-        self.versions = entry_versions(state)
-            .into_iter()
-            .map(|((kind, id), version)| (kind_key(kind), id, version))
-            .fold(BTreeMap::new(), |mut kinds, (kind, id, version)| {
-                kinds
-                    .entry(kind.to_string())
-                    .or_default()
-                    .insert(id, version);
-                kinds
-            });
+        for ((kind, id), version) in entry_versions(state) {
+            self.versions
+                .entry(kind_key(kind).to_string())
+                .or_default()
+                .insert(id, version);
+        }
     }
 
     /// The recorded versions as the merge's base map.
@@ -155,6 +154,19 @@ fn canonical_bytes(state: &HarnessState) -> Result<Vec<u8>> {
     Ok(format!("{}\n", serde_json::to_string_pretty(state)?).into_bytes())
 }
 
+/// The owner's global state, read fallibly. A missing file is the empty
+/// state, but an unreadable or malformed one is an error: a lenient read
+/// here could push an empty state over the bot's valid one.
+fn read_owner_state(harness_dir: &Path) -> Result<HarnessState> {
+    let path = get_harness_state_path(harness_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text)
+            .with_context(|| format!("the owner harness state at {} is malformed", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(empty_harness_state()),
+        Err(error) => Err(anyhow!("the owner harness state cannot be read: {error}")),
+    }
+}
+
 /// A state with no entries and no history.
 fn is_empty(state: &HarnessState) -> bool {
     state.entries.values().all(BTreeMap::is_empty) && state.refinements.is_empty()
@@ -192,13 +204,14 @@ impl BotManager {
         };
         let agent_dir = self.agent_dir.clone();
         let bot_id = record.bot_id.clone();
-        let (owner_state, mut base) = tokio::task::spawn_blocking(move || {
-            let dir = get_global_harness_state_dir(&agent_dir);
-            let state = load_harness_state(&dir, HarnessScope::Global);
-            (state, SyncBase::load(&agent_dir, &bot_id))
-        })
-        .await
-        .context("the owner harness read failed")?;
+        let (owner_state, mut base) =
+            tokio::task::spawn_blocking(move || -> Result<(HarnessState, SyncBase)> {
+                let dir = get_global_harness_state_dir(&agent_dir);
+                let state = read_owner_state(&dir)?;
+                Ok((state, SyncBase::load(&agent_dir, &bot_id)))
+            })
+            .await
+            .context("the owner harness read failed")??;
 
         let guest_sha = self.probe_guest_harness_sha(sandbox_id, deadline).await?;
         let owner_sha = sha256_hex(&canonical_bytes(&owner_state)?);
@@ -208,15 +221,24 @@ impl BotManager {
         {
             return Ok(());
         }
+        let base_versions = base.version_map();
+        // The owner can also roll an entry back below its base version
+        // (an old harness backup restored wholesale); only the full merge
+        // resolves that against the guest's newer copy.
+        let owner_below_base = base_versions.iter().any(|((kind, id), version)| {
+            owner_state
+                .entries
+                .get(kind)
+                .and_then(|entries| entries.get(id))
+                .is_some_and(|entry| entry.version < *version)
+        });
         // A guest whose file still matches the last sync is at the base:
         // the merge reduces to the owner state, so nothing is downloaded.
-        let guest_state = if guest_sha == base.last_synced_sha256 {
+        let guest_state = if guest_sha == base.last_synced_sha256 && !owner_below_base {
             None
         } else {
             Some(self.download_guest_state(sandbox_id, deadline).await?)
         };
-
-        let base_versions = base.version_map();
         let mut merged = match &guest_state {
             Some(guest) => merge_harness_states(&owner_state, guest, &base_versions),
             None => owner_state.clone(),
@@ -395,7 +417,7 @@ mod tests {
     }
 
     fn load_owner(dir: &tempfile::TempDir) -> HarnessState {
-        load_harness_state(&owner_dir(dir), HarnessScope::Global)
+        read_owner_state(&owner_dir(dir)).unwrap()
     }
 
     /// The bot's on-disk state, as the fake's guest file holds it.
@@ -613,6 +635,68 @@ mod tests {
 
         manager.delete(&record.bot_id).await.unwrap();
         assert!(!base_path(dir.path(), &record.bot_id).exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_corrupt_owner_state_aborts_the_sync_without_touching_the_bot() {
+        let (dir, platform, manager) = setup();
+        save_owner(&dir, &state_with(&[("owner-memory", 1)]));
+        let record = manager.spawn(&spec("bot-a")).await.unwrap();
+        let sandbox_id = record.sandbox_id.clone().unwrap();
+        let before = platform.state().harness_files[&sandbox_id][GUEST_HARNESS_STATE].clone();
+
+        // A corrupt owner file must not degrade to an empty state that
+        // wipes the bot's harness: the sync fails, nothing is pushed.
+        std::fs::write(owner_dir(&dir).join("harness_state.json"), "not json").unwrap();
+        let refused = manager
+            .sync_global_harness(&record, deadline())
+            .await
+            .expect_err("a corrupt owner state refuses the sync");
+        assert!(refused.to_string().contains("malformed"));
+        assert_eq!(
+            platform.state().harness_files[&sandbox_id][GUEST_HARNESS_STATE],
+            before
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_old_checkpoint_after_a_deletion_push_does_not_resurrect_it() {
+        let (dir, platform, manager) = setup();
+        save_owner(&dir, &state_with(&[("keep", 1), ("drop", 1)]));
+        let record = manager.spawn(&spec("bot-a")).await.unwrap();
+        let sandbox_id = record.sandbox_id.clone().unwrap();
+
+        // The owner deletes an entry; the wake pushes the deletion.
+        save_owner(&dir, &state_with(&[("keep", 1)]));
+        manager.pause(&record.bot_id).await.unwrap();
+        manager.ensure_running(&record.bot_id).await.unwrap();
+        assert!(
+            !guest_state(&platform, &sandbox_id).entries[&RefinementKind::Memory]
+                .contains_key("drop")
+        );
+
+        // An older checkpoint restores the pre-deletion file wholesale.
+        write_guest_state(
+            &platform,
+            &sandbox_id,
+            &state_with(&[("keep", 1), ("drop", 1)]),
+        );
+        manager
+            .sync_global_harness(&record, deadline())
+            .await
+            .unwrap();
+
+        // The tombstone in the sync base keeps the deletion: the entry
+        // stays gone on both sides.
+        assert!(!load_owner(&dir).entries[&RefinementKind::Memory].contains_key("drop"));
+        assert!(
+            !guest_state(&platform, &sandbox_id).entries[&RefinementKind::Memory]
+                .contains_key("drop")
+        );
+        assert!(
+            guest_state(&platform, &sandbox_id).entries[&RefinementKind::Memory]
+                .contains_key("keep")
+        );
     }
 
     #[tokio::test(start_paused = true)]
