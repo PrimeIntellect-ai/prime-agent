@@ -1035,30 +1035,38 @@ impl Supervisor {
                 }
                 outcome
             }
-            DaemonCommand::Reattach {
-                active_session_id,
-                target_active_session_id,
-                ..
-            } => {
-                // Reattach clears the detach marks for the reattached sessions (TS
-                // reattach arm): a reattached session may acquire pauses again.
-                let client_id = effective_client_id.lock().unwrap().clone();
-                let outcome = self
-                    .route_client_command(
-                        command,
-                        &client_id,
-                        attached,
-                        command_id,
-                        type_name,
-                        Some(stream),
-                    )
-                    .await;
-                let mut cleared = vec![active_session_id.clone(), target_active_session_id.clone()];
-                if let Ok(resident) = self.registry.resolve(target_active_session_id).await {
+            DaemonCommand::Attach { .. } | DaemonCommand::Reattach { .. } => {
+                // An attach or reattach clears the detach marks for its sessions (TS
+                // reattach arm; an attach after a finished detach ends it the same way),
+                // before the answer goes out: the session may acquire pauses again.
+                let (mut cleared, target) = match command {
+                    DaemonCommand::Reattach {
+                        active_session_id,
+                        target_active_session_id,
+                        ..
+                    } => (
+                        vec![active_session_id.clone(), target_active_session_id.clone()],
+                        target_active_session_id,
+                    ),
+                    DaemonCommand::Attach {
+                        active_session_id, ..
+                    } => (vec![active_session_id.clone()], active_session_id),
+                    _ => unreachable!("the arm matches attach and reattach"),
+                };
+                if let Ok(resident) = self.registry.resolve(target).await {
                     cleared.push(resident.worker_id.clone());
                 }
                 Self::clear_detaching_after_reattach(connection, &cleared);
-                outcome
+                let client_id = effective_client_id.lock().unwrap().clone();
+                self.route_client_command(
+                    command,
+                    &client_id,
+                    attached,
+                    command_id,
+                    type_name,
+                    Some(stream),
+                )
+                .await
             }
             DaemonCommand::AgentMessagesStatus {
                 active_session_id, ..

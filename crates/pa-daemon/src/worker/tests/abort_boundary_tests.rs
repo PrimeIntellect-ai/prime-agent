@@ -636,7 +636,7 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
     );
     // Simulate the narrow settle gap: an earlier owned admission still
     // exists in the registry, but this different turn is now running.
-    worker.register_prompt_admission("stale-owned");
+    worker.register_prompt_admission("stale-owned", None);
     assert!(worker.prompt_admissions.commit("stale-owned"));
     let stale = worker
         .dispatch(

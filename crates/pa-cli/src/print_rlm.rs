@@ -1283,6 +1283,7 @@ mod tests {
             messages: Vec::new(),
             file_args: Vec::new(),
             daemon_socket: None,
+            a2a: crate::args::A2aArgs::default(),
             list_models: None,
             initial_message: None,
             initial_images: Vec::new(),

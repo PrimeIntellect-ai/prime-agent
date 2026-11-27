@@ -1083,6 +1083,15 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// Pause an active goal and drop the queued goal and autonomous
+    /// continuations, so a stopped task's loop does not resume later.
+    RetireContinuations {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     ExecuteBashAndWait {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
