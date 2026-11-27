@@ -453,6 +453,30 @@ impl SettingsManager {
             .unwrap_or(crate::settings::types::DEFAULT_BOTS_MAX_BOTS as u64)
     }
 
+    /// `bots.maxCpu` (default 16): the largest vCPU count a bot sandbox
+    /// may request. Unset, malformed, and non-positive values read as
+    /// the default.
+    #[must_use]
+    pub fn get_bots_max_cpu(&self) -> u32 {
+        self.global_raw()
+            .and_then(|document| document.get("bots")?.get("maxCpu")?.as_u64())
+            .and_then(|max| u32::try_from(max).ok())
+            .filter(|max| *max >= 1)
+            .unwrap_or(crate::settings::types::DEFAULT_BOTS_MAX_CPU)
+    }
+
+    /// `bots.maxMemoryGb` (default 32): the largest memory in GB a bot
+    /// sandbox may request. Unset, malformed, and non-positive values
+    /// read as the default.
+    #[must_use]
+    pub fn get_bots_max_memory_gb(&self) -> u32 {
+        self.global_raw()
+            .and_then(|document| document.get("bots")?.get("maxMemoryGb")?.as_u64())
+            .and_then(|max| u32::try_from(max).ok())
+            .filter(|max| *max >= 1)
+            .unwrap_or(crate::settings::types::DEFAULT_BOTS_MAX_MEMORY_GB)
+    }
+
     /// `bots.gitIdentity`: the git author the bots commit as, when the
     /// global settings name both a name and an email.
     #[must_use]

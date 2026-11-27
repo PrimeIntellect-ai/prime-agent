@@ -462,6 +462,8 @@ async fn sessions_with_fake_child_subagents(
 async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
     sessions
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
             bots: false,
@@ -485,6 +487,8 @@ async fn a_factory_child_settles_without_a_parent_notice() {
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
     sessions
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
             bots: false,
@@ -1257,6 +1261,8 @@ async fn a_decision_spawn_resolves_the_model_from_the_child_cwd() {
     });
     let handle = sessions
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             prompt: "kickoff".to_string(),
             name: Some("f20-worker".to_string()),
             model: None,

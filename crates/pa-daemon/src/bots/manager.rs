@@ -669,6 +669,43 @@ impl BotManager {
         registry.put(record)
     }
 
+    /// Refuse a requested sandbox size above the owner's caps
+    /// (`bots.maxCpu`, `bots.maxMemoryGb`), naming the cap, before any
+    /// create runs.
+    ///
+    /// # Errors
+    /// Returns an error when a requested size is above its cap, or the
+    /// cap settings cannot be read.
+    async fn assert_within_size_caps(
+        &self,
+        cpu: Option<u32>,
+        memory_gb: Option<u32>,
+    ) -> Result<()> {
+        let agent_dir = self.agent_dir.clone();
+        let (max_cpu, max_memory_gb) = tokio::task::spawn_blocking(move || {
+            let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
+            (
+                settings.get_bots_max_cpu(),
+                settings.get_bots_max_memory_gb(),
+            )
+        })
+        .await
+        .context("the bots size-cap settings read failed")?;
+        if let Some(cpu) = cpu.filter(|cpu| *cpu > max_cpu) {
+            bail!(
+                "the bot's cpu={cpu} exceeds bots.maxCpu {max_cpu}: lower cpu or raise \
+                 bots.maxCpu in the daemon settings.json"
+            );
+        }
+        if let Some(memory_gb) = memory_gb.filter(|memory_gb| *memory_gb > max_memory_gb) {
+            bail!(
+                "the bot's memory_gb={memory_gb} exceeds bots.maxMemoryGb {max_memory_gb}: \
+                 lower memory_gb or raise bots.maxMemoryGb in the daemon settings.json"
+            );
+        }
+        Ok(())
+    }
+
     /// Provision a new bot: a running sandbox with this binary's exact
     /// version installed and the bot session open in the guest daemon. A
     /// failed spawn deletes what it created.
@@ -681,6 +718,8 @@ impl BotManager {
         if self.get(&spec.bot_id).is_some() {
             return self.ensure_running_locked(&spec.bot_id).await;
         }
+        self.assert_within_size_caps(spec.cpu, spec.memory_gb)
+            .await?;
         let label = bot_label(&spec.bot_id);
         let existing = retry(|| self.platform.list(&label)).await?;
         if existing.iter().any(|sandbox| !sandbox.status.is_terminal()) {
@@ -717,6 +756,8 @@ impl BotManager {
             pause_at: None,
             status_since: None,
             running_ms: 0,
+            cpu: spec.cpu,
+            memory_gb: spec.memory_gb,
         })?;
         if spec.bots {
             let mut spawns = read_spawns_marker(&self.agent_dir);
@@ -1708,6 +1749,8 @@ impl BotManager {
             idempotency_key: idempotency_key(&record.bot_id, record.generation, &source),
             checkpoint_id: checkpoint_id.map(str::to_string),
             network_rules: credentials.network_rules.clone(),
+            cpu: record.cpu,
+            memory_gb: record.memory_gb,
         };
         let created = retry(|| self.platform.create(&request)).await?;
         lock(&self.guest_auth).insert(created.id.clone(), credentials);
@@ -2714,6 +2757,8 @@ fn child_record(
         // The record adds the open interval from `status_since` itself.
         running_ms,
         pause_token: existing.pause_token,
+        cpu: existing.cpu,
+        memory_gb: existing.memory_gb,
     })
 }
 
@@ -2759,6 +2804,9 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         pause_at: None,
         status_since: None,
         running_ms: 0,
+        // Labels carry no size: the rebuilt record runs the small default.
+        cpu: None,
+        memory_gb: None,
     }
 }
 

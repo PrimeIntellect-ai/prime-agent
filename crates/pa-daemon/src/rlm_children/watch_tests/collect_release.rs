@@ -93,6 +93,8 @@ async fn a_blocking_collect_releases_all_selected_prompts_before_waiting() {
     sessions.notify_turn_started();
     let first = sessions
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             prompt: "first task".to_string(),
             name: Some("batch-first".to_string()),
             model: None,
@@ -109,6 +111,8 @@ async fn a_blocking_collect_releases_all_selected_prompts_before_waiting() {
         .expect("spawn first child");
     let second = sessions
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             prompt: "second task".to_string(),
             name: Some("batch-second".to_string()),
             model: None,

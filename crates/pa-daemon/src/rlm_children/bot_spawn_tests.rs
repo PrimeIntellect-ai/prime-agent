@@ -91,6 +91,8 @@ async fn fake_supervisor(
 
 fn request(name: &str, target: RlmSpawnTarget) -> RlmSpawnRequest {
     RlmSpawnRequest {
+        cpu: None,
+        memory_gb: None,
         target,
         github: None,
         bots: false,
@@ -166,6 +168,8 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
     // The nested-spawn flag rides the request to the supervisor.
     sessions
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             bots: true,
             ..request("scout-b", RlmSpawnTarget::Sandbox)
         })
@@ -174,8 +178,23 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
     let flagged = commands.lock().unwrap().last().cloned().unwrap();
     assert_eq!(flagged["bots"], true);
 
+    // The sandbox size rides the request to the supervisor.
+    sessions
+        .spawn(RlmSpawnRequest {
+            cpu: Some(8),
+            memory_gb: Some(16),
+            ..request("scout-c", RlmSpawnTarget::Sandbox)
+        })
+        .await
+        .expect("the size rides along");
+    let sized = commands.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(sized["cpu"], 8);
+    assert_eq!(sized["memoryGb"], 16);
+
     // A factory state cannot spawn a bot: its ledger edge would be lost.
     let tagged = RlmSpawnRequest {
+        cpu: None,
+        memory_gb: None,
         factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
             run_id: "run-1".to_string(),
             spec_id: "spec-1".to_string(),

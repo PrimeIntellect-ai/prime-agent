@@ -1301,6 +1301,56 @@ mod tests {
         assert_eq!(manager.get_bots_max_bots(), 25);
     }
 
+    /// `bots.maxCpu` and `bots.maxMemoryGb` read the global scope: a
+    /// positive number caps the bot sandbox size; unset, malformed, and
+    /// non-positive values read as the defaults (16 and 32).
+    #[test]
+    fn bots_size_caps_read_the_global_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let manager = SettingsManager::create(&cwd, dir.path());
+        assert_eq!(
+            manager.get_bots_max_cpu(),
+            crate::settings::types::DEFAULT_BOTS_MAX_CPU
+        );
+        assert_eq!(
+            manager.get_bots_max_memory_gb(),
+            crate::settings::types::DEFAULT_BOTS_MAX_MEMORY_GB
+        );
+
+        for document in [
+            r#"{"bots": {"maxCpu": "4", "maxMemoryGb": "8"}}"#,
+            r#"{"bots": {"maxCpu": 0, "maxMemoryGb": 0}}"#,
+            r#"{"bots": {"maxCpu": -2, "maxMemoryGb": -2}}"#,
+            r#"{"bots": [4]}"#,
+            "{ not json",
+        ] {
+            std::fs::write(dir.path().join("settings.json"), document).unwrap();
+            let manager = SettingsManager::create(&cwd, dir.path());
+            assert_eq!(
+                manager.get_bots_max_cpu(),
+                crate::settings::types::DEFAULT_BOTS_MAX_CPU,
+                "{document}"
+            );
+            assert_eq!(
+                manager.get_bots_max_memory_gb(),
+                crate::settings::types::DEFAULT_BOTS_MAX_MEMORY_GB,
+                "{document}"
+            );
+        }
+
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"bots": {"maxCpu": 6, "maxMemoryGb": 12}}"#,
+        )
+        .unwrap();
+        let manager = SettingsManager::create(&cwd, dir.path());
+        assert_eq!(manager.get_bots_max_cpu(), 6);
+        assert_eq!(manager.get_bots_max_memory_gb(), 12);
+    }
+
     /// `bots.enabled` reads the GLOBAL scope only and only the JSON
     /// boolean `true` enables it: every malformed, wrong-typed, or
     /// absent shape stays disabled (the daemon's sandbox-admission

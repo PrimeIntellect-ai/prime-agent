@@ -255,6 +255,8 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
 
 fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
     RlmSpawnRequest {
+        cpu: None,
+        memory_gb: None,
         target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
         github: None,
         bots: false,
@@ -309,6 +311,8 @@ async fn rlm_spawn_cwd_starts_the_child_in_that_directory() {
 
     let handle = children
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             cwd: Some("../project".to_string()),
             ..spawn_request("worker-cwd", "ship the lane")
         })
@@ -340,6 +344,8 @@ async fn rlm_spawn_cwd_starts_the_child_in_that_directory() {
     let missing = project.join("missing");
     let error = children
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             cwd: Some(missing.to_string_lossy().to_string()),
             ..spawn_request("worker-missing", "ship the lane")
         })
@@ -761,6 +767,8 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
         sessions
     };
     let request = RlmSpawnRequest {
+        cpu: None,
+        memory_gb: None,
         prompt: "You are System 1, the decision child of a real-time control loop.".to_string(),
         name: Some("system-1".to_string()),
         model: None,
@@ -1022,6 +1030,8 @@ async fn a_passivated_decision_child_revives_as_a_decision_child_and_answers() {
         sessions
     };
     let request = RlmSpawnRequest {
+        cpu: None,
+        memory_gb: None,
         prompt: "You are System 1, the decision child of a real-time control loop.".to_string(),
         name: Some("system-1".to_string()),
         model: None,

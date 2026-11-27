@@ -117,6 +117,10 @@ pub struct BotSpec {
     pub git_identity: Option<BotGitIdentity>,
     /// The bot may spawn its own bots (`rlm.spawn(..., bots=True)`).
     pub bots: bool,
+    /// The bot sandbox's vCPU count; `None` keeps the small default.
+    pub cpu: Option<u32>,
+    /// The bot sandbox's memory in GB; `None` keeps the small default.
+    pub memory_gb: Option<u32>,
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {

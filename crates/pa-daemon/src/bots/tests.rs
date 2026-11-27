@@ -668,6 +668,8 @@ pub(crate) fn spec(bot_id: &str) -> BotSpec {
         github: false,
         git_identity: None,
         bots: false,
+        cpu: None,
+        memory_gb: None,
     }
 }
 
@@ -1346,6 +1348,81 @@ async fn errored_sandboxes_are_deleted() {
     set_error(&untracked);
     manager.delete("bot-a").await.unwrap();
     assert_eq!(status(&untracked), BotStatus::Stopped);
+}
+
+/// A spawn size reaches the create, an omitted size keeps the default,
+/// and a checkpoint restore recreates the sandbox at the recorded size.
+#[tokio::test(start_paused = true)]
+async fn a_spawn_size_reaches_the_create_and_survives_a_restore() {
+    let (_dir, platform, manager) = setup();
+    let mut sized = spec("bot-a");
+    sized.cpu = Some(8);
+    sized.memory_gb = Some(16);
+    let spawned = manager.spawn(&sized).await.unwrap();
+    assert_eq!(spawned.cpu, Some(8));
+    assert_eq!(spawned.memory_gb, Some(16));
+    let first = platform.state().creates[0].clone();
+    assert_eq!(first.cpu, Some(8));
+    assert_eq!(first.memory_gb, Some(16));
+
+    // An omitted size stays the small default on its own create.
+    manager.spawn(&spec("bot-b")).await.unwrap();
+    let plain = platform.state().creates.last().cloned().unwrap();
+    assert_eq!(plain.cpu, None);
+    assert_eq!(plain.memory_gb, None);
+
+    // The sandbox is lost; the restore from the bot's checkpoint keeps
+    // the recorded size.
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+    let restore = platform.state().creates.last().cloned().unwrap();
+    assert_eq!(
+        restore.checkpoint_id.as_deref(),
+        Some(durable.as_str()),
+        "the restore used the checkpoint"
+    );
+    assert_eq!(restore.cpu, Some(8), "the restore keeps the size");
+    assert_eq!(restore.memory_gb, Some(16), "the restore keeps the size");
+}
+
+/// A spawn above the owner's size caps is refused before any create, and
+/// the caps read the `bots.maxCpu` and `bots.maxMemoryGb` settings.
+#[tokio::test(start_paused = true)]
+async fn a_spawn_above_the_size_caps_is_refused() {
+    let (dir, platform, manager) = setup();
+    // No settings file: the default caps apply.
+    let mut over = spec("bot-a");
+    over.cpu = Some(17);
+    let error = manager.spawn(&over).await.unwrap_err();
+    assert!(error.to_string().contains("bots.maxCpu 16"), "{error}");
+    let mut over = spec("bot-b");
+    over.memory_gb = Some(33);
+    let error = manager.spawn(&over).await.unwrap_err();
+    assert!(error.to_string().contains("bots.maxMemoryGb 32"), "{error}");
+    assert!(platform.state().creates.is_empty(), "nothing provisioned");
+
+    // A settings file lowers the ceiling; a size within it spawns.
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({ "bots": { "maxCpu": 4, "maxMemoryGb": 8 } }).to_string(),
+    )
+    .unwrap();
+    let mut over = spec("bot-c");
+    over.cpu = Some(8);
+    let error = manager.spawn(&over).await.unwrap_err();
+    assert!(error.to_string().contains("bots.maxCpu 4"), "{error}");
+    let mut within = spec("bot-d");
+    within.cpu = Some(4);
+    within.memory_gb = Some(8);
+    manager.spawn(&within).await.unwrap();
+    assert_eq!(platform.state().creates.len(), 1);
 }
 
 #[tokio::test(start_paused = true)]

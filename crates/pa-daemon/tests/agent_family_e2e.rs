@@ -433,6 +433,8 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     });
     let handle = children
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
             bots: false,
@@ -769,6 +771,8 @@ async fn family_edges_never_cross_families_end_to_end() {
         });
         let handle = children
             .spawn(RlmSpawnRequest {
+                cpu: None,
+                memory_gb: None,
                 target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
                 github: None,
                 bots: false,
@@ -915,6 +919,8 @@ async fn family_edges_never_cross_families_end_to_end() {
     });
     let grandkid_handle = kid_children
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
             bots: false,
@@ -1239,6 +1245,8 @@ async fn parent_renames_a_child_end_to_end() {
     });
     let handle = children
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
             bots: false,
@@ -1636,6 +1644,8 @@ async fn passivated_child_recent_messages_reads_its_file_end_to_end() {
     });
     children
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
             bots: false,
@@ -1811,6 +1821,8 @@ async fn family_members_read_each_others_transcripts_end_to_end() {
         for kid in kids {
             let handle = children
                 .spawn(RlmSpawnRequest {
+                    cpu: None,
+                    memory_gb: None,
                     target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
                     github: None,
                     bots: false,

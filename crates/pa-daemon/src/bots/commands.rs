@@ -188,7 +188,8 @@ pub fn bot_row(
         // The closed running intervals: a parent daemon adds the open one itself.
         "closedRunningMs": record.running_ms,
         // An estimate from the bot's size and Prime's published rates.
-        "costUsd": running_ms as f64 / 3_600_000.0 * super::platform::BOT_HOURLY_USD_ESTIMATE,
+        "costUsd": running_ms as f64 / 3_600_000.0
+            * super::platform::bot_hourly_usd_estimate(record.cpu, record.memory_gb),
     })
 }
 
@@ -315,6 +316,8 @@ impl Supervisor {
             rlm_max_depth,
             github,
             bots,
+            cpu,
+            memory_gb,
             ..
         } = command
         else {
@@ -330,6 +333,8 @@ impl Supervisor {
             github: false,
             git_identity: None,
             bots: *bots,
+            cpu: *cpu,
+            memory_gb: *memory_gb,
         };
         match self.spawn_bot(spec, *github, *rlm_max_depth).await {
             Ok(record) => response_success(
@@ -936,6 +941,33 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let row = bot_row(&manager.get("bot-a").unwrap(), false, &[], false);
         assert!(row["runningMs"].as_i64().unwrap() >= ran + 50, "{row}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_row_prices_the_requested_size() {
+        let (_dir, _platform, manager) = setup();
+        // Prime's published rates recomputed here as the oracle.
+        let sized_hourly = 4.0 * 0.02 + 8.0 * 0.0125 + 20.0 * 0.0002;
+        let default_hourly = 2.0 * 0.02 + 4.0 * 0.0125 + 20.0 * 0.0002;
+        let mut sized = spec("bot-a");
+        sized.cpu = Some(4);
+        sized.memory_gb = Some(8);
+        manager.spawn(&sized).await.unwrap();
+        pause_bot(&manager, "bot-a").await.unwrap();
+        let record = manager.get("bot-a").unwrap();
+        let row = bot_row(&record, false, &[], false);
+        let cost = row["costUsd"].as_f64().unwrap();
+        let expected = record.running_ms as f64 / 3_600_000.0 * sized_hourly;
+        assert!(cost > 0.0 && (cost - expected).abs() < 1e-12, "{cost}");
+
+        // An omitted size prices at the default estimate.
+        manager.spawn(&spec("bot-b")).await.unwrap();
+        pause_bot(&manager, "bot-b").await.unwrap();
+        let record = manager.get("bot-b").unwrap();
+        let row = bot_row(&record, false, &[], false);
+        let cost = row["costUsd"].as_f64().unwrap();
+        let expected = record.running_ms as f64 / 3_600_000.0 * default_hourly;
+        assert!(cost > 0.0 && (cost - expected).abs() < 1e-12, "{cost}");
     }
 
     #[tokio::test(start_paused = true)]

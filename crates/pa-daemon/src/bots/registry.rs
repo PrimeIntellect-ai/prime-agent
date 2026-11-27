@@ -125,6 +125,13 @@ pub struct BotRecord {
     /// Milliseconds the bot ran before its current status.
     #[serde(default)]
     pub running_ms: i64,
+    /// The sandbox's vCPU count; `None` is the small default. Every new
+    /// sandbox of the bot, a checkpoint restore included, gets it.
+    #[serde(default)]
+    pub cpu: Option<u32>,
+    /// The sandbox's memory in GB; `None` is the small default.
+    #[serde(default)]
+    pub memory_gb: Option<u32>,
 }
 
 impl BotRecord {

@@ -255,6 +255,8 @@ async def spawn(
     target: str | None = None,
     github: bool | None = None,
     bots: bool | None = None,
+    cpu: int | None = None,
+    memory_gb: int | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -279,6 +281,11 @@ async def spawn(
     ``bots`` (sandbox targets only, default false) lets the bot spawn its own
     bots; the owner's daemon injects its sandbox API key through a platform
     header rule, and the bots nest two levels deep.
+    ``cpu`` and ``memory_gb`` (sandbox targets only) size the bot's sandbox:
+    the vCPU count and the memory in GB. Omitted sizes keep the small safe
+    defaults (2 vCPU, 4 GB). The daemon refuses a size above the owner's
+    ``bots.maxCpu`` (default 16) or ``bots.maxMemoryGb`` (default 32) caps,
+    and a restored bot keeps its recorded size.
     """
     return await _spawn(
         prompt,
@@ -290,6 +297,8 @@ async def spawn(
         target=target,
         github=github,
         bots=bots,
+        cpu=cpu,
+        memory_gb=memory_gb,
     )
 
 
@@ -305,6 +314,8 @@ async def _spawn(
     kind: str | None = None,
     github: bool | None = None,
     bots: bool | None = None,
+    cpu: int | None = None,
+    memory_gb: int | None = None,
 ) -> RLMSpawnHandle:
     """``spawn`` plus the factory executor's run tag (``{runId, specId,
     stateId}``), which the host records on the child's ledger spawn edge."""
@@ -316,6 +327,9 @@ async def _spawn(
         raise TypeError(f"github must be bool, got {type(github).__name__}")
     if bots is not None and not isinstance(bots, bool):
         raise TypeError(f"bots must be bool, got {type(bots).__name__}")
+    for kwarg, value in (("cpu", cpu), ("memory_gb", memory_gb)):
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
+            raise TypeError(f"{kwarg} must be int, got {type(value).__name__}")
     kwargs: dict[str, Any] = {"name": name}
     if model is not None:
         kwargs["model"] = model
@@ -333,6 +347,10 @@ async def _spawn(
         kwargs["github"] = github
     if bots is not None:
         kwargs["bots"] = bots
+    if cpu is not None:
+        kwargs["cpu"] = cpu
+    if memory_gb is not None:
+        kwargs["memoryGb"] = memory_gb
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     handle = _spawn_handle_from_payload(payload)
@@ -1032,6 +1050,8 @@ class _RLMNamespace:
         target: str | None = None,
         github: bool | None = None,
         bots: bool | None = None,
+        cpu: int | None = None,
+        memory_gb: int | None = None,
     ) -> RLMSpawnHandle:
         return await spawn(
             prompt,
@@ -1043,6 +1063,8 @@ class _RLMNamespace:
             target=target,
             github=github,
             bots=bots,
+            cpu=cpu,
+            memory_gb=memory_gb,
         )
 
     async def create_session(

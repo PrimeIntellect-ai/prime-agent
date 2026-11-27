@@ -165,6 +165,55 @@ class RlmSubagentRegistryTest(unittest.TestCase):
             },
         )
 
+    def test_forwards_spawn_sizes_to_host_for_sandbox_targets(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "rlm_child_id": "bot-spawner",
+                "name": "big-bot",
+                "session_dir": "bot://bot-spawner",
+                "model": "prime-inference/z-ai/glm-5.3",
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request):
+            asyncio.run(
+                rlm_module.rlm.spawn(
+                    "index the monorepo",
+                    name="big-bot",
+                    target="sandbox",
+                    cpu=8,
+                    memory_gb=16,
+                )
+            )
+
+        host_request.assert_awaited_once_with(
+            "rlm.run",
+            {
+                "prompt": "index the monorepo",
+                "kwargs": {
+                    "name": "big-bot",
+                    "target": "sandbox",
+                    "cpu": 8,
+                    "memoryGb": 16,
+                },
+            },
+        )
+
+    def test_rejects_non_int_spawn_sizes_before_the_host(self) -> None:
+        host_request = AsyncMock()
+        with patch.object(rlm_module, "host_request", host_request):
+            with self.assertRaisesRegex(TypeError, r"cpu must be int, got str"):
+                asyncio.run(
+                    rlm_module.rlm.spawn("run the lane", name="w", target="sandbox", cpu="8")
+                )
+            with self.assertRaisesRegex(TypeError, r"memory_gb must be int, got float"):
+                asyncio.run(
+                    rlm_module.rlm.spawn(
+                        "run the lane", name="w", target="sandbox", memory_gb=2.5
+                    )
+                )
+        host_request.assert_not_awaited()
+
     def test_requires_an_explicit_child_name(self) -> None:
         host_request = AsyncMock()
         with patch.object(rlm_module, "host_request", host_request):

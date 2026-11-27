@@ -55,6 +55,10 @@ pub struct BotCreate {
     pub checkpoint_id: Option<String>,
     /// Header rules that put the provider keys on the guest's API requests.
     pub network_rules: BTreeMap<String, HeaderRule>,
+    /// The sandbox's vCPU count; `None` keeps the small default.
+    pub cpu: Option<u32>,
+    /// The sandbox's memory in GB; `None` keeps the small default.
+    pub memory_gb: Option<u32>,
 }
 
 /// What a guest needs to call its model provider without holding a key.
@@ -208,10 +212,20 @@ const BOT_DISK_GB: f64 = 20.0;
 const USD_PER_CPU_HOUR: f64 = 0.02;
 const USD_PER_MEMORY_GIB_HOUR: f64 = 0.0125;
 const USD_PER_DISK_GIB_HOUR: f64 = 0.0002;
-/// The estimated price of one running bot sandbox, in USD per hour.
+/// The estimated price of one running bot sandbox of the default size,
+/// in USD per hour.
 pub const BOT_HOURLY_USD_ESTIMATE: f64 = BOT_CPU_CORES * USD_PER_CPU_HOUR
     + BOT_MEMORY_GB * USD_PER_MEMORY_GIB_HOUR
     + BOT_DISK_GB * USD_PER_DISK_GIB_HOUR;
+/// The estimated price of one running bot sandbox of the requested size
+/// (`cpu` vCPU, `memory_gb` GB), in USD per hour. `None` sizes read as
+/// the defaults.
+#[must_use]
+pub fn bot_hourly_usd_estimate(cpu: Option<u32>, memory_gb: Option<u32>) -> f64 {
+    cpu.map_or(BOT_CPU_CORES, f64::from) * USD_PER_CPU_HOUR
+        + memory_gb.map_or(BOT_MEMORY_GB, f64::from) * USD_PER_MEMORY_GIB_HOUR
+        + BOT_DISK_GB * USD_PER_DISK_GIB_HOUR
+}
 const CHECKPOINT_WAIT: Duration = Duration::from_mins(10);
 const CHECKPOINT_POLL: Duration = Duration::from_secs(2);
 /// How long a streamed guest process may take to start.
@@ -420,8 +434,8 @@ impl BotPlatform for PrimePlatform {
                 } else {
                     request.image.clone()
                 },
-                cpu_cores: BOT_CPU_CORES,
-                memory_gb: BOT_MEMORY_GB,
+                cpu_cores: request.cpu.map_or(BOT_CPU_CORES, f64::from),
+                memory_gb: request.memory_gb.map_or(BOT_MEMORY_GB, f64::from),
                 disk_size_gb: if restoring { 0.0 } else { BOT_DISK_GB },
                 gpu_count: 0,
                 gpu_type: None,
