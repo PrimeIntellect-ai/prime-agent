@@ -270,7 +270,7 @@ fn a_running_session_summary_is_busy() {
 /// One roster row the supervisor's self-pause reads: the shape a resident
 /// worker's summary push writes, with the new busy flags flipped on.
 #[test]
-fn background_kernel_work_and_factory_runs_hold_off_the_self_pause() {
+fn background_kernel_work_holds_off_the_self_pause() {
     let dir = tempfile::tempdir().unwrap();
     let supervisor = Supervisor::new(SupervisorOptions {
         socket_path: dir.path().join("daemon.sock"),
@@ -296,7 +296,7 @@ fn background_kernel_work_and_factory_runs_hold_off_the_self_pause() {
         .unwrap()
         .write_seeded(summary.clone(), false);
     assert!(supervisor.self_pause_active());
-    // Once the background work and the run finish, the pause may proceed.
+    // Once the background work finishes, the pause may proceed.
     summary["hasBackgroundKernelWork"] = json!(false);
     supervisor
         .roster

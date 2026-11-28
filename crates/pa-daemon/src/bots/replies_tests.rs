@@ -257,28 +257,6 @@ async fn a_settled_idle_bot_pauses_after_its_turn() {
 }
 
 #[tokio::test]
-async fn background_kernel_work_and_factory_runs_hold_off_the_pause() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut guest = FakeGuest::default();
-    guest.turn("a1", "done");
-    guest.state = json!({ "isStreaming": false, "sessionActions": { "queuedCount": 0 } });
-    assert_eq!(sync(dir.path(), &mut guest).await, ["done"]);
-    // A background shell, a backgrounded cell, or an active factory run
-    // outlives the settled turn: the bot must not pause mid-job.
-    guest.state["hasBackgroundKernelWork"] = json!(true);
-    let verdict = pause_verdict(&mut guest, "guest-session", || true)
-        .await
-        .unwrap();
-    assert_eq!(verdict, PauseVerdict::FollowAgain);
-    // Once the background work and the run finish, the pause proceeds.
-    guest.state = json!({ "isStreaming": false, "sessionActions": { "queuedCount": 0 } });
-    let pause = pause_verdict(&mut guest, "guest-session", || true)
-        .await
-        .unwrap();
-    assert_eq!(pause, PauseVerdict::Pause);
-}
-
-#[tokio::test]
 async fn a_settled_answer_delivers_while_background_work_holds_the_pause() {
     let dir = tempfile::tempdir().unwrap();
     let mut guest = FakeGuest::default();

@@ -237,8 +237,7 @@ async fn request_pause(config: &SelfPauseConfig) -> Result<()> {
 }
 
 /// Whether a roster row's summary says its session runs anything: a turn,
-/// compaction, a shell, tools, children, background kernel work, or an
-/// active factory run.
+/// compaction, a shell, tools, children, or background kernel work.
 fn summary_busy(summary: &Value) -> bool {
     let flag = |name: &str| summary.get(name).and_then(Value::as_bool) == Some(true);
     [
