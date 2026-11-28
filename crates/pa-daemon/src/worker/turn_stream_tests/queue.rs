@@ -49,36 +49,39 @@ async fn suspended_runner_parks_a_queued_item_until_resumed() {
     running.abort();
 }
 
-/// A prompt whose ack waits on its run's start answers when the runner parks instead.
+/// A prompt whose ack waits on its run's start answers when the runner parks or stops instead.
 #[tokio::test]
-async fn a_parking_runner_answers_a_prompt_waiting_on_its_start() {
-    let runner = burst_runner(Arc::new(ScriptedEngine::default()));
-    let (started_tx, started_rx) = oneshot::channel();
-    {
-        let mut core = runner.core.lock().unwrap();
-        core.queued_input_suspended = true;
-        core.steering.push_back(QueuedItem {
-            priority: QueuePriority::Human,
-            preview: None,
-            message: "parked prompt".to_string(),
-            custom_message: None,
-            agent_message: None,
-            queue_key: None,
-            admission_id: None,
-            images: Vec::new(),
-            done: Some(TurnWaiter::Started(started_tx)),
-            queue_visible: false,
-            policy: TurnPolicy::Direct,
-            forced_batch: false,
-        });
+async fn a_runner_that_starts_nothing_answers_a_prompt_waiting_on_its_start() {
+    for (case, stop) in [("parked", false), ("stopping", true)] {
+        let runner = burst_runner(Arc::new(ScriptedEngine::default()));
+        let (started_tx, started_rx) = oneshot::channel();
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.queued_input_suspended = !stop;
+            core.shutdown_requested = stop;
+            core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Human,
+                preview: None,
+                message: "unstarted prompt".to_string(),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: Some(TurnWaiter::Started(started_tx)),
+                queue_visible: false,
+                policy: TurnPolicy::Direct,
+                forced_batch: false,
+            });
+        }
+        let running = tokio::spawn(async move { runner.run().await });
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(5), started_rx).await;
+        assert!(
+            matches!(answered, Ok(Ok(()))),
+            "the {case} runner left the ack waiting: {answered:?}"
+        );
+        running.abort();
     }
-    let running = tokio::spawn(async move { runner.run().await });
-    let answered = tokio::time::timeout(std::time::Duration::from_secs(5), started_rx).await;
-    assert!(
-        matches!(answered, Ok(Ok(()))),
-        "the parked runner left the ack waiting: {answered:?}"
-    );
-    running.abort();
 }
 
 /// The session-event frames off the runner's event pump.

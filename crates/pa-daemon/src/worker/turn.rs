@@ -60,6 +60,8 @@ impl TurnRunner {
             let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
+                    // A stopping runner starts nothing either.
+                    super::queue::release_start_waiters(&mut core);
                     drop(core);
                     // The shutdown handler waits on the idle notify before
                     // disposing the kernel; the runner's last chance to fire it.
@@ -71,7 +73,7 @@ impl TurnRunner {
                 if core.queued_input_parked(&self.input_pauses) {
                     core.busy = false;
                     // A parked runner starts nothing: a prompt waiting on its
-                    // run's start answers now, like a parked admission.
+                    // run's start answers now, like an admission while parked.
                     super::queue::release_start_waiters(&mut core);
                     None
                 } else if let Some(due) = core.inbox_wake_hold(tokio::time::Instant::now()) {
