@@ -3181,28 +3181,18 @@ async fn the_follow_sync_adopts_the_guests_model() {
     );
 }
 
-/// A lifecycle save of a snapshot taken before a model adoption keeps the
-/// adopted model: the save merges the registry's current model and thinking
-/// (only the adoption changes them, under the registry lock), so a stale
-/// snapshot cannot revert the guest's live choice.
+/// Spawning a bot that already exists returns the stored record, with
+/// the status stamps the registry adds.
 #[tokio::test(start_paused = true)]
-async fn a_stale_lifecycle_save_keeps_the_adopted_model() {
+async fn a_respawn_returns_the_stored_record() {
     let (_dir, _platform, manager) = setup();
     manager.spawn(&spec("bot-a")).await.unwrap();
+    manager.pause("bot-a").await.unwrap();
+    // The resume's status stamp must differ from the pause's.
+    std::thread::sleep(std::time::Duration::from_millis(5));
 
-    // The snapshot a lifecycle operation took before the adoption.
-    let stale = manager.get("bot-a").unwrap();
-    manager
-        .adopt_guest_model(
-            "bot-a",
-            &serde_json::json!({
-                "model": { "id": "model-b", "provider": "openai" },
-                "thinkingLevel": "high",
-            }),
-        )
-        .unwrap();
-    manager.save(stale).unwrap();
-    let record = manager.get("bot-a").unwrap();
-    assert_eq!(record.model.as_deref(), Some("openai/model-b"));
-    assert_eq!(record.thinking.as_deref(), Some("high"));
+    let respawned = manager.spawn(&spec("bot-a")).await.unwrap();
+
+    assert_eq!(respawned.status, BotStatus::Running);
+    assert_eq!(respawned, manager.get("bot-a").unwrap());
 }
