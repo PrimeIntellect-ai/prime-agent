@@ -176,17 +176,12 @@ impl BotRegistry {
     /// Returns an error when the file exists but cannot be read or parsed.
     pub fn load(agent_dir: &Path) -> Result<Self> {
         let path = Self::path_in(agent_dir);
-        let mut file = match std::fs::read_to_string(&path) {
+        let file = match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str::<RegistryFile>(&text)
                 .with_context(|| format!("parse {}", path.display()))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => RegistryFile::default(),
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
-        // A record from before the status stamp counts its running time from this load.
-        let now = super::manager::now_ms();
-        for record in file.bots.values_mut() {
-            record.status_since.get_or_insert(now);
-        }
         Ok(Self { path, file })
     }
 
@@ -207,6 +202,37 @@ impl BotRegistry {
     pub fn put(&mut self, record: BotRecord) -> Result<()> {
         self.file.bots.insert(record.bot_id.clone(), record);
         self.save()
+    }
+
+    /// Change one record and persist it; returns the stored record. A
+    /// status change stamps `status_since` and adds a running interval that
+    /// ends to `running_ms`. The interval ends at `ended` (capped at now),
+    /// or now.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown bot or when the file cannot be written.
+    pub fn update(
+        &mut self,
+        bot_id: &str,
+        ended: Option<i64>,
+        change: impl FnOnce(&mut BotRecord),
+    ) -> Result<BotRecord> {
+        let record = self
+            .file
+            .bots
+            .get_mut(bot_id)
+            .with_context(|| format!("unknown bot {bot_id}"))?;
+        let before = record.clone();
+        change(record);
+        if record.status != before.status {
+            let now = super::manager::now_ms();
+            let end = ended.map_or(now, |ended| ended.min(now));
+            record.running_ms = before.running_ms_at(end);
+            record.status_since = Some(end);
+        }
+        let stored = record.clone();
+        self.save()?;
+        Ok(stored)
     }
 
     /// Remove one record and persist.

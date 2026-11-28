@@ -1265,6 +1265,32 @@ async fn a_rebuilt_record_recovers_the_size_from_labels() {
     assert_eq!(record.memory_gb, Some(16), "the rebuild keeps the size");
 }
 
+/// A registry rebuilt from labels keeps a bot's spawns flag from either
+/// source: the spawns label a create wrote, or the marker a later
+/// `allow_spawns` grant wrote.
+#[tokio::test(start_paused = true)]
+async fn a_rebuilt_record_keeps_the_spawns_flag() {
+    let (dir, platform, manager) = setup();
+    let owner = saved_session(dir.path(), "owner");
+    let labels = |bot: &str| vec![BOT_LABEL.to_string(), bot_label(bot), owner_label(&owner)];
+    let mut labeled = labels("bot-a");
+    labeled.push(super::BOTS_LABEL.to_string());
+    platform.add_sandbox("labeled", labeled);
+    platform.add_sandbox("granted", labels("bot-b"));
+    std::fs::create_dir_all(dir.path().join("bots")).unwrap();
+    std::fs::write(dir.path().join("bots/spawns.json"), r#"["bot-b"]"#).unwrap();
+
+    manager.reconcile_on_boot().await.unwrap();
+    assert!(
+        manager.get("bot-a").unwrap().bots,
+        "the label keeps the flag"
+    );
+    assert!(
+        manager.get("bot-b").unwrap().bots,
+        "the marker keeps the flag"
+    );
+}
+
 /// A labeled bot of another agent dir on the same team: its owner label
 /// names a session this agent dir never held. Boot reconcile must leave it
 /// alone: no adoption, no pause, no delete. The supervisor's post-reconcile
@@ -3037,7 +3063,7 @@ async fn children_count_toward_the_owners_bot_list() {
             &[serde_json::json!({
                 "botId": "bot-child", "name": "child", "ownerSessionId": "guest-session",
                 "parentBotId": "bot-a", "checkpointId": "ckpt-1", "status": "stopped",
-                "createdAt": 1_i64,
+                "createdAt": 1_i64, "statusSince": 1_i64, "closedRunningMs": 0_i64,
             })],
         )
         .await
@@ -3061,7 +3087,8 @@ async fn merged_child_rows_upsert_and_vanished_children_go() {
         "createdAt": 1_i64,
         "lastTurnAt": 2_i64,
         "guestSessionId": "guest-sbx-9",
-        "runningMs": 1000_i64,
+        "statusSince": 1_i64,
+        "closedRunningMs": 1000_i64,
         "github": false,
     });
     manager.merge_children("bot-a", &[row]).await.unwrap();
@@ -3126,7 +3153,7 @@ async fn merged_child_rows_upsert_and_vanished_children_go() {
             &[serde_json::json!({
                 "botId": "bot-live", "name": "live", "ownerSessionId": "guest-session",
                 "parentBotId": "bot-a", "sandboxId": child_sandbox, "status": "running",
-                "createdAt": 1_i64,
+                "createdAt": 1_i64, "statusSince": 1_i64, "closedRunningMs": 0_i64,
             })],
         )
         .await
@@ -3162,7 +3189,8 @@ async fn merged_child_rows_carry_the_childs_size() {
         "createdAt": 1_i64,
         "lastTurnAt": 2_i64,
         "guestSessionId": "guest-sbx-9",
-        "runningMs": 1000_i64,
+        "statusSince": 1_i64,
+        "closedRunningMs": 1000_i64,
         "github": false,
         "cpu": 8,
         "memoryGb": 16,
@@ -3182,7 +3210,8 @@ async fn merged_child_rows_carry_the_childs_size() {
         "createdAt": 1_i64,
         "lastTurnAt": 2_i64,
         "guestSessionId": "guest-sbx-9",
-        "runningMs": 1000_i64,
+        "statusSince": 1_i64,
+        "closedRunningMs": 1000_i64,
         "github": false,
     });
     manager.merge_children("bot-a", &[row]).await.unwrap();
@@ -3492,16 +3521,14 @@ async fn the_follow_sync_adopts_the_guests_model() {
     );
 }
 
-/// A lifecycle save of a snapshot taken before a model adoption keeps the
-/// adopted model: the save merges the registry's current model and thinking
-/// (only the adoption changes them, under the registry lock), so a stale
-/// snapshot cannot revert the guest's live choice.
+/// A lifecycle step that commits its working copy after a model adoption
+/// keeps the adopted model: lifecycle commits never write the model.
 #[tokio::test(start_paused = true)]
-async fn a_stale_lifecycle_save_keeps_the_adopted_model() {
+async fn a_lifecycle_commit_keeps_the_adopted_model() {
     let (_dir, _platform, manager) = setup();
     manager.spawn(&spec("bot-a")).await.unwrap();
 
-    // The snapshot a lifecycle operation took before the adoption.
+    // The working copy a lifecycle step took before the adoption.
     let stale = manager.get("bot-a").unwrap();
     manager
         .adopt_guest_model(
@@ -3512,8 +3539,30 @@ async fn a_stale_lifecycle_save_keeps_the_adopted_model() {
             }),
         )
         .unwrap();
-    manager.save(stale).unwrap();
-    let record = manager.get("bot-a").unwrap();
-    assert_eq!(record.model.as_deref(), Some("openai/model-b"));
-    assert_eq!(record.thinking.as_deref(), Some("high"));
+    let committed = manager.commit(&stale).unwrap();
+    assert_eq!(committed.model.as_deref(), Some("openai/model-b"));
+    assert_eq!(committed.thinking.as_deref(), Some("high"));
+    assert_eq!(
+        manager.get("bot-a").unwrap(),
+        committed,
+        "the stored record comes back"
+    );
+}
+
+/// A spawn of a bot that already exists returns the stored record: the
+/// resume of a paused bot stamps the status change in the registry, and
+/// the reply carries that stamp.
+#[tokio::test(start_paused = true)]
+async fn a_spawn_of_an_existing_bot_returns_the_stored_record() {
+    let (_dir, _platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let paused = manager.pause("bot-a").await.unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let again = manager.spawn(&spec("bot-a")).await.unwrap();
+    assert_eq!(again.status, BotStatus::Running);
+    assert!(
+        again.status_since > paused.status_since,
+        "the resume's stamp"
+    );
+    assert_eq!(again, manager.get("bot-a").unwrap());
 }

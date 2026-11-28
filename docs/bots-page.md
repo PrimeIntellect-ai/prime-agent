@@ -31,7 +31,7 @@ A bot's sandbox has a size. `rlm.spawn(..., target="sandbox", cpu=8, memory_gb=1
 
 Each row shows a status dot, the bot's name and model, its version, and its last turn. Rows are grouped into `Running`, `Idle`, and `Inactive`, with the most recent activity first. `d` opens a detail pane with the pause timer, the bot id, sandbox id, checkpoint id, version, model, and timestamps. The pause timer reads `pauses in N min` while an idle bot waits out its grace, and `paused since <time>` for a paused bot. The cost line shows the bot's total running time and its estimated price. The agents page shows the same estimate in its cost column.
 
-The Prime sandbox API does not report a price. The estimate uses Prime's published sandbox rates and the bot's size (2 vCPU and 4 GiB by default, 20 GiB disk): $0.02 per vCPU hour, $0.0125 per GiB memory hour, and $0.0002 per GiB disk hour, so $0.094 per running hour at the default size. A bot spawned with `cpu` or `memory_gb` costs proportionally more. Only running time counts. Paused time is not counted.
+The Prime sandbox API does not report a price. The estimate uses Prime's published sandbox rates and the bot's size (2 vCPU and 4 GiB by default, 20 GiB disk): $0.02 per vCPU hour, $0.0125 per GiB memory hour, and $0.0002 per GiB disk hour, so $0.094 per running hour at the default size. A bot spawned with `cpu` or `memory_gb` costs proportionally more. Only running time counts. Paused time is not counted. A pause the daemon did not see (the bot paused itself while the daemon was down) ends the running time at the pause checkpoint's time.
 
 ## Attach
 

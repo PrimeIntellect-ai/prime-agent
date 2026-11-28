@@ -1,0 +1,1 @@
+- Bot lifecycle steps now change a bot's record through one registry update, so a step never reverts the settled-turn time or the adopted model. A pause the daemon did not see ends the bot's running time at its checkpoint time, and the sandbox skill lists the current sandbox rates.
