@@ -1297,6 +1297,8 @@ impl BotManager {
         if relay_host.is_some() && record.pause_token.is_none() {
             record.pause_token = Some(uuid::Uuid::new_v4().simple().to_string());
         }
+        // A resumed bot must find fresh tokens: refresh before the wake.
+        self.refresh_logins(&record).await;
         let woken = match self.resolve_existing(&mut record).await? {
             Some(sandbox) => {
                 let woken = self.wake(sandbox, deadline).await?;
@@ -1333,8 +1335,9 @@ impl BotManager {
                 );
             }
         }
-        // A resumed bot gets a fresh token before its first request.
-        self.refresh_logins(&record).await;
+        if !record.logins.is_empty() {
+            self.watch_logins();
+        }
         self.install_and_bootstrap(&mut record, deadline).await?;
         self.save(record.clone())?;
         Ok(record)

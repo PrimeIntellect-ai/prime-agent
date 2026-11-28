@@ -173,6 +173,8 @@ pub trait BotPlatform: Send + Sync {
         value: &'a str,
         description: &'a str,
     ) -> BoxFuture<'a, PlatformResult<()>>;
+    /// Delete the platform secret `name`; a missing one is success.
+    fn delete_secret<'a>(&'a self, name: &'a str) -> BoxFuture<'a, PlatformResult<()>>;
     /// Replace a running or paused sandbox's header rules (a paused one
     /// gets them on resume).
     fn set_network_rules<'a>(
@@ -728,6 +730,24 @@ impl BotPlatform for PrimePlatform {
             credentials::ensure_secret(&self.client, name, value, description)
                 .await
                 .map_err(|error| credential_error(&error))
+        }
+        .boxed()
+    }
+
+    fn delete_secret<'a>(&'a self, name: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            let secrets = self
+                .client
+                .list_secrets()
+                .await
+                .map_err(|error| map_error(&error))?;
+            for secret in secrets.iter().filter(|secret| secret.name == name) {
+                self.client
+                    .delete_secret(&secret.id)
+                    .await
+                    .map_err(|error| map_error(&error))?;
+            }
+            Ok(())
         }
         .boxed()
     }

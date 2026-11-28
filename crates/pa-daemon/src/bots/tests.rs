@@ -74,6 +74,8 @@ pub(crate) struct FakeState {
     pub secret_puts: usize,
     /// Each network rules update: the sandbox and its rule hosts.
     pub rule_updates: Vec<(String, Vec<String>)>,
+    /// The platform secrets at each resume.
+    pub secrets_at_resume: Vec<BTreeMap<String, String>>,
 }
 
 /// An in-memory Prime account: sandboxes are running as soon as they exist.
@@ -264,6 +266,8 @@ impl BotPlatform for FakePlatform {
     fn resume<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<BotSandbox>> {
         async move {
             let mut state = self.state();
+            let secrets = state.secrets.clone();
+            state.secrets_at_resume.push(secrets);
             let sandbox = state.sandbox(sandbox_id)?;
             sandbox.status = BotStatus::Running;
             Ok(sandbox.clone())
@@ -519,6 +523,14 @@ impl BotPlatform for FakePlatform {
             let mut state = self.state();
             state.secret_puts += 1;
             state.secrets.insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn delete_secret<'a>(&'a self, name: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            self.state().secrets.remove(name);
             Ok(())
         }
         .boxed()
@@ -2163,6 +2175,9 @@ impl BotPlatform for ThrowawaySecret {
         description: &'a str,
     ) -> BoxFuture<'a, PlatformResult<()>> {
         self.inner.put_secret(name, value, description)
+    }
+    fn delete_secret<'a>(&'a self, name: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
+        self.inner.delete_secret(name)
     }
     fn set_network_rules<'a>(
         &'a self,

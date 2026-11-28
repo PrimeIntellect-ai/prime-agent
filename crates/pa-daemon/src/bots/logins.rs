@@ -86,6 +86,11 @@ pub fn secret_name(provider: &str, owner: &str) -> String {
     format!("PRIME_AGENT_LOGIN_{id}_{owner}")
 }
 
+/// The Codex account-id secret beside the access-token secret `name`.
+fn account_secret_name(name: &str) -> String {
+    format!("{name}_ACCOUNT")
+}
+
 fn secret_ref(name: &str) -> String {
     format!("${{prime.secrets.{name}}}")
 }
@@ -175,7 +180,7 @@ pub fn injection(
         ),
         OPENAI_CODEX_PROVIDER_ID => {
             let account = account_id.clone().filter(|account| !account.is_empty())?;
-            let account_secret = format!("{name}_ACCOUNT");
+            let account_secret = account_secret_name(&name);
             let rules = rule(
                 "chatgpt.com",
                 &[
@@ -647,11 +652,23 @@ impl Logins {
                 credential
             }
             Login::Expired => {
-                let mut state = lock(&self.state);
-                state.stale.insert(provider.to_string());
-                state.expired.insert(provider.to_string());
-                drop(state);
+                {
+                    let mut state = lock(&self.state);
+                    state.stale.insert(provider.to_string());
+                    state.expired.insert(provider.to_string());
+                }
                 self.warn_once(provider, "it expired; log in again on the Mac");
+                // A logged-out token (an MCP static token never expires)
+                // must not stay on the platform for the rules that name it.
+                let name = secret_name(provider, self.platform.owner());
+                let mut names = vec![name.clone()];
+                if provider == OPENAI_CODEX_PROVIDER_ID {
+                    names.push(account_secret_name(&name));
+                }
+                for name in names {
+                    self.platform.delete_secret(&name).await?;
+                    lock(&self.state).pushed.remove(&name);
+                }
                 return Ok(None);
             }
         };
@@ -940,6 +957,71 @@ mod tests {
             "the owner's anthropic login expired; log in again on the Mac"
         );
         assert_eq!(platform.state().secret_puts, 1);
+    }
+
+    #[tokio::test]
+    async fn a_logout_deletes_the_login_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = Arc::new(FakePlatform::default());
+        let refresh = Arc::new(ScriptedRefresh::default());
+        write_auth(
+            dir.path(),
+            "anthropic",
+            &login("a-1", "r-1", now_ms() + 480 * MINUTE),
+        );
+        let logins = logins(dir.path(), &platform, &refresh);
+        let providers = BTreeSet::from(["anthropic".to_string()]);
+        logins.tick(&providers).await;
+        let name = secret_name("anthropic", "OWNER");
+        assert_eq!(platform.state().secrets[&name], "a-1");
+
+        std::fs::write(dir.path().join("auth.json"), "{}").unwrap();
+        logins.tick(&providers).await;
+        assert!(!platform.state().secrets.contains_key(&name));
+
+        // A new login puts the secret back.
+        write_auth(
+            dir.path(),
+            "anthropic",
+            &login("a-1", "r-1", now_ms() + 480 * MINUTE),
+        );
+        logins.tick(&providers).await;
+        assert_eq!(platform.state().secrets[&name], "a-1");
+    }
+
+    #[tokio::test]
+    async fn a_resumed_bot_finds_its_refreshed_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = Arc::new(FakePlatform::default());
+        let refresh = Arc::new(ScriptedRefresh::default());
+        write_auth(
+            dir.path(),
+            "anthropic",
+            &login("a-1", "r-1", now_ms() + 480 * MINUTE),
+        );
+        let manager = BotManager::with_logins(
+            dir.path(),
+            Arc::clone(&platform) as Arc<dyn BotPlatform>,
+            logins(dir.path(), &platform, &refresh),
+        )
+        .unwrap();
+        let mut bot = spec("bot-resume");
+        bot.model = Some("anthropic/claude-sonnet-4-5".into());
+        let record = manager.spawn(&bot).await.unwrap();
+        manager.pause(&record.bot_id).await.unwrap();
+
+        // The token is due when the bot wakes.
+        write_auth(
+            dir.path(),
+            "anthropic",
+            &login("a-1", "r-1", now_ms() + 5 * MINUTE),
+        );
+        *refresh.0.lock().unwrap() = Some(login("a-2", "r-2", now_ms() + 480 * MINUTE));
+        manager.ensure_running(&record.bot_id).await.unwrap();
+        let state = platform.state();
+        let name = secret_name("anthropic", "OWNER");
+        assert_eq!(state.secrets_at_resume.len(), 1);
+        assert_eq!(state.secrets_at_resume[0][&name], "a-2");
     }
 
     #[tokio::test]
