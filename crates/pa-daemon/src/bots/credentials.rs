@@ -9,7 +9,7 @@
 //! Subscription logins are injected by [`super::logins`]. The plan in
 //! [`super::secrets`] decides which keys reach a bot.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -81,8 +81,8 @@ pub const PLATFORM_CA_PATH: &str = "/mnt/sandboxd/platform-ca.pem";
 type SecretScope = (String, Option<String>, String);
 
 /// The secrets confirmed on the platform in this process, with the
-/// fingerprint of the value confirmed: provisioning runs once per process,
-/// scope, and value. The lock is held across a whole provisioning, so
+/// fingerprint of the value last confirmed: provisioning runs once per
+/// process and scope. The lock is held across a whole provisioning, so
 /// concurrent spawns never list and create the same secret twice.
 static CONFIRMED: LazyLock<tokio::sync::Mutex<BTreeMap<SecretScope, String>>> =
     LazyLock::new(Default::default);
@@ -119,8 +119,7 @@ pub(super) fn key_fingerprint(key: &str) -> String {
 }
 
 /// Make the platform secret `name` hold `value`: update it when it
-/// exists, else create it. A refused create lists again, because another
-/// process may have created it meanwhile.
+/// exists, else create it.
 ///
 /// # Errors
 /// Returns an error when the list, the create, or the update fails.
@@ -130,20 +129,45 @@ pub async fn ensure_secret<T: SandboxTransport>(
     value: &str,
     description: &str,
 ) -> anyhow::Result<()> {
-    let find = |secrets: Vec<pa_sandbox::PlatformSecret>| {
-        secrets
-            .into_iter()
-            .find(|secret| secret.name == name)
-            .map(|secret| secret.id)
+    write_secret(client, name, value, description, false, &mut None).await
+}
+
+/// Make the platform secret `name` exist with `value`: created when
+/// `listed` (secret ids by name; one list serves a whole provisioning)
+/// does not hold it, else updated unless `held` says it already has this
+/// value. A refused create lists again: another process may have created
+/// it meanwhile.
+async fn write_secret<T: SandboxTransport>(
+    client: &PrimeSandboxClient<T>,
+    name: &str,
+    value: &str,
+    description: &str,
+    held: bool,
+    listed: &mut Option<BTreeMap<String, String>>,
+) -> anyhow::Result<()> {
+    let mut ids = match listed.take() {
+        Some(ids) => ids,
+        None => secret_ids(client).await?,
     };
-    let id = match find(client.list_secrets().await?) {
-        Some(id) => id,
-        None => match client.create_secret(name, value, Some(description)).await {
-            Ok(_) => return Ok(()),
-            Err(error) => find(client.list_secrets().await?).ok_or(error)?,
-        },
-    };
-    client.update_secret(&id, value).await?;
+    if !ids.contains_key(name) {
+        match client.create_secret(name, value, Some(description)).await {
+            Ok(created) => {
+                ids.insert(created.name, created.id);
+                *listed = Some(ids);
+                return Ok(());
+            }
+            Err(error) => {
+                ids = secret_ids(client).await?;
+                if !ids.contains_key(name) {
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+    if !held {
+        client.update_secret(&ids[name], value).await?;
+    }
+    *listed = Some(ids);
     Ok(())
 }
 
@@ -515,17 +539,15 @@ async fn provision_planned<T: SandboxTransport>(
             );
             let description = format!("Prime Agent bot {} credential", candidate.name);
             let fingerprint = key_fingerprint(value);
-            let result = if candidate.kind == SecretKind::ApiKey
-                && confirmed.get(&scoped) == Some(&fingerprint)
-            {
+            let held = confirmed.get(&scoped) == Some(&fingerprint);
+            let result = if held && candidate.kind == SecretKind::ApiKey {
                 Ok(())
             } else if candidate.kind.stable_names() {
                 // Stable names: the value may have changed since the last check.
-                listed = None;
-                ensure_secret(client, secret, value, &description).await
+                write_secret(client, secret, value, &description, held, &mut listed).await
             } else {
                 // `/secrets` can delete a custom secret, so it is listed every time.
-                confirm_secret(client, secret, value, &description, &mut listed).await
+                write_secret(client, secret, value, &description, true, &mut listed).await
             };
             match result {
                 Ok(()) => {
@@ -550,41 +572,14 @@ async fn provision_planned<T: SandboxTransport>(
     provisioned
 }
 
-/// Confirm one fingerprinted secret on the platform: listed (one list
-/// serves every candidate), else created. A refused create lists again:
-/// another process may have created it meanwhile.
-async fn confirm_secret<T: SandboxTransport>(
+async fn secret_ids<T: SandboxTransport>(
     client: &PrimeSandboxClient<T>,
-    secret: &str,
-    value: &str,
-    description: &str,
-    listed: &mut Option<BTreeSet<String>>,
-) -> anyhow::Result<()> {
-    let mut names = match listed.take() {
-        Some(names) => names,
-        None => secret_names(client).await?,
-    };
-    if !names.contains(secret) {
-        if let Err(error) = client.create_secret(secret, value, Some(description)).await {
-            names = secret_names(client).await?;
-            if !names.contains(secret) {
-                return Err(error.into());
-            }
-        }
-        names.insert(secret.to_string());
-    }
-    *listed = Some(names);
-    Ok(())
-}
-
-async fn secret_names<T: SandboxTransport>(
-    client: &PrimeSandboxClient<T>,
-) -> anyhow::Result<BTreeSet<String>> {
+) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(client
         .list_secrets()
         .await?
         .into_iter()
-        .map(|secret| secret.name)
+        .map(|secret| (secret.name, secret.id))
         .collect())
 }
 
@@ -932,14 +927,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         super::super::github::store_token(dir.path(), "ghp_first").unwrap();
         let platform = Platform::default();
-        // ensure_secret lists and creates both secrets (a create answer
-        // names the created secret); the second create clears the stored
-        // token; the recheck then lists them and refuses the first delete.
+        // One list, then both secrets are created (a create answer names
+        // the created secret); the second create clears the stored token;
+        // the recheck then lists them and refuses the first delete.
         let created = |name: &str| json!({ "data": { "id": format!("id-{name}"), "name": name } });
         platform.answers.lock().unwrap().extend([
             json!({ "data": [] }),
             created("PRIME_AGENT_GITHUB_OWNER"),
-            json!({ "data": [] }),
             created("PRIME_AGENT_GITHUB_OWNER_BASIC"),
             json!({ "data": [
                 { "id": "id-1", "name": "PRIME_AGENT_GITHUB_OWNER" },
@@ -994,5 +988,45 @@ mod tests {
             "the GitHub hosts are dropped: {rules:?}"
         );
         assert!(rules.is_empty(), "GitHub was the only candidate");
+    }
+
+    /// A provisioning with an unchanged GitHub token lists once and writes
+    /// nothing: the platform already holds both values.
+    #[tokio::test]
+    async fn an_unchanged_github_token_is_not_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::github::store_token(dir.path(), "ghp_same").unwrap();
+        let platform = Platform::default();
+        platform.answers.lock().unwrap().push_back(json!({ "data": [
+            { "id": "id-1", "name": "PRIME_AGENT_GITHUB_OWNER" },
+            { "id": "id-2", "name": "PRIME_AGENT_GITHUB_OWNER_BASIC" },
+        ] }));
+        let client = PrimeSandboxClient::with_transport(
+            &platform,
+            "prime-key",
+            ClientOptions {
+                base_url: "https://api.unchanged.test".to_string(),
+                team_id: None,
+                request_timeout: None,
+                allow_insecure_localhost: false,
+            },
+        )
+        .unwrap();
+        let methods = || -> Vec<String> {
+            platform
+                .requests
+                .lock()
+                .unwrap()
+                .drain(..)
+                .map(|request| request.method.as_str().to_string())
+                .collect()
+        };
+
+        let first = provision(&client, dir.path(), "OWNER", None, true, 0).await;
+        assert!(first.rules().contains_key("api.github.com"));
+        assert_eq!(methods(), ["GET", "PATCH", "PATCH"]);
+        let second = provision(&client, dir.path(), "OWNER", None, true, 0).await;
+        assert!(second.rules().contains_key("api.github.com"));
+        assert_eq!(methods(), ["GET"]);
     }
 }

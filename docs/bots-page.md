@@ -43,7 +43,7 @@ A bot reaches GitHub with its owner's token, and the token never enters the sand
 
 - `prime-agent bots github set` reads a token from stdin and stores it on this machine. A fine-grained token with only the repositories the bots need is the safest choice.
 - Without a stored token, the daemon uses the `gh` CLI login (`gh auth token`).
-- `prime-agent bots github clear` removes the stored token and deletes the Prime secrets, so running bots lose access within a minute.
+- `prime-agent bots github clear` removes the stored token and deletes the Prime secrets, so running bots lose access within a minute. With a `gh` CLI login, the next GitHub bot spawn or wake writes that token back for every GitHub bot, so revoking also needs `gh auth logout` (or deleting the GitHub bots).
 - `prime-agent bots github status` shows the token source, the setting, and the git author.
 
 GitHub is on by default. Set `bots.github` to `false` in `settings.json`, or spawn with `rlm.spawn(..., target="sandbox", github=False)`, to turn it off. `github=True` with no token fails the spawn with the command to run. The daemon writes the current token to the secrets each time it creates a bot sandbox. Running bots get the new value within a minute. A bot commits as the owner's git author (`git config --global user.name` and `user.email`); `bots.gitIdentity` (`{"name": ..., "email": ...}`) overrides it. The /bots detail pane shows `github on` or `off`.

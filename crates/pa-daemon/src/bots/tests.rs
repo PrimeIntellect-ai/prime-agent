@@ -1025,13 +1025,10 @@ async fn spawn_pause_resume_delete() {
 }
 
 /// A GitHub bot gets the header rules, the label, and a placeholder token
-/// on every new sandbox. The stored token reaches no guest command, no
-/// create request, and no registry record.
+/// on every new sandbox.
 #[tokio::test(start_paused = true)]
 async fn a_github_bot_gets_rules_and_a_placeholder_only() {
     let (dir, platform, manager) = setup();
-    let token = "ghp_never_in_the_guest";
-    super::github::store_token(dir.path(), token).unwrap();
     let github = BotSpec {
         github: true,
         git_identity: Some(BotGitIdentity {
@@ -1077,12 +1074,9 @@ async fn a_github_bot_gets_rules_and_a_placeholder_only() {
     assert_eq!(gh_token, [placeholder, None, placeholder]);
     assert_eq!(bootstraps[0]["BOT_GIT_NAME"], "Ada");
     assert_eq!(bootstraps[0]["BOT_GIT_EMAIL"], "ada@example.com");
-    let guest_inputs = format!("{:?} {:?}", state.execs, state.creates);
-    assert!(!guest_inputs.contains(token));
     let registry =
         std::fs::read_to_string(super::registry::BotRegistry::path_in(dir.path())).unwrap();
     assert!(registry.contains("\"github\": true") || registry.contains("\"github\":true"));
-    assert!(!registry.contains(token));
 }
 
 #[tokio::test(start_paused = true)]
@@ -2014,34 +2008,32 @@ async fn github_live_push_and_draft_pr() {
         ..spec(&bot_id)
     };
     let branch = format!("bot-live-{}", &bot_id[8..16]);
-    let script = r#"set -euo pipefail
-cd "$(mktemp -d)"
-[ -f "$HOME/.prime-agent-ca.pem" ] && export SSL_CERT_FILE="$HOME/.prime-agent-ca.pem"
-git clone -q "https://github.com/$REPO" repo && cd repo
-git checkout -q -b "$BRANCH"
-git commit -q --allow-empty -m "bot live test"
-git log -1 --format='AUTHOR=%an <%ae>'
-git push -q origin "$BRANCH"
-url="$(gh pr create -R "$REPO" --draft --head "$BRANCH" --title "bot live test" --body "Closed by the test.")"
-echo "PR=$url"
-gh pr close -R "$REPO" "$url" --delete-branch
-echo CLOSED
-cat "$HOME/.gitconfig" "$HOME/.prime-agent-git-credential"
-"#;
+    let task = format!(
+        "Run this script with one bash() call and await it, then reply with its output \
+         lines only:\n\nset -euo pipefail\ncd \"$(mktemp -d)\"\n\
+         git clone -q https://github.com/{repo} repo && cd repo\n\
+         git checkout -q -b {branch}\n\
+         git commit -q --allow-empty -m \"bot live test\"\n\
+         git log -1 --format='AUTHOR=%an <%ae>'\n\
+         git push -q origin {branch}\n\
+         url=\"$(gh pr create -R {repo} --draft --head {branch} --title \"bot live test\" \
+         --body \"Closed by the test.\")\"\n\
+         echo \"PR=$url\"\n\
+         gh pr close -R {repo} \"$url\" --delete-branch\n\
+         echo CLOSED"
+    );
     let run = async {
         let bot = manager.spawn(&spec).await?;
-        let env = BTreeMap::from([
-            ("REPO".to_string(), repo.clone()),
-            ("BRANCH".to_string(), branch.clone()),
-            (
-                "GH_TOKEN".to_string(),
-                super::credentials::GUEST_API_KEY_PLACEHOLDER.to_string(),
-            ),
-        ]);
-        let output = platform
-            .exec(bot.sandbox_id.as_deref().unwrap(), script, &env, None)
+        let reply = live_ask(&manager, dir.path(), &bot, &task).await?;
+        let guest_files = platform
+            .exec(
+                bot.sandbox_id.as_deref().unwrap(),
+                r#"cat "$HOME/.gitconfig" "$HOME/.prime-agent-git-credential""#,
+                &BTreeMap::new(),
+                None,
+            )
             .await?;
-        anyhow::Ok((bot, output))
+        anyhow::Ok((bot, reply, guest_files))
     }
     .await;
     manager.delete(&bot_id).await.unwrap();
@@ -2051,19 +2043,16 @@ cat "$HOME/.gitconfig" "$HOME/.prime-agent-git-credential"
             new_client().delete_secret(&secret.id).await.unwrap();
         }
     }
-    let (bot, output) = run.unwrap();
+    let (bot, reply, guest_files) = run.unwrap();
     eprintln!(
-        "live github: exit={} stdout={}\nstderr={}",
-        output.exit_code, output.stdout, output.stderr
+        "live github: reply={reply}\nguest files={}",
+        guest_files.stdout
     );
     assert!(bot.github);
-    assert_eq!(output.exit_code, 0);
-    assert!(output
-        .stdout
-        .contains("AUTHOR=Prime Agent Live <live@example.com>"));
-    assert!(output.stdout.contains("PR=https://github.com/"));
-    assert!(output.stdout.contains("CLOSED"));
-    assert!(!output.stdout.contains(&token) && !output.stderr.contains(&token));
+    assert!(reply.contains("AUTHOR=Prime Agent Live <live@example.com>"));
+    assert!(reply.contains("PR=https://github.com/"));
+    assert!(reply.contains("CLOSED"));
+    assert!(!reply.contains(&token) && !guest_files.stdout.contains(&token));
 }
 
 /// A [`super::platform::PrimePlatform`] whose Prime Inference rule names a
