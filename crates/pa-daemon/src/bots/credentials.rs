@@ -1,7 +1,7 @@
 //! The guest's provider credentials. A bot sandbox never holds a real
 //! key: each provider the home auth storage holds an API key for is stored
-//! once as a platform secret (`PRIME_AGENT_<PROVIDER>_KEY_<FINGERPRINT>`; a
-//! rotated key gets a new secret), and the
+//! as a platform secret per Prime account (`PRIME_AGENT_<PROVIDER>_KEY_<OWNER>`;
+//! a rotated key updates its value, so running bots follow it), and the
 //! sandbox's network policy has the platform set it in that provider's
 //! auth header on the sandbox's HTTPS requests, outside the sandbox. The
 //! guest sends [`GUEST_API_KEY_PLACEHOLDER`], which the platform replaces.
@@ -80,14 +80,15 @@ pub const PLATFORM_CA_PATH: &str = "/mnt/sandboxd/platform-ca.pem";
 /// A secret's scope: the platform origin, the team, and the secret name.
 type SecretScope = (String, Option<String>, String);
 
-/// The secrets confirmed on the platform in this process: provisioning
-/// runs once per process and scope. The lock is held across a whole
-/// provisioning, so concurrent spawns never list and create the same
-/// secret twice.
-static CONFIRMED: LazyLock<tokio::sync::Mutex<BTreeSet<SecretScope>>> =
+/// The secrets confirmed on the platform in this process, with the
+/// fingerprint of the value confirmed: provisioning runs once per process,
+/// scope, and value. The lock is held across a whole provisioning, so
+/// concurrent spawns never list and create the same secret twice.
+static CONFIRMED: LazyLock<tokio::sync::Mutex<BTreeMap<SecretScope, String>>> =
     LazyLock::new(Default::default);
 
-/// The platform secret that holds `provider`'s key.
+/// The prefix of the platform secret that holds `provider`'s key; the
+/// Prime account's fingerprint completes it.
 fn secret_name(provider: &str) -> String {
     let id: String = provider
         .chars()
@@ -102,8 +103,8 @@ fn secret_name(provider: &str) -> String {
     format!("PRIME_AGENT_{id}_KEY")
 }
 
-/// A short id of `key` for its secret name: a rotated key gets a new
-/// secret. The key is the MAC key over a fixed label, never hashed data.
+/// A short id of `key`: never the key itself. The key is the MAC key over
+/// a fixed label, never hashed data.
 pub(super) fn key_fingerprint(key: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC takes any key length");
@@ -206,8 +207,13 @@ fn provider_rules(provider: &str, secret: &str) -> BTreeMap<String, HeaderRule> 
 
 /// The stored API keys (or the environment key of `required`) as plan
 /// candidates: `required` first, then prime-inference. OAuth logins and
-/// keys with no injectable API host are left out.
-pub(super) fn api_key_candidates(auth: &mut AuthStorage, required: Option<&str>) -> Vec<Candidate> {
+/// keys with no injectable API host are left out. `owner` names the
+/// secrets, so teammates' keys never share one in the team scope.
+pub(super) fn api_key_candidates(
+    auth: &mut AuthStorage,
+    owner: &str,
+    required: Option<&str>,
+) -> Vec<Candidate> {
     let stored = auth.get_all();
     let mut providers = auth.list();
     providers.retain(|provider| {
@@ -231,7 +237,7 @@ pub(super) fn api_key_candidates(auth: &mut AuthStorage, required: Option<&str>)
         let Some(key) = injectable_key(auth, &stored, &provider) else {
             continue;
         };
-        let secret = format!("{}_{}", secret_name(&provider), key_fingerprint(&key));
+        let secret = format!("{}_{owner}", secret_name(&provider));
         let rules = provider_rules(&provider, &secret);
         if rules.is_empty() {
             continue;
@@ -364,10 +370,9 @@ fn pass_another_model() -> String {
 
 /// Make sure the platform holds the secrets of every candidate the plan
 /// gives a bot (with GitHub when `github`; `provider` is its provider when
-/// it uses an API key), and
-/// collect their rules. `owner` names the GitHub secrets. The secrets live
-/// in the client's team, the scope its sandboxes bill to, which a header
-/// rule's secret must share. `reserved_hosts` rule hosts are left for the
+/// it uses an API key), and collect their rules. `owner` names the API key
+/// and GitHub secrets. The secrets live in the client's team, the scope its
+/// sandboxes bill to, which a header rule's secret must share. `reserved_hosts` rule hosts are left for the
 /// bot's logins.
 pub async fn provision<T: SandboxTransport>(
     client: &PrimeSandboxClient<T>,
@@ -509,19 +514,22 @@ async fn provision_planned<T: SandboxTransport>(
                 secret.clone(),
             );
             let description = format!("Prime Agent bot {} credential", candidate.name);
-            let result = if candidate.kind.stable_names() {
+            let fingerprint = key_fingerprint(value);
+            let result = if candidate.kind == SecretKind::ApiKey
+                && confirmed.get(&scoped) == Some(&fingerprint)
+            {
+                Ok(())
+            } else if candidate.kind.stable_names() {
                 // Stable names: the value may have changed since the last check.
                 listed = None;
                 ensure_secret(client, secret, value, &description).await
-            } else if confirmed.contains(&scoped) && candidate.kind != SecretKind::Custom {
-                // `/secrets` can delete a custom secret, so it is listed every time.
-                Ok(())
             } else {
+                // `/secrets` can delete a custom secret, so it is listed every time.
                 confirm_secret(client, secret, value, &description, &mut listed).await
             };
             match result {
                 Ok(()) => {
-                    confirmed.insert(scoped);
+                    confirmed.insert(scoped, fingerprint);
                 }
                 Err(error) => {
                     outcome = Err(error);
@@ -759,8 +767,11 @@ mod tests {
     /// host (serper) are not.
     #[test]
     fn only_stored_api_keys_with_an_api_host_are_injected() {
-        let injected =
-            api_key_candidates(&mut auth(&home_auth()), Some(PRIME_INFERENCE_PROVIDER_ID));
+        let injected = api_key_candidates(
+            &mut auth(&home_auth()),
+            "OWNER",
+            Some(PRIME_INFERENCE_PROVIDER_ID),
+        );
         let summary: Vec<(&str, &str)> = injected
             .iter()
             .map(|candidate| (candidate.name.as_str(), candidate.secrets[0].1.as_str()))
@@ -769,15 +780,22 @@ mod tests {
             summary,
             [("prime-inference", "sk-prime"), ("google", "sk-google")]
         );
-        // A rotated key gets a new secret.
-        assert!(injected[1].secrets[0]
-            .0
-            .starts_with("PRIME_AGENT_GOOGLE_KEY_"));
-        let rotated = api_key_candidates(
-            &mut auth(&json!({ "google": { "type": "api_key", "key": "sk-google-2" } })),
-            Some("google"),
+        // A rotated key keeps its secret, so the rules naming it follow
+        // the new value; a teammate's key gets its own secret.
+        assert_eq!(injected[1].secrets[0].0, "PRIME_AGENT_GOOGLE_KEY_OWNER");
+        let rotated = |owner| {
+            api_key_candidates(
+                &mut auth(&json!({ "google": { "type": "api_key", "key": "sk-google-2" } })),
+                owner,
+                Some("google"),
+            )
+        };
+        assert_eq!(rotated("OWNER")[0].secrets[0].0, injected[1].secrets[0].0);
+        assert_eq!(rotated("OWNER")[0].rules, injected[1].rules);
+        assert_ne!(
+            rotated("TEAMMATE")[0].secrets[0].0,
+            injected[1].secrets[0].0
         );
-        assert_ne!(rotated[0].secrets[0].0, injected[1].secrets[0].0);
 
         let keyed = api_key_candidates(
             &mut auth(&json!({
@@ -786,6 +804,7 @@ mod tests {
                 "anthropic": { "type": "api_key", "key": "sk-ant-api" },
                 "prime-inference": { "type": "api_key", "key": "" },
             })),
+            "OWNER",
             Some(PRIME_INFERENCE_PROVIDER_ID),
         );
         let providers: Vec<&str> = keyed
@@ -796,7 +815,7 @@ mod tests {
 
         // `bots.inject` off keeps a key home, even for the bot's own provider.
         let off = super::super::secrets::plan(
-            api_key_candidates(&mut auth(&home_auth()), Some("google")),
+            api_key_candidates(&mut auth(&home_auth()), "OWNER", Some("google")),
             |provider| provider != "google",
             super::super::secrets::MAX_RULE_HOSTS,
         );

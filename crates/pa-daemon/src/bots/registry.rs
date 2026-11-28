@@ -125,6 +125,10 @@ pub struct BotRecord {
     /// Milliseconds the bot ran before its current status.
     #[serde(default)]
     pub running_ms: i64,
+    /// The guest auth, MCP entries, and rules of a sandbox created with
+    /// them, until its bootstrap writes them. Holds no secret value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_guest: Option<super::platform::GuestCredentials>,
 }
 
 impl BotRecord {

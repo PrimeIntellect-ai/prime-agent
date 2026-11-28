@@ -34,6 +34,7 @@ pub(crate) struct FakeState {
     pub lose_next_create_reply: bool,
     /// The next credential provisioning fails with a transport error.
     pub fail_next_credentials: bool,
+    pub credential_calls: usize,
     pub refuse_pause: bool,
     /// Pauses answer that the team's checkpoint storage is full.
     pub checkpoint_storage_full: bool,
@@ -471,6 +472,7 @@ impl BotPlatform for FakePlatform {
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
         async move {
             let mut state = self.state();
+            state.credential_calls += 1;
             if std::mem::take(&mut state.fail_next_credentials) {
                 return Err(PlatformError::Transient("connection reset".into()));
             }
@@ -1108,6 +1110,21 @@ async fn credential_provisioning_retries_a_transport_error() {
     manager.spawn(&spec("bot-a")).await.unwrap();
 
     assert_eq!(platform.live().len(), 1);
+}
+
+/// A resume provisions no credentials: the guest keeps the auth its
+/// create's bootstrap wrote.
+#[tokio::test(start_paused = true)]
+async fn a_resume_provisions_no_credentials() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    manager.pause("bot-a").await.unwrap();
+    let before = platform.state().credential_calls;
+
+    let resumed = manager.ensure_running("bot-a").await.unwrap();
+
+    assert_eq!(resumed.status, BotStatus::Running);
+    assert_eq!(platform.state().credential_calls, before);
 }
 
 #[tokio::test(start_paused = true)]

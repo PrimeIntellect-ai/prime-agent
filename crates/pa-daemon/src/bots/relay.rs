@@ -2,7 +2,7 @@
 //! one process per link, started by the Mac through the sandbox's exec
 //! channel, pumping bytes between the exec stream (its stdin/stdout) and
 //! the guest daemon's socket. The relay owns no protocol logic: bytes in,
-//! bytes out, one line at a time.
+//! bytes out.
 //!
 //! The relay process is disposable: the Mac terminates it when its link
 //! drops, and a reconnect starts a new relay.
@@ -10,14 +10,12 @@
 use std::path::PathBuf;
 
 use pa_types::platform::transport::{connect_transport, AsyncReadHalf, AsyncWriteHalf};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The guest socket coordinate the relay reads; the link sets it.
 pub const BRIDGE_SOCKET_ENV: &str = "PRIME_AGENT_CLOUD_BRIDGE_SOCKET";
 
-/// Run the relay until either side closes. One line of stdin becomes
-/// one line to the guest socket; one guest frame becomes one line of
-/// stdout.
+/// Run the relay until either side closes: stdin is copied to the guest
+/// socket, and the guest socket to stdout.
 ///
 /// # Errors
 ///
@@ -40,31 +38,13 @@ pub async fn run_guest_relay() -> anyhow::Result<()> {
     }
 }
 
-/// Pump one direction line-by-line until EOF, then half-close.
+/// Copy one direction until EOF. The copy flushes whenever its reader
+/// waits, so each frame reaches the other side as it arrives.
 async fn pump(
     mut from: Box<dyn AsyncReadHalf>,
     mut to: Box<dyn AsyncWriteHalf>,
 ) -> anyhow::Result<()> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let read = from.read(&mut chunk).await?;
-        if read == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-        while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
-            let mut line: Vec<u8> = buffer[..=newline].to_vec();
-            buffer.drain(..=newline);
-            to.write_all(&line).await?;
-            line.clear();
-        }
-    }
-    if !buffer.is_empty() {
-        let tail = std::mem::take(&mut buffer);
-        to.write_all(&tail).await?;
-    }
-    let _ = to.flush().await;
+    tokio::io::copy(&mut from, &mut to).await?;
     Ok(())
 }
 

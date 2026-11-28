@@ -57,7 +57,8 @@ pub struct BotCreate {
 }
 
 /// What a guest needs to call its model provider without holding a key.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GuestCredentials {
     /// The sandbox's header rules (set at create).
     pub network_rules: BTreeMap<String, HeaderRule>,

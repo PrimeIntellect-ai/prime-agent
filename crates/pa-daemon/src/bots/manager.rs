@@ -158,7 +158,7 @@ with open(path, "w") as file:
         "idleMinutes": int(os.environ.get("BOT_SELF_PAUSE_MINUTES", "10")),
     }, file)
 PY
-if [ -n "${BOT_AUTH_JSON:-}" ] && { [ -n "${BOT_AUTH_OVERWRITE:-}" ] || [ ! -s "$HOME/.prime/agent/auth.json" ]; }; then
+if [ -n "${BOT_AUTH_JSON:-}" ]; then
   (umask 077; printf '%s' "$BOT_AUTH_JSON" >"$HOME/.prime/agent/auth.json")
 fi
 python3 -c "$BOT_SETTINGS_PY"
@@ -355,9 +355,6 @@ pub struct BotManager {
     pub(super) logins: Arc<Logins>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     attached: Arc<Mutex<HashMap<String, usize>>>,
-    /// The guest auth for a sandbox created with matching header rules,
-    /// until its bootstrap writes it. Keyed by sandbox id.
-    guest_auth: Mutex<HashMap<String, GuestCredentials>>,
     image: String,
     /// The owner's agent dir: its `factory.enabled` carries into the bot.
     agent_dir: PathBuf,
@@ -388,7 +385,6 @@ impl BotManager {
             logins: Arc::new(logins),
             locks: Mutex::new(HashMap::new()),
             attached: Arc::new(Mutex::new(HashMap::new())),
-            guest_auth: Mutex::new(HashMap::new()),
             image: std::env::var(BOT_IMAGE_ENV)
                 .ok()
                 .filter(|image| !image.is_empty())
@@ -717,6 +713,7 @@ impl BotManager {
             pause_at: None,
             status_since: None,
             running_ms: 0,
+            pending_guest: None,
         })?;
         if spec.bots {
             let mut spawns = read_spawns_marker(&self.agent_dir);
@@ -1710,7 +1707,7 @@ impl BotManager {
             network_rules: credentials.network_rules.clone(),
         };
         let created = retry(|| self.platform.create(&request)).await?;
-        lock(&self.guest_auth).insert(created.id.clone(), credentials);
+        record.pending_guest = Some(credentials);
         record.sandbox_id = Some(created.id.clone());
         record.status = created.status;
         self.save(record.clone())?;
@@ -1819,40 +1816,24 @@ impl BotManager {
             "BOT_FACTORY_ENABLED".to_string(),
             factory_enabled.to_string(),
         );
-        // A sandbox created by this process gets the auth that matches its
-        // header rules. Any other sandbox keeps its auth.json, and gets one
-        // only when it has none (its create ran before a restart).
-        let created_here = lock(&self.guest_auth).get(&sandbox_id).cloned();
-        let guest = match created_here {
-            Some(guest) => {
-                env.insert("BOT_AUTH_OVERWRITE".to_string(), "1".to_string());
-                // Only a sandbox created with these header rules gets the
-                // matching MCP entries; another one keeps its old ones.
-                if let Some(servers) = &guest.mcp_servers {
-                    env.insert("BOT_MCP_SERVERS".to_string(), servers.to_string());
-                }
-                if let Some(connections) = &guest.mcp_connections {
-                    env.insert("BOT_MCP_CONNECTIONS".to_string(), connections.to_string());
-                }
-                Some(guest)
+        // A new sandbox gets the auth, MCP entries, and nested context that
+        // match its create's header rules, once: the record keeps them until
+        // a bootstrap writes them, across a daemon restart. A resumed or
+        // reused sandbox keeps what its guest disk holds.
+        if let Some(guest) = record.pending_guest.as_ref() {
+            if let Some(auth) = &guest.auth_json {
+                env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
             }
-            // Best effort: the sandbox's rules are already set. The bot's
-            // own GitHub flag decides its rules, so a reused bot's nested
-            // context keeps the GitHub rules its children inherit.
-            None => self
-                .guest_credentials(record, record.github)
-                .await
-                .ok()
-                .map(|(credentials, _, _)| credentials),
-        };
-        if let Some(auth) = guest.as_ref().and_then(|guest| guest.auth_json.as_ref()) {
-            env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
-        }
-        if record.bots {
+            if let Some(servers) = &guest.mcp_servers {
+                env.insert("BOT_MCP_SERVERS".to_string(), servers.to_string());
+            }
+            if let Some(connections) = &guest.mcp_connections {
+                env.insert("BOT_MCP_CONNECTIONS".to_string(), connections.to_string());
+            }
             // The nested-spawn context: the guest writes it next to its
             // registry, so its daemon can hand it to spawns and
             // `bots allow-spawns` can add it to a running bot.
-            if let Some(guest) = guest.as_ref() {
+            if record.bots {
                 let context = super::nested::NestedContext {
                     bot_id: record.bot_id.clone(),
                     owner_session_id: record.owner_session_id.clone(),
@@ -1913,7 +1894,7 @@ impl BotManager {
             .exec_ready(&sandbox_id, BOOTSTRAP_SCRIPT, &env, None, deadline)
             .await?;
         check_exit("start the bot daemon", &output)?;
-        lock(&self.guest_auth).remove(&sandbox_id);
+        record.pending_guest = None;
         let ids: Value = output
             .stdout
             .lines()
@@ -2704,6 +2685,7 @@ fn child_record(
         // The record adds the open interval from `status_since` itself.
         running_ms,
         pause_token: existing.pause_token,
+        pending_guest: None,
     })
 }
 
@@ -2749,6 +2731,7 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         pause_at: None,
         status_since: None,
         running_ms: 0,
+        pending_guest: None,
     }
 }
 

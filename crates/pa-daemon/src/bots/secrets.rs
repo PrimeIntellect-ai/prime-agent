@@ -70,10 +70,10 @@ impl SecretKind {
         }
     }
 
-    /// Secrets with a stable name get their value updated in place; the
-    /// others carry a fingerprint of the value in the name.
+    /// Secrets with a stable name get their value updated in place; a
+    /// custom secret carries a fingerprint of the value in the name.
     pub(super) fn stable_names(self) -> bool {
-        matches!(self, Self::GitHub | Self::Login | Self::Mcp)
+        !matches!(self, Self::Custom)
     }
 }
 
@@ -217,7 +217,8 @@ pub fn host_count(planned: &[Planned]) -> usize {
 /// The candidates a new bot's API keys, GitHub access, and custom secrets
 /// give, in plan order: `required` (the bot's provider, when it uses an
 /// API key) first, then Prime Inference, the other API keys, GitHub (when
-/// `github`), and the custom secrets. `owner` names the GitHub secrets.
+/// `github`), and the custom secrets. `owner` names the API key and GitHub
+/// secrets.
 /// Blocking: it may run a `!command` key or the `gh` CLI.
 fn candidates(
     auth: &mut AuthStorage,
@@ -227,7 +228,7 @@ fn candidates(
     required: Option<&str>,
     github: bool,
 ) -> Vec<Candidate> {
-    let mut candidates = credentials::api_key_candidates(auth, required);
+    let mut candidates = credentials::api_key_candidates(auth, owner, required);
     if github {
         candidates.extend(github::candidate(agent_dir, owner));
     }
