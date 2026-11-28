@@ -88,7 +88,7 @@ fn serve(listener: &UnixListener, mock: &Mock) {
                 for row in rows.filter(|row| row.get("botId") == bot_id.as_ref()) {
                     if command == "pause_bot" {
                         row["status"] = json!("paused");
-                        row["statusSince"] = json!(1_795_410_642_000_i64);
+                        row["statusSince"] = json!(unix_ms() - 3 * 3_600_000);
                         row["pauseAt"] = Value::Null;
                     } else {
                         row["status"] = json!("running");
@@ -241,7 +241,7 @@ fn local_mock(list_bots: Value, attach_bot: Result<Value, &'static str>) -> Mock
 fn the_page_lists_the_bots_and_counts_the_bad_rows() {
     let dir = tempfile::tempdir().unwrap();
     let list = json!({"bots": [
-        bot("b1", "nightly-digest", "paused", Some(1_795_410_642_000)),
+        bot("b1", "nightly-digest", "paused", Some(unix_ms() - 5 * 60_000)),
         bot("b2", "triage", "running", None),
         {"botId": "b3", "status": "running"},
     ]});
@@ -258,7 +258,7 @@ fn the_page_lists_the_bots_and_counts_the_bad_rows() {
     assert!(at("triage") < at("Idle (1)"), "{frame}");
     assert!(at("Idle (1)") < at("nightly-digest"), "{frame}");
     assert!(
-        rows[at("nightly-digest") + 1].contains("last turn 11-23 05:10"),
+        rows[at("nightly-digest") + 1].contains("last turn 5m ago"),
         "{frame}"
     );
     assert!(rows[at("triage")].contains("v0.10.5"), "{frame}");
@@ -309,12 +309,12 @@ fn p_pauses_the_running_bot_and_resumes_the_paused_bot() {
             key(KeyCode::Char('d')),
             wait("pauses in 2 min"),
             key(KeyCode::Char('p')),
-            wait("paused since 2026-11-23T05:10:42Z"),
+            wait("paused 3h ago"),
             key(KeyCode::Char('p')),
             wait("pauses in 2 min"),
         ],
     );
-    let paused = last_frame_with(&outcome, "paused since");
+    let paused = last_frame_with(&outcome, "paused 3h ago");
     assert!(paused.contains("Idle (1)"), "{paused}");
     assert!(outcome
         .frames
@@ -480,6 +480,39 @@ fn enter_attaches_the_bot_session_and_refuses_local_commands() {
     );
     assert_eq!(outcome.active_session_id, "guest-b1");
     assert!(last_frame_with(&outcome, "/mcp runs on this Mac").contains("Leave the bot view"));
+}
+
+/// The dock's subagents group in a bot view stays in the bot: this Mac's agents view does not know
+/// the bot's session ids.
+#[test]
+fn the_dock_subagents_group_in_a_bot_view_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let endpoint = dir.path().join("bot.sock");
+    let bot = BotAttach {
+        bot_id: "b1".into(),
+        name: "triage".into(),
+        endpoint: endpoint.clone(),
+        guest_session_id: "guest-b1".into(),
+    };
+    let guest = Mock {
+        session: "guest-b1",
+        list_bots: json!({}),
+        attach_bot: Err("unused"),
+        close_after_attach: false,
+    };
+    let outcome = run(
+        &endpoint,
+        SessionSelection::Bot(bot),
+        guest,
+        vec![
+            wait("guest-b1"),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            wait("The agents view runs on this Mac"),
+        ],
+    );
+    assert!(outcome.agents_view_scope.is_none());
+    assert!(last_frame_with(&outcome, "The agents view runs on this Mac").contains("triage"));
 }
 
 #[test]

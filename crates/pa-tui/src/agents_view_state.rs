@@ -584,9 +584,14 @@ pub(crate) fn timestamp_ms(value: Option<&str>) -> i64 {
 
 /// Relative age (`s`/`m`/`h`/`d`, TS `formatAgentsViewRelativeTime`).
 pub fn relative_age(value: Option<&str>, now_ms: u64) -> String {
-    let Some(ms) = value.and_then(iso_to_unix_ms) else {
-        return String::new();
-    };
+    value
+        .and_then(iso_to_unix_ms)
+        .map_or_else(String::new, |ms| relative_age_ms(ms, now_ms))
+}
+
+/// [`relative_age`] of a Unix-milliseconds stamp.
+#[must_use]
+pub fn relative_age_ms(ms: i64, now_ms: u64) -> String {
     let seconds = ((now_ms as i64 - ms) / 1000).max(0) as u64;
     if seconds < 60 {
         return format!("{seconds}s");

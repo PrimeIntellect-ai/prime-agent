@@ -167,8 +167,17 @@ impl SessionUi {
             },
         };
         self.secrets_request(view, command).await;
-        if let (Some(name), Some(Overlay::Secrets(secrets))) = (added, view.overlay.as_mut()) {
-            secrets.select(&name);
+        match (added, view.overlay.as_mut()) {
+            (Some(name), Some(Overlay::Secrets(secrets))) => secrets.select(&name),
+            // The view closed for the prompts: a refused add brings it back.
+            (Some(_), _) => {
+                let command = DaemonCommand::ListBotSecrets {
+                    id: None,
+                    rest: Map::default(),
+                };
+                self.secrets_request(view, command).await;
+            }
+            (None, _) => {}
         }
     }
 }

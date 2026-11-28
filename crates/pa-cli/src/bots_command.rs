@@ -118,7 +118,8 @@ fn clear(agent_dir: &Path) -> Result<(), String> {
     }
     if github::gh_cli_token().is_some() {
         println!(
-            "New bots still use the gh CLI login. Set bots.github to false in settings.json to turn GitHub off."
+            "The gh CLI login is still present: the next GitHub bot spawn or wake writes it back \
+             for every GitHub bot. To revoke, also run `gh auth logout` or delete the GitHub bots."
         );
     }
     // A failed platform delete leaves running bots with GitHub access, so

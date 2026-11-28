@@ -444,7 +444,6 @@ where
             headers: stream_headers(&auth, inner.keepalive_interval_seconds, connect_timeout_ms),
             url: url.clone(),
             body: Some(encode_connect_frame(payload, 0)),
-            max_response_bytes: None,
             timeout: open_deadline,
         };
         let response = inner

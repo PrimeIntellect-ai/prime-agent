@@ -125,6 +125,10 @@ pub struct BotRecord {
     /// Milliseconds the bot ran before its current status.
     #[serde(default)]
     pub running_ms: i64,
+    /// The guest auth, MCP entries, and rules of a sandbox created with
+    /// them, until its bootstrap writes them. Holds no secret value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_guest: Option<super::platform::GuestCredentials>,
 }
 
 impl BotRecord {
@@ -169,17 +173,12 @@ impl BotRegistry {
     /// Returns an error when the file exists but cannot be read or parsed.
     pub fn load(agent_dir: &Path) -> Result<Self> {
         let path = Self::path_in(agent_dir);
-        let mut file = match std::fs::read_to_string(&path) {
+        let file = match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str::<RegistryFile>(&text)
                 .with_context(|| format!("parse {}", path.display()))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => RegistryFile::default(),
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
-        // A record from before the status stamp counts its running time from this load.
-        let now = super::manager::now_ms();
-        for record in file.bots.values_mut() {
-            record.status_since.get_or_insert(now);
-        }
         Ok(Self { path, file })
     }
 

@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use super::status::StatusTone;
 use super::{parse_search_query, AgentsViewMode, AgentsViewRow, RowKind, UiInput};
 use crate::agents_view_search::SessionSearchText;
-use crate::agents_view_state::{now_ms, relative_age, section_rank};
+use crate::agents_view_state::{now_ms, relative_age_ms, section_rank};
 use crate::bots_view::{parse_bots, BotRow, BotsCatalog};
 use crate::daemon_client::DaemonClient;
 use crate::interactive::SessionSelection;
@@ -17,7 +17,7 @@ const ROW_PREFIX: &str = "bot:";
 /// The bots fetch's wait (the session view's request bound).
 const FETCH_TIMEOUT_MS: u64 = 10_000;
 
-/// Fetch the bots once, as the view mounts; the answer lands as `BotsLoaded`.
+/// Fetch the bots; the answer lands as `BotsLoaded`, which arms the next fetch.
 pub(super) fn spawn_bots_fetch(client: &DaemonClient, ui_tx: mpsc::UnboundedSender<UiInput>) {
     let client = client.clone();
     tokio::spawn(async move {
@@ -68,7 +68,7 @@ fn bot_row(bot: &BotRow, now: u64) -> AgentsViewRow {
         // The model column's bare id, like the session rows.
         model: crate::agents_view_forest::session_model(&json!({ "model": bot.model })),
         cost: bot.cost_usd,
-        age: relative_age(Some(bot.last_activity_at.as_str()), now),
+        age: relative_age_ms(bot.last_activity_at, now),
         depth: 0,
         descendant_count: 0,
         running_subagent_count: 0,

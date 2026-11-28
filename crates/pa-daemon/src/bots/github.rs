@@ -18,7 +18,7 @@ use pa_sandbox::transport::SandboxTransport;
 use pa_sandbox::{HeaderRule, PrimeSandboxClient};
 
 use super::credentials::{key_fingerprint, GUEST_API_KEY_PLACEHOLDER, PLATFORM_CA_PATH};
-use super::secrets::{Candidate, SecretKind};
+use super::secrets::{Candidate, SecretKind, MAX_SECRET_BYTES};
 
 /// The auth storage entry that holds the stored token.
 pub const GITHUB_AUTH_ID: &str = "prime-agent-bots-github";
@@ -28,8 +28,6 @@ pub const SET_TOKEN_COMMAND: &str = "prime-agent bots github set";
 pub(super) const API_HOST: &str = "api.github.com";
 /// The git smart-HTTP host.
 pub(super) const GIT_HOST: &str = "github.com";
-/// The platform's limit on one secret value.
-const MAX_SECRET_BYTES: usize = 16 * 1024;
 /// The prefix of every platform secret the GitHub plan ever made, on any
 /// Prime account: the account's key fingerprint follows it. `clear`
 /// deletes by this prefix, so a rotated Prime key cannot leave the old
@@ -302,19 +300,24 @@ pub fn git_identity(agent_dir: &Path) -> Option<BotGitIdentity> {
 
 /// A new bot's GitHub access and git author. `requested` is the spawn's
 /// `github` argument; without one, the `bots.github` setting decides, and
-/// a machine with no token spawns the bot without GitHub. Blocking.
+/// a machine with no token, or with GitHub off for bots in `/secrets`,
+/// spawns the bot without GitHub. Blocking.
 ///
 /// # Errors
-/// Returns an error when the spawn asks for GitHub and no token is available.
+/// Returns an error when the spawn asks for GitHub and bots cannot get it.
 pub fn for_spawn(
     agent_dir: &Path,
     requested: Option<bool>,
 ) -> Result<(bool, Option<BotGitIdentity>)> {
     let identity = git_identity(agent_dir);
-    let wanted = requested.unwrap_or_else(|| {
-        pa_core::settings::SettingsManager::create(agent_dir, agent_dir).get_bots_github()
-    });
-    if !wanted {
+    let settings = pa_core::settings::SettingsManager::create(agent_dir, agent_dir);
+    if !requested.unwrap_or_else(|| settings.get_bots_github()) {
+        return Ok((false, identity));
+    }
+    if !settings.get_bots_inject(GITHUB_AUTH_ID) {
+        if requested == Some(true) {
+            bail!("github=True needs GitHub on for bots; turn on {GITHUB_AUTH_ID} in /secrets.");
+        }
         return Ok((false, identity));
     }
     let available = resolve_token(agent_dir).is_some();
@@ -398,7 +401,7 @@ mod tests {
             std::future::ready(Ok(StreamedResponse {
                 status: 500,
                 headers: Vec::new(),
-                body: ResponseChunks::Queued(VecDeque::new()),
+                body: ResponseChunks::Reqwest(http::Response::new(Vec::<u8>::new()).into()),
             }))
         }
     }
@@ -415,6 +418,19 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// GitHub off for bots in `/secrets` is like a missing token: an explicit
+    /// `github=True` fails, and the default spawns the bot without GitHub.
+    #[test]
+    fn github_off_for_bots_spawns_without_github() {
+        let dir = tempfile::tempdir().unwrap();
+        store_token(dir.path(), "ghp_token").unwrap();
+        pa_core::settings::SettingsManager::create(dir.path(), dir.path())
+            .set_bots_inject(GITHUB_AUTH_ID, false)
+            .unwrap();
+        assert!(for_spawn(dir.path(), Some(true)).is_err());
+        assert!(!for_spawn(dir.path(), None).unwrap().0);
     }
 
     #[test]

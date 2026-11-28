@@ -15,6 +15,8 @@ pub const DAEMON_PROTOCOL_VERSION: u64 = 7;
 /// the Rust lifecycle captures the tombstoned child's usage before the unlink).
 pub const DAEMON_SCHEMA_REVISION: u64 = 30;
 pub const DAEMON_SCHEMA_ID: &str = "protocol-7-schema-30-8e4b17c2a9f5";
+/// The longest JSON line a client reads from a bot's guest daemon.
+pub const MAX_BOT_FRAME_BYTES: u64 = 16 * 1024 * 1024;
 
 pub type DaemonClientId = String;
 pub type DaemonCommandId = String;

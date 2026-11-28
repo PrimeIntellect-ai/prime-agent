@@ -19,10 +19,9 @@ VM sandbox that hosts each bot.
   answer carries the checkpoint the pause froze. Both state changes
   finish asynchronously.
 - Delete (`DELETE /api/v1/sandbox/{id}`): idempotent; a 404 is success.
-- Wait: poll fetch until `RUNNING`. A terminal status fails fast; the
-  wait budget fails with `timeout`.
 - Checkpoints: create, fetch, delete (404 is success), and wait until
-  `DURABLE`.
+  `DURABLE`. `FAILED` and `DELETING` fail the wait; any other state keeps
+  polling.
 - VM exec: `CommandSessionClient` starts, connects to, writes stdin to, and signals a guest process over the sandbox gateway. `PlatformGatewayAuthSource` fetches the gateway credentials, and the `secrets` module lists and creates platform secrets.
 
 ## Safety contract

@@ -551,7 +551,6 @@ where
                     headers: unary_headers(&auth, timeout),
                     url: url.clone(),
                     body: Some(request_bytes.to_vec()),
-                    max_response_bytes: None,
                     timeout: Some(timeout),
                 };
                 let mut response =

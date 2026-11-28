@@ -158,7 +158,7 @@ with open(path, "w") as file:
         "idleMinutes": int(os.environ.get("BOT_SELF_PAUSE_MINUTES", "10")),
     }, file)
 PY
-if [ -n "${BOT_AUTH_JSON:-}" ] && { [ -n "${BOT_AUTH_OVERWRITE:-}" ] || [ ! -s "$HOME/.prime/agent/auth.json" ]; }; then
+if [ -n "${BOT_AUTH_JSON:-}" ]; then
   (umask 077; printf '%s' "$BOT_AUTH_JSON" >"$HOME/.prime/agent/auth.json")
 fi
 python3 -c "$BOT_SETTINGS_PY"
@@ -355,9 +355,6 @@ pub struct BotManager {
     pub(super) logins: Arc<Logins>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     attached: Arc<Mutex<HashMap<String, usize>>>,
-    /// The guest auth for a sandbox created with matching header rules,
-    /// until its bootstrap writes it. Keyed by sandbox id.
-    guest_auth: Mutex<HashMap<String, GuestCredentials>>,
     image: String,
     /// The owner's agent dir: its `factory.enabled` carries into the bot.
     agent_dir: PathBuf,
@@ -388,7 +385,6 @@ impl BotManager {
             logins: Arc::new(logins),
             locks: Mutex::new(HashMap::new()),
             attached: Arc::new(Mutex::new(HashMap::new())),
-            guest_auth: Mutex::new(HashMap::new()),
             image: std::env::var(BOT_IMAGE_ENV)
                 .ok()
                 .filter(|image| !image.is_empty())
@@ -508,7 +504,7 @@ impl BotManager {
         for bot in self.list() {
             let bot_lock = self.lock_for(&bot.bot_id);
             let _held = bot_lock.lock().await;
-            let Ok(mut record) = self.record(&bot.bot_id) else {
+            let Ok(record) = self.record(&bot.bot_id) else {
                 continue;
             };
             let Some(sandbox_id) = record
@@ -534,16 +530,18 @@ impl BotManager {
             let mut credentials_rules = None;
             match outcome {
                 Ok((rules, logins, relay_host)) => {
-                    // The refresher follows the logins the new rules carry,
-                    // and the relay host they now carry.
-                    record.logins = logins;
-                    record.pause_rule_host = relay_host;
                     let running = record.status == BotStatus::Running;
-                    let watch = running && !record.logins.is_empty();
+                    let watch = running && !logins.is_empty();
                     if record.bots {
                         credentials_rules = Some(rules);
                     }
-                    if let Err(error) = self.save(record.clone()) {
+                    // The refresher follows the logins the new rules carry,
+                    // and the relay host they now carry.
+                    let updated = self.update(&record.bot_id, |record| {
+                        record.logins = logins;
+                        record.pause_rule_host = relay_host;
+                    });
+                    if let Err(error) = updated {
                         failures.push(format!("{}: {error:#}", record.name));
                     } else if watch {
                         self.watch_logins();
@@ -630,21 +628,14 @@ impl BotManager {
     /// # Errors
     /// Returns an error for an unknown bot or a registry write failure.
     pub fn record_turn(&self, bot_id: &str) -> Result<()> {
-        let mut registry = lock(&self.registry);
-        let mut record = registry
-            .get(bot_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("unknown bot {bot_id}"))?;
-        record.last_turn_at = Some(now_ms());
-        registry.put(record)
+        self.update(bot_id, |record| record.last_turn_at = Some(now_ms()))?;
+        Ok(())
     }
 
     /// Adopt the guest session's live model and thinking into the record
     /// (from its `get_state` summary): the /bots row shows them, and the
     /// next create provisions the model's provider key. A summary without
-    /// a model leaves the record alone. The read-modify-write sits under
-    /// one registry lock, so a concurrent lifecycle save cannot resurrect
-    /// a stale snapshot.
+    /// a model, or an unknown bot, leaves the registry alone.
     ///
     /// # Errors
     /// Returns an error when the registry cannot be written.
@@ -652,21 +643,17 @@ impl BotManager {
         let Some((model, thinking)) = guest_model_choice(state) else {
             return Ok(());
         };
-        let mut registry = lock(&self.registry);
-        let Some(record) = registry.get(bot_id) else {
-            return Ok(());
-        };
-        // A `"default"` (unset) level keeps the record's thinking: the
-        // summary cannot tell a deliberate clear from never-set, and the
-        // record's seeds a new session.
-        let thinking = thinking.or_else(|| record.thinking.clone());
-        if record.model == model && record.thinking == thinking {
+        if self.get(bot_id).is_none() {
             return Ok(());
         }
-        let mut record = record.clone();
-        record.model = model;
-        record.thinking = thinking;
-        registry.put(record)
+        self.update(bot_id, |record| {
+            // A `"default"` (unset) level keeps the record's thinking: the
+            // summary cannot tell a deliberate clear from never-set, and the
+            // record's seeds a new session.
+            record.thinking = thinking.or_else(|| record.thinking.take());
+            record.model = model;
+        })?;
+        Ok(())
     }
 
     /// Provision a new bot: a running sandbox with this binary's exact
@@ -689,7 +676,7 @@ impl BotManager {
                 spec.bot_id
             );
         }
-        self.save(BotRecord {
+        self.insert(BotRecord {
             bot_id: spec.bot_id.clone(),
             name: spec.name.clone(),
             owner_session_id: spec.owner_session_id.clone(),
@@ -717,6 +704,7 @@ impl BotManager {
             pause_at: None,
             status_since: None,
             running_ms: 0,
+            pending_guest: None,
         })?;
         if spec.bots {
             let mut spawns = read_spawns_marker(&self.agent_dir);
@@ -724,7 +712,7 @@ impl BotManager {
             write_spawns_marker(&self.agent_dir, &spawns)?;
         }
         match self.ensure_running_locked(&spec.bot_id).await {
-            Ok(_) => self.record(&spec.bot_id),
+            Ok(record) => Ok(record),
             Err(error) => {
                 if let Err(cleanup) = self.delete_locked(&spec.bot_id).await {
                     return Err(error.context(format!("cleanup also failed: {cleanup:#}")));
@@ -743,9 +731,7 @@ impl BotManager {
     pub async fn ensure_running(&self, bot_id: &str) -> Result<BotRecord> {
         let bot_lock = self.lock_for(bot_id);
         let _held = bot_lock.lock().await;
-        self.ensure_running_locked(bot_id).await?;
-        // The registry's copy carries the stamps `save` adds.
-        self.record(bot_id)
+        self.ensure_running_locked(bot_id).await
     }
 
     /// Bring one bot the registry says runs to this binary's version, in
@@ -796,9 +782,7 @@ impl BotManager {
     pub async fn pause(&self, bot_id: &str) -> Result<BotRecord> {
         let bot_lock = self.lock_for(bot_id);
         let _held = bot_lock.lock().await;
-        self.pause_locked(bot_id).await?;
-        // The registry's copy carries the stamps `save` adds.
-        self.record(bot_id)
+        self.pause_locked(bot_id).await
     }
 
     async fn pause_locked(&self, bot_id: &str) -> Result<BotRecord> {
@@ -808,14 +792,14 @@ impl BotManager {
         if let Some(found) = sandbox.take_if(|found| found.status == BotStatus::Creating) {
             sandbox = self.poll_until_running(&found.id, deadline).await?;
             if sandbox.is_none() {
-                lose_sandbox(&mut record);
+                record = self.update(bot_id, lose_sandbox)?;
             }
         }
         let Some(sandbox) = sandbox else {
-            record.sandbox_id = None;
-            record.status = BotStatus::Stopped;
-            self.save(record.clone())?;
-            return Ok(record);
+            return self.update(bot_id, |record| {
+                record.sandbox_id = None;
+                record.status = BotStatus::Stopped;
+            });
         };
         if sandbox.status == BotStatus::Running {
             match retry(|| self.platform.pause(&sandbox.id)).await {
@@ -833,16 +817,12 @@ impl BotManager {
                     self.platform.wait_checkpoint(&checkpoint).await?;
                     self.prune_checkpoints(&mut record).await?;
                     retry(|| self.platform.delete(&sandbox.id)).await?;
-                    lose_sandbox(&mut record);
-                    self.save(record.clone())?;
-                    return Ok(record);
+                    return self.update(bot_id, lose_sandbox);
                 }
                 Err(error) => return Err(error).context("pause bot sandbox"),
             }
         }
-        record.status = BotStatus::Paused;
-        self.save(record.clone())?;
-        Ok(record)
+        self.update(bot_id, |record| record.status = BotStatus::Paused)
     }
 
     /// Delete every sandbox the bot's label names and its checkpoints, then
@@ -1112,8 +1092,10 @@ impl BotManager {
             )
             .await?;
         check_exit("write the bot's spawn settings", &output)?;
-        self.save(record.clone())?;
-        Ok(record)
+        self.update(bot_id, |current| {
+            current.bots = true;
+            current.logins = record.logins;
+        })
     }
 
     /// Rebuild the cache from labels: newest live sandbox per bot wins, the
@@ -1188,17 +1170,17 @@ impl BotManager {
                 );
                 retry(|| self.platform.delete(&extra.id)).await?;
             }
-            let mut record = self
-                .get(&bot_id)
-                .unwrap_or_else(|| rebuilt_record(&bot_id, chosen));
-            if record.parent_bot_id.is_none()
-                && read_spawns_marker(&self.agent_dir).contains(&bot_id)
-            {
-                record.bots = true;
+            if self.get(&bot_id).is_none() {
+                self.insert(rebuilt_record(&bot_id, chosen))?;
             }
-            record.sandbox_id = Some(chosen.id.clone());
-            record.status = chosen.status;
-            self.save_observed(record)?;
+            let spawns = read_spawns_marker(&self.agent_dir).contains(&bot_id);
+            self.update_observed(&bot_id, |record| {
+                if record.parent_bot_id.is_none() && spawns {
+                    record.bots = true;
+                }
+                record.sandbox_id = Some(chosen.id.clone());
+                record.status = chosen.status;
+            })?;
             settled.insert(bot_id);
         }
         for listed in self.list() {
@@ -1207,18 +1189,21 @@ impl BotManager {
             }
             let bot_lock = self.lock_for(&listed.bot_id);
             let _held = bot_lock.lock().await;
-            let Some(mut record) = self.get(&listed.bot_id) else {
-                continue;
-            };
-            let Some(sandbox_id) = record.sandbox_id.clone() else {
+            let Some(sandbox_id) = self
+                .get(&listed.bot_id)
+                .and_then(|record| record.sandbox_id)
+            else {
                 continue;
             };
             match self.platform.get(&sandbox_id).await {
-                Ok(sandbox) if !sandbox.status.is_terminal() => record.status = sandbox.status,
-                Ok(_) | Err(PlatformError::NotFound(_)) => lose_sandbox(&mut record),
+                Ok(sandbox) if !sandbox.status.is_terminal() => {
+                    self.update_observed(&listed.bot_id, |record| record.status = sandbox.status)?;
+                }
+                Ok(_) | Err(PlatformError::NotFound(_)) => {
+                    self.update_observed(&listed.bot_id, lose_sandbox)?;
+                }
                 Err(error) => return Err(error.into()),
             }
-            self.save_observed(record)?;
         }
         let orphans = lock(&self.registry).orphans();
         self.delete_orphans(orphans).await
@@ -1233,78 +1218,87 @@ impl BotManager {
             .ok_or_else(|| anyhow!("unknown bot {bot_id}"))
     }
 
-    /// Persist `record`. A lifecycle operation saves a snapshot taken before
-    /// its awaits, so a newer settled-turn time from [`Self::record_turn`] wins.
-    /// A status change stamps `status_since`, and a running interval that ends
-    /// adds to `running_ms`. The model and thinking merge from the current
-    /// record: only the guest-model adoption changes them, under the registry
-    /// lock, so a stale snapshot never reverts an adopted choice. The bots
-    /// tests drive a stale snapshot through it.
-    pub(super) fn save(&self, record: BotRecord) -> Result<()> {
-        self.save_closing(record, false)
+    /// Add a new bot's record; its status counts from now.
+    fn insert(&self, mut record: BotRecord) -> Result<()> {
+        record.status_since = Some(now_ms());
+        lock(&self.registry).put(record)
     }
 
-    /// Persist a status this daemon observed on the platform, not one it
-    /// set. A running interval that ended off-process (a self-pause while
-    /// this daemon was down, a lost sandbox) ends at the idle grace after
-    /// the bot's last known activity, not now.
-    fn save_observed(&self, record: BotRecord) -> Result<()> {
-        self.save_closing(record, true)
+    /// Change `bot_id`'s record with `change` under the registry lock, and
+    /// return the stored record. Each step changes only the fields it owns,
+    /// so a concurrent [`Self::record_turn`] or model adoption is never
+    /// overwritten. A status change stamps `status_since`, and a running
+    /// interval that ends adds to `running_ms`. Fails for an unknown bot.
+    fn update(&self, bot_id: &str, change: impl FnOnce(&mut BotRecord)) -> Result<BotRecord> {
+        self.update_closing(bot_id, false, change)
     }
 
-    fn save_closing(&self, mut record: BotRecord, observed: bool) -> Result<()> {
+    /// [`Self::update`] with a status this daemon observed on the platform,
+    /// not one it set. A running interval that ended off-process (a
+    /// self-pause while this daemon was down, a lost sandbox) ends at the
+    /// idle grace after the bot's last known activity, not now.
+    fn update_observed(
+        &self,
+        bot_id: &str,
+        change: impl FnOnce(&mut BotRecord),
+    ) -> Result<BotRecord> {
+        self.update_closing(bot_id, true, change)
+    }
+
+    fn update_closing(
+        &self,
+        bot_id: &str,
+        observed: bool,
+        change: impl FnOnce(&mut BotRecord),
+    ) -> Result<BotRecord> {
         let mut registry = lock(&self.registry);
-        let now = now_ms();
-        let current = registry.get(&record.bot_id);
-        if let Some(current) = current {
-            record.last_turn_at = record.last_turn_at.max(current.last_turn_at);
-            // The model and thinking change only through the guest-model
-            // adoption, which writes under this lock: a lifecycle snapshot
-            // taken before an adoption must not overwrite the adopted
-            // choice with the stale one.
-            record.model.clone_from(&current.model);
-            record.thinking.clone_from(&current.thinking);
+        let current = registry
+            .get(bot_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown bot {bot_id}"))?;
+        let mut record = current.clone();
+        change(&mut record);
+        if record.status != current.status {
+            let now = now_ms();
+            let end = if observed && current.status == BotStatus::Running {
+                let grace =
+                    i64::try_from(super::replies::PAUSE_GRACE.as_millis()).unwrap_or(i64::MAX);
+                current
+                    .status_since
+                    .max(current.last_turn_at)
+                    .map_or(now, |active| active.saturating_add(grace).min(now))
+            } else {
+                now
+            };
+            record.status_since = Some(end);
+            record.running_ms = current.running_ms_at(end);
         }
-        (record.status_since, record.running_ms) = match current {
-            // A record from before the stamp counts from its first save.
-            Some(current) if current.status == record.status => {
-                (current.status_since.or(Some(now)), current.running_ms)
-            }
-            Some(current) => {
-                let end = if observed && current.status == BotStatus::Running {
-                    let grace =
-                        i64::try_from(super::replies::PAUSE_GRACE.as_millis()).unwrap_or(i64::MAX);
-                    current
-                        .status_since
-                        .max(current.last_turn_at)
-                        .map_or(now, |active| active.saturating_add(grace).min(now))
-                } else {
-                    now
-                };
-                (Some(end), current.running_ms_at(end))
-            }
-            None => (Some(now), 0),
-        };
-        registry.put(record)
+        if record != current {
+            registry.put(record.clone())?;
+        }
+        Ok(record)
     }
 
     async fn ensure_running_locked(&self, bot_id: &str) -> Result<BotRecord> {
         let deadline = Instant::now() + OPERATION_BUDGET;
         let mut record = self.record(bot_id)?;
         // A relay-configured wake gives a bot without a pause token one
-        // (a record rebuilt from labels); the save below the wake
-        // persists it. A relay whose host the sandbox's rules do not
-        // carry — configured after the spawn, changed, or a record
-        // rebuilt from labels — gets its rule pushed below.
+        // (a record rebuilt from labels). A relay whose host the sandbox's
+        // rules do not carry — configured after the spawn, changed, or a
+        // record rebuilt from labels — gets its rule pushed below.
         let relay_host = self.relay_settings().await.rule_host();
         if relay_host.is_some() && record.pause_token.is_none() {
-            record.pause_token = Some(uuid::Uuid::new_v4().simple().to_string());
+            record = self.update(bot_id, |record| {
+                record.pause_token = Some(uuid::Uuid::new_v4().simple().to_string());
+            })?;
         }
+        // A resumed bot must find fresh tokens: refresh before the wake.
+        self.refresh_logins(&record).await;
         let woken = match self.resolve_existing(&mut record).await? {
             Some(sandbox) => {
                 let woken = self.wake(sandbox, deadline).await?;
                 if woken.is_none() {
-                    lose_sandbox(&mut record);
+                    record = self.update(bot_id, lose_sandbox)?;
                 }
                 woken
             }
@@ -1315,9 +1309,10 @@ impl BotManager {
             Some(sandbox) => sandbox,
             None => self.acquire_new(&mut record, deadline).await?,
         };
-        record.sandbox_id = Some(sandbox.id.clone());
-        record.status = BotStatus::Running;
-        self.save(record.clone())?;
+        record = self.update(bot_id, |record| {
+            record.sandbox_id = Some(sandbox.id.clone());
+            record.status = BotStatus::Running;
+        })?;
         // A reused sandbox whose rules predate the relay gets fresh ones
         // before the bootstrap arms the guest's self-pause; without them
         // every pause request would authenticate with the placeholder
@@ -1336,10 +1331,10 @@ impl BotManager {
                 );
             }
         }
-        // A resumed bot gets a fresh token before its first request.
-        self.refresh_logins(&record).await;
+        if !record.logins.is_empty() {
+            self.watch_logins();
+        }
         self.install_and_bootstrap(&mut record, deadline).await?;
-        self.save(record.clone())?;
         Ok(record)
     }
 
@@ -1355,8 +1350,10 @@ impl BotManager {
                 .set_network_rules(&sandbox.id, &credentials.network_rules)
         })
         .await?;
-        record.logins = logins;
-        record.pause_rule_host = relay_host;
+        *record = self.update(&record.bot_id, |current| {
+            current.logins = logins;
+            current.pause_rule_host = relay_host;
+        })?;
         Ok(())
     }
 
@@ -1368,20 +1365,17 @@ impl BotManager {
             match self.platform.get(&sandbox_id).await {
                 Ok(sandbox) if !sandbox.status.is_terminal() => {
                     if record.status == BotStatus::Running && sandbox.status != BotStatus::Running {
-                        record.status = sandbox.status;
-                        self.save_observed(record.clone())?;
+                        *record = self.update_observed(&record.bot_id, |current| {
+                            current.status = sandbox.status;
+                        })?;
                     }
                     return Ok(Some(sandbox));
                 }
                 Ok(sandbox) if sandbox.status == BotStatus::Error => {
                     retry(|| self.platform.delete(&sandbox_id)).await?;
-                    lose_sandbox(record);
                     lost = true;
                 }
-                Ok(_) | Err(PlatformError::NotFound(_)) => {
-                    lose_sandbox(record);
-                    lost = true;
-                }
+                Ok(_) | Err(PlatformError::NotFound(_)) => lost = true,
                 Err(error) => return Err(error.into()),
             }
         }
@@ -1402,17 +1396,21 @@ impl BotManager {
         let found = live.into_iter().next();
         match &found {
             Some(sandbox) => {
-                record.sandbox_id = Some(sandbox.id.clone());
-                let was_running = self
-                    .get(&record.bot_id)
-                    .is_some_and(|current| current.status == BotStatus::Running);
-                if was_running && sandbox.status != BotStatus::Running {
-                    record.status = sandbox.status;
-                    self.save_observed(record.clone())?;
-                }
+                *record = self.update_observed(&record.bot_id, |current| {
+                    // A lost cached sandbox needs a new create idempotency
+                    // key, as in `lose_sandbox`; the found one runs the bot.
+                    if lost {
+                        current.generation += 1;
+                    }
+                    current.sandbox_id = Some(sandbox.id.clone());
+                    if current.status == BotStatus::Running && sandbox.status != BotStatus::Running
+                    {
+                        current.status = sandbox.status;
+                    }
+                })?;
             }
             // No sandbox runs the bot: a running interval ended off-process.
-            None if lost => self.save_observed(record.clone())?,
+            None if lost => *record = self.update_observed(&record.bot_id, lose_sandbox)?,
             None => {}
         }
         Ok(found)
@@ -1588,12 +1586,7 @@ impl BotManager {
                 record
                     .older_checkpoint_ids
                     .insert(position, newest.id.clone());
-                if let Err(error) = self.save(record.clone()) {
-                    eprintln!(
-                        "pa-daemon: bot {}: could not record the newest platform checkpoint: {error:#}",
-                        record.bot_id
-                    );
-                }
+                self.record_checkpoints(record);
             }
             return;
         }
@@ -1606,7 +1599,19 @@ impl BotManager {
         if let Some(old) = record.checkpoint_id.replace(newest.id.clone()) {
             record.older_checkpoint_ids.push(old);
         }
-        if let Err(error) = self.save(record.clone()) {
+        self.record_checkpoints(record);
+    }
+
+    /// Store `record`'s checkpoint list. A failure is logged: the wake
+    /// still restores from the list in hand.
+    fn record_checkpoints(&self, record: &BotRecord) {
+        let stored = self.update(&record.bot_id, |current| {
+            current.checkpoint_id.clone_from(&record.checkpoint_id);
+            current
+                .older_checkpoint_ids
+                .clone_from(&record.older_checkpoint_ids);
+        });
+        if let Err(error) = stored {
             eprintln!(
                 "pa-daemon: bot {}: could not record the newest platform checkpoint: {error:#}",
                 record.bot_id
@@ -1674,11 +1679,6 @@ impl BotManager {
         };
         let (credentials, logins, relay_host) =
             self.guest_credentials(record, record.github).await?;
-        record.logins = logins;
-        // The created sandbox's rules are the fresh credentials'; mark
-        // the relay host they carry, so a later wake pushes only when
-        // the relay changes.
-        record.pause_rule_host = relay_host;
         // Inside a bot, the labels name the Mac owner (so its bot list and
         // bots.maxBots count the children) and the spawning bot (so the
         // tree and the delete cascade find them).
@@ -1700,7 +1700,7 @@ impl BotManager {
         if record.github {
             labels.push(GITHUB_LABEL.to_string());
         }
-        labels.extend(record.logins.iter().map(|provider| login_label(provider)));
+        labels.extend(logins.iter().map(|provider| login_label(provider)));
         let request = BotCreate {
             name: record.name.clone(),
             image: self.image.clone(),
@@ -1710,10 +1710,16 @@ impl BotManager {
             network_rules: credentials.network_rules.clone(),
         };
         let created = retry(|| self.platform.create(&request)).await?;
-        lock(&self.guest_auth).insert(created.id.clone(), credentials);
-        record.sandbox_id = Some(created.id.clone());
-        record.status = created.status;
-        self.save(record.clone())?;
+        *record = self.update(&record.bot_id, |current| {
+            current.logins = logins;
+            // The created sandbox's rules are the fresh credentials'; mark
+            // the relay host they carry, so a later wake pushes only when
+            // the relay changes.
+            current.pause_rule_host = relay_host;
+            current.pending_guest = Some(credentials);
+            current.sandbox_id = Some(created.id.clone());
+            current.status = created.status;
+        })?;
         if created.status == BotStatus::Running {
             return Ok(created);
         }
@@ -1721,8 +1727,7 @@ impl BotManager {
             return Ok(running);
         }
         retry(|| self.platform.delete(&created.id)).await?;
-        lose_sandbox(record);
-        self.save(record.clone())?;
+        *record = self.update(&record.bot_id, lose_sandbox)?;
         bail!("bot sandbox {} ended before it ran", created.id)
     }
 
@@ -1819,40 +1824,24 @@ impl BotManager {
             "BOT_FACTORY_ENABLED".to_string(),
             factory_enabled.to_string(),
         );
-        // A sandbox created by this process gets the auth that matches its
-        // header rules. Any other sandbox keeps its auth.json, and gets one
-        // only when it has none (its create ran before a restart).
-        let created_here = lock(&self.guest_auth).get(&sandbox_id).cloned();
-        let guest = match created_here {
-            Some(guest) => {
-                env.insert("BOT_AUTH_OVERWRITE".to_string(), "1".to_string());
-                // Only a sandbox created with these header rules gets the
-                // matching MCP entries; another one keeps its old ones.
-                if let Some(servers) = &guest.mcp_servers {
-                    env.insert("BOT_MCP_SERVERS".to_string(), servers.to_string());
-                }
-                if let Some(connections) = &guest.mcp_connections {
-                    env.insert("BOT_MCP_CONNECTIONS".to_string(), connections.to_string());
-                }
-                Some(guest)
+        // A new sandbox gets the auth, MCP entries, and nested context that
+        // match its create's header rules, once: the record keeps them until
+        // a bootstrap writes them, across a daemon restart. A resumed or
+        // reused sandbox keeps what its guest disk holds.
+        if let Some(guest) = record.pending_guest.as_ref() {
+            if let Some(auth) = &guest.auth_json {
+                env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
             }
-            // Best effort: the sandbox's rules are already set. The bot's
-            // own GitHub flag decides its rules, so a reused bot's nested
-            // context keeps the GitHub rules its children inherit.
-            None => self
-                .guest_credentials(record, record.github)
-                .await
-                .ok()
-                .map(|(credentials, _, _)| credentials),
-        };
-        if let Some(auth) = guest.as_ref().and_then(|guest| guest.auth_json.as_ref()) {
-            env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
-        }
-        if record.bots {
+            if let Some(servers) = &guest.mcp_servers {
+                env.insert("BOT_MCP_SERVERS".to_string(), servers.to_string());
+            }
+            if let Some(connections) = &guest.mcp_connections {
+                env.insert("BOT_MCP_CONNECTIONS".to_string(), connections.to_string());
+            }
             // The nested-spawn context: the guest writes it next to its
             // registry, so its daemon can hand it to spawns and
             // `bots allow-spawns` can add it to a running bot.
-            if let Some(guest) = guest.as_ref() {
+            if record.bots {
                 let context = super::nested::NestedContext {
                     bot_id: record.bot_id.clone(),
                     owner_session_id: record.owner_session_id.clone(),
@@ -1913,18 +1902,24 @@ impl BotManager {
             .exec_ready(&sandbox_id, BOOTSTRAP_SCRIPT, &env, None, deadline)
             .await?;
         check_exit("start the bot daemon", &output)?;
-        lock(&self.guest_auth).remove(&sandbox_id);
         let ids: Value = output
             .stdout
             .lines()
             .last()
             .and_then(|line| serde_json::from_str(line).ok())
             .context("the bot bootstrap printed no session ids")?;
-        record.guest_session_id = ids["activeSessionId"]
+        let session_id = ids["activeSessionId"]
             .as_str()
             .context("the bot bootstrap returned no session id")?
             .to_string();
-        record.guest_session_file = ids["sessionFile"].as_str().map(str::to_string);
+        let session_file = ids["sessionFile"].as_str().map(str::to_string);
+        *record = self.update(&record.bot_id, |current| {
+            current.version.clone_from(&record.version);
+            current.git_identity.clone_from(&record.git_identity);
+            current.pending_guest = None;
+            current.guest_session_id = session_id;
+            current.guest_session_file = session_file;
+        })?;
         Ok(())
     }
 
@@ -2302,10 +2297,11 @@ impl BotManager {
         if record.checkpoint_id.as_ref() == Some(&checkpoint) {
             return Ok(());
         }
-        if let Some(old) = record.checkpoint_id.replace(checkpoint) {
-            record.older_checkpoint_ids.push(old);
-        }
-        self.save(record.clone())?;
+        *record = self.update(&record.bot_id, |current| {
+            if let Some(old) = current.checkpoint_id.replace(checkpoint) {
+                current.older_checkpoint_ids.push(old);
+            }
+        })?;
         self.prune_checkpoints(record).await
     }
 
@@ -2322,13 +2318,9 @@ impl BotManager {
         let Some(index) = order.iter().position(|id| id == restored) else {
             return Ok(());
         };
-        if index == 0 {
-            return Ok(());
-        }
-        let stale: Vec<String> = record.older_checkpoint_ids.drain(..index).collect();
-        lock(&self.registry).add_orphans(&stale)?;
-        self.save(record.clone())?;
-        self.delete_orphans(stale).await
+        let mut stale = self.unrecorded_before(record, restored).await;
+        stale.extend_from_slice(&record.older_checkpoint_ids[..index]);
+        self.prune(record, stale).await
     }
 
     /// Delete every checkpoint older than the newest durable one.
@@ -2342,12 +2334,61 @@ impl BotManager {
                 break;
             }
         }
-        let Some(index) = newest_durable.filter(|index| *index > 0) else {
+        let Some(index) = newest_durable else {
             return Ok(());
         };
-        let stale: Vec<String> = record.older_checkpoint_ids.drain(..index).collect();
+        let mut stale = self.unrecorded_before(record, &oldest_first[index]).await;
+        stale.extend_from_slice(&record.older_checkpoint_ids[..index]);
+        self.prune(record, stale).await
+    }
+
+    /// The bot's durable checkpoints on the platform that are older than
+    /// `kept` and not in the record: the ones an outside pause froze (a
+    /// guest self-pause, or a pause the owner then resumed). Empty when the
+    /// list fails or does not hold `kept` yet.
+    async fn unrecorded_before(&self, record: &BotRecord, kept: &str) -> Vec<String> {
+        let label = bot_label(&record.bot_id);
+        let listed = match retry(|| self.platform.list_checkpoints(&label)).await {
+            Ok(listed) => listed,
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: bot {}: checkpoint list failed ({error}); pruning the recorded ones",
+                    record.bot_id
+                );
+                return Vec::new();
+            }
+        };
+        let Some(kept) = listed
+            .iter()
+            .find(|checkpoint| checkpoint.id == kept)
+            .map(checkpoint_millis)
+        else {
+            return Vec::new();
+        };
+        listed
+            .into_iter()
+            .filter(|checkpoint| {
+                checkpoint.durable
+                    && checkpoint_millis(checkpoint) < kept
+                    && record.checkpoint_id.as_ref() != Some(&checkpoint.id)
+                    && !record.older_checkpoint_ids.contains(&checkpoint.id)
+            })
+            .map(|checkpoint| checkpoint.id)
+            .collect()
+    }
+
+    /// Delete `stale` checkpoints, tracked as orphans until each delete
+    /// succeeds.
+    async fn prune(&self, record: &mut BotRecord, stale: Vec<String>) -> Result<()> {
+        if stale.is_empty() {
+            return Ok(());
+        }
         lock(&self.registry).add_orphans(&stale)?;
-        self.save(record.clone())?;
+        *record = self.update(&record.bot_id, |current| {
+            current
+                .older_checkpoint_ids
+                .retain(|id| !stale.contains(id));
+        })?;
         self.delete_orphans(stale).await
     }
 
@@ -2389,6 +2430,19 @@ impl BotManager {
         };
         let mut checkpoints = record.older_checkpoint_ids;
         checkpoints.extend(record.checkpoint_id);
+        // Outside pauses freeze checkpoints the record never holds.
+        match retry(|| self.platform.list_checkpoints(&label)).await {
+            Ok(listed) => {
+                for checkpoint in listed {
+                    if !checkpoints.contains(&checkpoint.id) {
+                        checkpoints.push(checkpoint.id);
+                    }
+                }
+            }
+            Err(error) => eprintln!(
+                "pa-daemon: bot {bot_id}: checkpoint list failed ({error}); deleting the recorded ones"
+            ),
+        }
         {
             let mut registry = lock(&self.registry);
             registry.add_orphans(&checkpoints)?;
@@ -2398,6 +2452,7 @@ impl BotManager {
         if spawns.remove(bot_id) {
             let _ = write_spawns_marker(&self.agent_dir, &spawns);
         }
+        super::ledger::BotLedger::new(&self.agent_dir, bot_id).delete();
         self.delete_orphans(checkpoints).await
     }
 }
@@ -2643,8 +2698,8 @@ fn checkpoint_millis(checkpoint: &BotCheckpoint) -> u64 {
 
 /// One `list_bots` row of a bot's daemon, as this daemon's record for the
 /// child: the row's facts over an existing record's, the fields the row
-/// does not carry kept from it. `None` for a row without identity, or one
-/// whose bot never provisioned (no sandbox and no checkpoint).
+/// does not carry kept from it. `None` for a row without identity or status
+/// stamps, or one whose bot never provisioned (no sandbox and no checkpoint).
 fn child_record(
     row: &Value,
     parent_bot_id: &str,
@@ -2660,15 +2715,8 @@ fn child_record(
     let existing = existing.unwrap_or_default();
     let field = |key: &str| row.get(key).cloned().unwrap_or(Value::Null);
     let status = serde_json::from_value(field("status")).unwrap_or(BotStatus::Stopped);
-    // An older guest's row has no closed time: keep the registry's, and close
-    // a running interval the row ends.
-    let running_ms = field("closedRunningMs").as_i64().unwrap_or_else(|| {
-        if existing.status == BotStatus::Running && status != BotStatus::Running {
-            existing.running_ms_at(field("statusSince").as_i64().unwrap_or_else(now_ms))
-        } else {
-            existing.running_ms
-        }
-    });
+    let status_since = field("statusSince").as_i64()?;
+    let running_ms = field("closedRunningMs").as_i64()?;
     Some(BotRecord {
         bot_id: bot_id.to_string(),
         name: text("name").unwrap_or_default().to_string(),
@@ -2696,14 +2744,11 @@ fn child_record(
         bots: false,
         parent_bot_id: Some(parent_bot_id.to_string()),
         pause_at: field("pauseAt").as_i64(),
-        // A guest row without the stamp counts from the first merge.
-        status_since: field("statusSince")
-            .as_i64()
-            .or(existing.status_since.filter(|_| existing.status == status))
-            .or_else(|| Some(now_ms())),
+        status_since: Some(status_since),
         // The record adds the open interval from `status_since` itself.
         running_ms,
         pause_token: existing.pause_token,
+        pending_guest: None,
     })
 }
 
@@ -2749,6 +2794,7 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         pause_at: None,
         status_since: None,
         running_ms: 0,
+        pending_guest: None,
     }
 }
 

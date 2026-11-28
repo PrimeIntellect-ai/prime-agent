@@ -24,8 +24,8 @@ use crate::record::{
 };
 use crate::transport::{ReqwestSandboxTransport, SandboxTransport, TransportRequest};
 use crate::types::{
-    HeaderRule, Method, PausedSandbox, Sandbox, SandboxCheckpoint, SandboxStatus, VmCreateRequest,
-    WaitOptions, DEFAULT_REQUEST_TIMEOUT, PRIME_SANDBOX_CREATE_MAX_ATTEMPTS,
+    HeaderRule, Method, PausedSandbox, Sandbox, SandboxCheckpoint, VmCreateRequest,
+    DEFAULT_REQUEST_TIMEOUT, PRIME_SANDBOX_CREATE_MAX_ATTEMPTS,
 };
 use crate::wire::{
     assert_sandbox_id, build_create_body, normalize_base_url, validate_create_request,
@@ -290,7 +290,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     }
 
     /// Request a resume of a paused VM sandbox. It reaches `RUNNING`
-    /// asynchronously; use [`Self::wait_for_running`].
+    /// asynchronously; poll [`Self::get_sandbox`] until it does.
     ///
     /// # Errors
     ///
@@ -360,66 +360,6 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
         .await
     }
 
-    /// Poll a sandbox until it reports `RUNNING`: fail fast with a typed
-    /// `terminal_status` error as soon as the sandbox reaches a terminal
-    /// state (`ERROR`/`TERMINATED`/`TIMEOUT`), and fail with `timeout`
-    /// when the wait budget is exhausted first.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::SandboxErrorCode::TerminalStatus`] with the redacted
-    /// platform error in `details`, or [`crate::SandboxErrorCode::Timeout`] with
-    /// the last observed status in `details`.
-    pub async fn wait_for_running(
-        &self,
-        sandbox_id: &str,
-        options: WaitOptions,
-    ) -> Result<Sandbox, SandboxError> {
-        assert_sandbox_id(sandbox_id)?;
-        if options.timeout.is_zero() || options.poll_interval.is_zero() {
-            return Err(SandboxError::invalid_request(
-                "wait_for_running requires positive timeout and pollInterval",
-            ));
-        }
-        let deadline = Instant::now() + options.timeout;
-        loop {
-            let sandbox = self.get_sandbox(sandbox_id).await?;
-            if sandbox.status == SandboxStatus::Running {
-                return Ok(sandbox);
-            }
-            if sandbox.status.is_terminal() {
-                let joined = [
-                    sandbox.error_type.as_deref(),
-                    sandbox.error_message.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<&str>>()
-                .join(": ");
-                let details = if joined.is_empty() {
-                    None
-                } else {
-                    Some(SandboxError::redact_secrets(
-                        &joined,
-                        &[self.api_key.as_str()],
-                    ))
-                };
-                return Err(SandboxError::terminal_status(format!(
-                    "Sandbox {sandbox_id} reached terminal status {}",
-                    sandbox.status.as_str()
-                ))
-                .with_details(details));
-            }
-            if Instant::now() >= deadline {
-                return Err(SandboxError::timeout(format!(
-                    "Timed out waiting for sandbox {sandbox_id} to become RUNNING"
-                ))
-                .with_details(Some(format!("last status {}", sandbox.status.as_str()))));
-            }
-            tokio::time::sleep(options.poll_interval.min(deadline - Instant::now())).await;
-        }
-    }
-
     pub(crate) fn platform_headers(&self) -> Vec<(String, String)> {
         vec![
             (
@@ -458,7 +398,6 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             headers,
             url: url.clone(),
             body,
-            max_response_bytes: None,
             timeout: Some(timeout),
         };
         // Transport errors already carry the method and url.
@@ -630,7 +569,6 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
                 headers: self.platform_headers(),
                 url: url.clone(),
                 body: None,
-                max_response_bytes: None,
                 timeout: Some(self.request_timeout),
             })
             .await?;
@@ -648,7 +586,8 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     }
 
     /// Poll a checkpoint until it becomes `DURABLE` (fail fast on a
-    /// terminal failure state, `timeout` when the wait budget runs out).
+    /// failure state, `timeout` when the wait budget runs out; any other
+    /// state keeps polling).
     ///
     /// # Errors
     ///
@@ -672,9 +611,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             if checkpoint.is_durable() {
                 return Ok(checkpoint);
             }
-            // The platform freezes the sandbox's disk while snapshotting;
-            // FROZEN is an in-flight state on the way to DURABLE.
-            if checkpoint.state != "PENDING" && checkpoint.state != "FROZEN" {
+            if checkpoint.is_failed() {
                 let details = checkpoint
                     .error
                     .as_deref()

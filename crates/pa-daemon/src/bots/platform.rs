@@ -57,7 +57,8 @@ pub struct BotCreate {
 }
 
 /// What a guest needs to call its model provider without holding a key.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GuestCredentials {
     /// The sandbox's header rules (set at create).
     pub network_rules: BTreeMap<String, HeaderRule>,
@@ -172,6 +173,8 @@ pub trait BotPlatform: Send + Sync {
         value: &'a str,
         description: &'a str,
     ) -> BoxFuture<'a, PlatformResult<()>>;
+    /// Delete the platform secret `name`; a missing one is success.
+    fn delete_secret<'a>(&'a self, name: &'a str) -> BoxFuture<'a, PlatformResult<()>>;
     /// Replace a running or paused sandbox's header rules (a paused one
     /// gets them on resume).
     fn set_network_rules<'a>(
@@ -196,7 +199,8 @@ pub fn bot_status(status: SandboxStatus) -> BotStatus {
 const BOT_CPU_CORES: f64 = 2.0;
 const BOT_MEMORY_GB: f64 = 4.0;
 const BOT_DISK_GB: f64 = 20.0;
-/// Prime's published sandbox rates in USD per hour: the sandbox API carries no price.
+/// Prime's published sandbox rates in USD per hour (the Pricing section of
+/// docs.primeintellect.ai/sandboxes/overview.md): the sandbox API carries no price.
 const USD_PER_CPU_HOUR: f64 = 0.02;
 const USD_PER_MEMORY_GIB_HOUR: f64 = 0.0125;
 const USD_PER_DISK_GIB_HOUR: f64 = 0.0002;
@@ -687,7 +691,7 @@ impl BotPlatform for PrimePlatform {
         reserved_hosts: usize,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
         async move {
-            let provisioned = credentials::provision(
+            let mut provisioned = credentials::provision(
                 &self.client,
                 &self.agent_dir,
                 &self.owner,
@@ -696,6 +700,11 @@ impl BotPlatform for PrimePlatform {
                 reserved_hosts,
             )
             .await;
+            if let Some(error) = provisioned.github_error() {
+                return Err(credential_error(&error.context(
+                    "the platform secrets for GitHub could not be provisioned",
+                )));
+            }
             let auth_json = provisioned.guest_auth();
             let network_rules = match provider {
                 Some(provider) => provisioned
@@ -727,6 +736,24 @@ impl BotPlatform for PrimePlatform {
             credentials::ensure_secret(&self.client, name, value, description)
                 .await
                 .map_err(|error| credential_error(&error))
+        }
+        .boxed()
+    }
+
+    fn delete_secret<'a>(&'a self, name: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            let secrets = self
+                .client
+                .list_secrets()
+                .await
+                .map_err(|error| map_error(&error))?;
+            for secret in secrets.iter().filter(|secret| secret.name == name) {
+                self.client
+                    .delete_secret(&secret.id)
+                    .await
+                    .map_err(|error| map_error(&error))?;
+            }
+            Ok(())
         }
         .boxed()
     }

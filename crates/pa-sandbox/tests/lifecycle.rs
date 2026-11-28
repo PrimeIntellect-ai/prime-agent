@@ -65,7 +65,7 @@ impl SandboxTransport for &ScriptedTransport {
         Ok(StreamedResponse {
             status: response.status,
             headers: Vec::new(),
-            body: ResponseChunks::Queued(std::iter::once(response.body).collect()),
+            body: ResponseChunks::Reqwest(http::Response::new(response.body).into()),
         })
     }
 
@@ -113,7 +113,7 @@ fn network_failure() -> Reply {
     Reply::Failure(pa_sandbox::SandboxError::network("connection reset"))
 }
 
-/// The reference wire record: the full TS-verified field set.
+/// The reference wire record, every field set.
 fn sandbox_wire(status: &str) -> serde_json::Value {
     sandbox_with_id("sb-1", status)
 }
@@ -398,6 +398,8 @@ async fn wait_for_checkpoint_polls_until_durable() {
     let transport = ScriptedTransport::new(vec![
         ok(checkpoint_wire("PENDING")),
         ok(checkpoint_wire("FROZEN")),
+        // A state the client does not know is still in flight.
+        ok(checkpoint_wire("UPLOADING")),
         ok(checkpoint_wire("DURABLE")),
     ]);
     let client = test_client(&transport);
@@ -406,7 +408,7 @@ async fn wait_for_checkpoint_polls_until_durable() {
         .await
         .unwrap();
     assert!(checkpoint.is_durable());
-    assert_eq!(transport.recorded().len(), 3);
+    assert_eq!(transport.recorded().len(), 4);
 }
 
 #[tokio::test]

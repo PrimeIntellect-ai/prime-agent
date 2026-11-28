@@ -1635,6 +1635,7 @@ dependencies = [
  "futures",
  "globset",
  "hmac",
+ "http",
  "nix",
  "pa-agent",
  "pa-ai",
@@ -1698,6 +1699,7 @@ dependencies = [
 name = "pa-sandbox"
 version = "0.10.5"
 dependencies = [
+ "http",
  "pa-ai",
  "reqwest",
  "serde",

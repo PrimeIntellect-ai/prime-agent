@@ -5,7 +5,7 @@
 //! delivers the settled run's final answer and each new guest outbox line
 //! to the owner, once. The owner receives them through the `send_message`
 //! route, like a local child's message. The bot ledger records every delivery before it starts, so a
-//! restart never delivers twice: an interrupted delivery becomes `uncertain`.
+//! restart never delivers twice: an interrupted delivery is never retried.
 //! A bot with no new work for [`PAUSE_GRACE`] and no attached TUI is paused.
 
 use std::collections::HashMap;
@@ -110,7 +110,7 @@ pub(crate) fn settled_answer(
 /// Whether the guest session runs turn work: a turn, compaction, a shell,
 /// tools, children, or queued input. The delivery lane reads it: a
 /// settled turn's answer is deliverable once this is false, even while
-/// background kernel work or a factory run outlives the turn.
+/// background kernel work outlives the turn.
 fn guest_turn_busy_flags(state: &Value) -> bool {
     let flag = |name: &str| state[name].as_bool().unwrap_or(false);
     [
@@ -129,13 +129,11 @@ fn guest_turn_busy_flags(state: &Value) -> bool {
 }
 
 /// Whether the guest session holds off the idle pause: turn work, or
-/// background kernel work or an active factory run that outlives the
-/// settled turn. Only the pause verdict reads it — never the delivery
-/// lane, whose answers must not wait on work the turn already ended
-/// with.
+/// background kernel work that outlives the settled turn. Only the pause
+/// verdict reads it — never the delivery lane, whose answers must not
+/// wait on work the turn already ended with.
 fn guest_pause_busy_flags(state: &Value) -> bool {
-    let flag = |name: &str| state[name].as_bool().unwrap_or(false);
-    guest_turn_busy_flags(state) || ["hasBackgroundKernelWork"].into_iter().any(flag)
+    guest_turn_busy_flags(state) || state["hasBackgroundKernelWork"].as_bool().unwrap_or(false)
 }
 
 /// The guest session's live state over the link.
@@ -175,27 +173,41 @@ impl GuestCommands for GuestClient {
     }
 }
 
+/// The most outbox pages one sync reads.
+pub(crate) const MAX_OUTBOX_PAGES: usize = 4;
+
 /// Room kept in each part for its `[bot answer part i/n]` line.
 const PART_HEADER_CHARS: usize = 40;
+/// The most parts one answer delivers; a longer answer ends with a note.
+pub(crate) const MAX_ANSWER_PARTS: usize = 4;
 
 /// A turn answer as agent messages: whole when it fits one, else split into
-/// numbered parts that each fit. The parts' bodies join to the full answer.
+/// numbered parts that each fit. Up to [`MAX_ANSWER_PARTS`] parts join to
+/// the full answer; a longer answer is cut and ends with a note.
 fn answer_parts(answer: &str) -> Vec<String> {
     let answer = answer.trim();
     if answer.chars().count() <= DEFAULT_AGENT_MESSAGE_MAX_CHARS {
         return vec![answer.to_string()];
     }
     let chars: Vec<char> = answer.chars().collect();
-    let chunks: Vec<String> = chars
+    let chunks: Vec<&[char]> = chars
         .chunks(DEFAULT_AGENT_MESSAGE_MAX_CHARS - PART_HEADER_CHARS)
-        .map(|chunk| chunk.iter().collect())
         .collect();
-    let count = chunks.len();
-    chunks
-        .into_iter()
+    let count = chunks.len().min(MAX_ANSWER_PARTS);
+    let mut parts: Vec<String> = chunks[..count]
+        .iter()
         .enumerate()
-        .map(|(index, chunk)| format!("[bot answer part {}/{count}]\n{chunk}", index + 1))
-        .collect()
+        .map(|(index, chunk)| {
+            let chunk: String = chunk.iter().collect();
+            format!("[bot answer part {}/{count}]\n{chunk}", index + 1)
+        })
+        .collect();
+    if chunks.len() > count {
+        parts.push(format!(
+            "[bot answer cut after {count} parts: ask the bot to write the full answer to a file and copy it with rlm.pull_bot_files]"
+        ));
+    }
+    parts
 }
 
 enum Delivery {
@@ -204,14 +216,14 @@ enum Delivery {
     OutboxLine(u64, u64),
 }
 
-/// Wait until the guest session's turn work settles (background work and
-/// factory runs never delay delivery), then deliver the settled run's
+/// Wait until the guest session's turn work settles (background work
+/// never delays delivery), then deliver the settled run's
 /// answer and each new outbox line once: `sending` (fsynced), deliver, then
 /// `sent`. A run in which the bot messaged its owner has those messages as
 /// its answer; its own final answer is not delivered. Write times of
 /// delivered lines stay in the ledger, so a run that settles after its
-/// message was delivered is still attributed. A delivery that fails, or
-/// that a crash interrupted, is `uncertain` and is never retried. A run
+/// message was delivered is still attributed. A delivery that fails is
+/// `uncertain`; neither it nor one a crash interrupted is retried. A run
 /// with no answer text delivers what `no_answer` gives, read once the run
 /// settled (the error of an expired owner login). Returns the number of settled runs with an
 /// answer (0 or 1).
@@ -256,10 +268,12 @@ where
     };
     let rows = page["messages"].as_array().cloned().unwrap_or_default();
     // The guest answers one page of outbox lines per read, so a backlog
-    // never outgrows one link frame.
+    // never outgrows one link frame. A sync reads at most
+    // [`MAX_OUTBOX_PAGES`] pages and stops at a line that does not move
+    // past the last one; the ledger resumes there on the next sync.
     let mut messages: Vec<RemoteParentEntry> = Vec::new();
     let mut after_seq = last_seq;
-    loop {
+    for _ in 0..MAX_OUTBOX_PAGES {
         let outbox = guest
             .command(&DaemonCommand::ReadRemoteParent {
                 id: None,
@@ -268,13 +282,15 @@ where
             })
             .await?;
         let page: Vec<RemoteParentEntry> = serde_json::from_value(outbox["entries"].clone())?;
-        let Some(last) = page.last() else {
-            break;
-        };
-        after_seq = last.seq;
-        let full = page.len() >= READ_PAGE_LINES;
-        messages.extend(page);
-        if !full {
+        let before = messages.len();
+        for entry in page {
+            if entry.seq <= after_seq {
+                break;
+            }
+            after_seq = entry.seq;
+            messages.push(entry);
+        }
+        if messages.len() - before < READ_PAGE_LINES {
             break;
         }
     }
@@ -481,31 +497,36 @@ impl Supervisor {
                 }
                 let mut failed_pause_steps = 0;
                 let round_again = loop {
-                    match this.pause_step(&bot_id).await {
+                    let error = match this.pause_step(&bot_id).await {
                         Ok(again) => break again,
-                        // The next settled turn tries the pause again.
-                        Err(error) if this.storage_full(&bot_id, &error) => break false,
-                        // An unreachable guest is tried again soon; after that
-                        // the bot is paused anyway, so it does not run unwatched.
-                        Err(error) if failed_pause_steps + 1 < PAUSE_STEP_ATTEMPTS => {
-                            failed_pause_steps += 1;
-                            eprintln!(
-                                "pa-daemon: bots: {bot_id}: pause after settle failed: {error:#}"
-                            );
-                            tokio::time::sleep(SYNC_RETRY).await;
-                        }
+                        Err(error) => error,
+                    };
+                    // The next settled turn tries the pause again.
+                    if this.storage_full(&bot_id, &error).await {
+                        break false;
+                    }
+                    // An unreachable guest is tried again soon; after that
+                    // the bot is paused anyway, so it does not run unwatched.
+                    if failed_pause_steps + 1 < PAUSE_STEP_ATTEMPTS {
+                        failed_pause_steps += 1;
+                        eprintln!(
+                            "pa-daemon: bots: {bot_id}: pause after settle failed: {error:#}"
+                        );
+                        tokio::time::sleep(SYNC_RETRY).await;
+                        continue;
+                    }
+                    eprintln!(
+                        "pa-daemon: bots: {bot_id}: pause after settle failed; pausing anyway: {error:#}"
+                    );
+                    // An attached TUI or a failed pause keeps watching.
+                    match this.pause_unwatched(&bot_id).await {
+                        Ok(again) => break again,
                         Err(error) => {
-                            eprintln!(
-                                "pa-daemon: bots: {bot_id}: pause after settle failed; pausing anyway: {error:#}"
-                            );
-                            // An attached TUI or a failed pause keeps watching.
-                            break this.pause_unwatched(&bot_id).await.unwrap_or_else(|error| {
-                                if this.storage_full(&bot_id, &error) {
-                                    return false;
-                                }
-                                eprintln!("pa-daemon: bots: {bot_id}: pause failed: {error:#}");
-                                true
-                            });
+                            if this.storage_full(&bot_id, &error).await {
+                                break false;
+                            }
+                            eprintln!("pa-daemon: bots: {bot_id}: pause failed: {error:#}");
+                            break true;
                         }
                     }
                 };
@@ -528,21 +549,29 @@ impl Supervisor {
     }
 
     /// Whether `error` is a pause refused because the team's checkpoint
-    /// storage is full. The bot then stays running, with one warning.
-    fn storage_full(&self, bot_id: &str, error: &anyhow::Error) -> bool {
+    /// storage is full. The bot then stays running, and its owner is told.
+    async fn storage_full(self: &Arc<Self>, bot_id: &str, error: &anyhow::Error) -> bool {
         if !matches!(
             error.downcast_ref::<PlatformError>(),
             Some(PlatformError::CheckpointQuota(_))
         ) {
             return false;
         }
-        let name = manager_for(&self.options.agent_dir)
+        let record = manager_for(&self.options.agent_dir)
             .ok()
-            .and_then(|manager| manager.get(bot_id))
-            .map_or_else(|| bot_id.to_string(), |record| record.name);
+            .and_then(|manager| manager.get(bot_id));
+        let name = record
+            .as_ref()
+            .map_or(bot_id, |record| record.name.as_str());
         eprintln!(
             "pa-daemon: bots: bot {name} stays running: the team's checkpoint storage is full; delete old checkpoints to allow pause"
         );
+        if let Some(record) = &record {
+            let note = "This bot cannot pause and keeps running: the team's checkpoint storage is full. Delete old checkpoints or delete the bot.";
+            if let Err(error) = self.deliver_to_owner(record, note).await {
+                eprintln!("pa-daemon: bots: bot {name}: the storage note did not reach the owner: {error:#}");
+            }
+        }
         true
     }
 
@@ -773,8 +802,8 @@ pub(crate) enum PauseVerdict {
 
 /// The decision at the end of the grace period after a settled turn.
 /// `quiet` answers whether no send arrived and no TUI is attached.
-/// Background kernel work and factory runs hold the pause here even
-/// though the turn's answer was already delivered.
+/// Background kernel work holds the pause here even though the turn's
+/// answer was already delivered.
 pub(crate) async fn pause_verdict<G: GuestCommands>(
     guest: &mut G,
     session: &str,

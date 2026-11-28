@@ -1,7 +1,7 @@
 //! The guest's provider credentials. A bot sandbox never holds a real
 //! key: each provider the home auth storage holds an API key for is stored
-//! once as a platform secret (`PRIME_AGENT_<PROVIDER>_KEY_<FINGERPRINT>`; a
-//! rotated key gets a new secret), and the
+//! as a platform secret per Prime account (`PRIME_AGENT_<PROVIDER>_KEY_<OWNER>`;
+//! a rotated key updates its value, so running bots follow it), and the
 //! sandbox's network policy has the platform set it in that provider's
 //! auth header on the sandbox's HTTPS requests, outside the sandbox. The
 //! guest sends [`GUEST_API_KEY_PLACEHOLDER`], which the platform replaces.
@@ -9,7 +9,7 @@
 //! Subscription logins are injected by [`super::logins`]. The plan in
 //! [`super::secrets`] decides which keys reach a bot.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -80,14 +80,15 @@ pub const PLATFORM_CA_PATH: &str = "/mnt/sandboxd/platform-ca.pem";
 /// A secret's scope: the platform origin, the team, and the secret name.
 type SecretScope = (String, Option<String>, String);
 
-/// The secrets confirmed on the platform in this process: provisioning
-/// runs once per process and scope. The lock is held across a whole
-/// provisioning, so concurrent spawns never list and create the same
-/// secret twice.
-static CONFIRMED: LazyLock<tokio::sync::Mutex<BTreeSet<SecretScope>>> =
+/// The secrets confirmed on the platform in this process, with the
+/// fingerprint of the value last confirmed: provisioning runs once per
+/// process and scope. The lock is held across a whole provisioning, so
+/// concurrent spawns never list and create the same secret twice.
+static CONFIRMED: LazyLock<tokio::sync::Mutex<BTreeMap<SecretScope, String>>> =
     LazyLock::new(Default::default);
 
-/// The platform secret that holds `provider`'s key.
+/// The prefix of the platform secret that holds `provider`'s key; the
+/// Prime account's fingerprint completes it.
 fn secret_name(provider: &str) -> String {
     let id: String = provider
         .chars()
@@ -102,8 +103,8 @@ fn secret_name(provider: &str) -> String {
     format!("PRIME_AGENT_{id}_KEY")
 }
 
-/// A short id of `key` for its secret name: a rotated key gets a new
-/// secret. The key is the MAC key over a fixed label, never hashed data.
+/// A short id of `key`: never the key itself. The key is the MAC key over
+/// a fixed label, never hashed data.
 pub(super) fn key_fingerprint(key: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC takes any key length");
@@ -118,8 +119,7 @@ pub(super) fn key_fingerprint(key: &str) -> String {
 }
 
 /// Make the platform secret `name` hold `value`: update it when it
-/// exists, else create it. A refused create lists again, because another
-/// process may have created it meanwhile.
+/// exists, else create it.
 ///
 /// # Errors
 /// Returns an error when the list, the create, or the update fails.
@@ -129,20 +129,45 @@ pub async fn ensure_secret<T: SandboxTransport>(
     value: &str,
     description: &str,
 ) -> anyhow::Result<()> {
-    let find = |secrets: Vec<pa_sandbox::PlatformSecret>| {
-        secrets
-            .into_iter()
-            .find(|secret| secret.name == name)
-            .map(|secret| secret.id)
+    write_secret(client, name, value, description, false, &mut None).await
+}
+
+/// Make the platform secret `name` exist with `value`: created when
+/// `listed` (secret ids by name; one list serves a whole provisioning)
+/// does not hold it, else updated unless `held` says it already has this
+/// value. A refused create lists again: another process may have created
+/// it meanwhile.
+async fn write_secret<T: SandboxTransport>(
+    client: &PrimeSandboxClient<T>,
+    name: &str,
+    value: &str,
+    description: &str,
+    held: bool,
+    listed: &mut Option<BTreeMap<String, String>>,
+) -> anyhow::Result<()> {
+    let mut ids = match listed.take() {
+        Some(ids) => ids,
+        None => secret_ids(client).await?,
     };
-    let id = match find(client.list_secrets().await?) {
-        Some(id) => id,
-        None => match client.create_secret(name, value, Some(description)).await {
-            Ok(_) => return Ok(()),
-            Err(error) => find(client.list_secrets().await?).ok_or(error)?,
-        },
-    };
-    client.update_secret(&id, value).await?;
+    if !ids.contains_key(name) {
+        match client.create_secret(name, value, Some(description)).await {
+            Ok(created) => {
+                ids.insert(created.name, created.id);
+                *listed = Some(ids);
+                return Ok(());
+            }
+            Err(error) => {
+                ids = secret_ids(client).await?;
+                if !ids.contains_key(name) {
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+    if !held {
+        client.update_secret(&ids[name], value).await?;
+    }
+    *listed = Some(ids);
     Ok(())
 }
 
@@ -206,8 +231,13 @@ fn provider_rules(provider: &str, secret: &str) -> BTreeMap<String, HeaderRule> 
 
 /// The stored API keys (or the environment key of `required`) as plan
 /// candidates: `required` first, then prime-inference. OAuth logins and
-/// keys with no injectable API host are left out.
-pub(super) fn api_key_candidates(auth: &mut AuthStorage, required: Option<&str>) -> Vec<Candidate> {
+/// keys with no injectable API host are left out. `owner` names the
+/// secrets, so teammates' keys never share one in the team scope.
+pub(super) fn api_key_candidates(
+    auth: &mut AuthStorage,
+    owner: &str,
+    required: Option<&str>,
+) -> Vec<Candidate> {
     let stored = auth.get_all();
     let mut providers = auth.list();
     providers.retain(|provider| {
@@ -231,7 +261,7 @@ pub(super) fn api_key_candidates(auth: &mut AuthStorage, required: Option<&str>)
         let Some(key) = injectable_key(auth, &stored, &provider) else {
             continue;
         };
-        let secret = format!("{}_{}", secret_name(&provider), key_fingerprint(&key));
+        let secret = format!("{}_{owner}", secret_name(&provider));
         let rules = provider_rules(&provider, &secret);
         if rules.is_empty() {
             continue;
@@ -302,6 +332,16 @@ impl Provisioned {
         guest_auth_json(&self.providers, self.prime_team.as_ref())
     }
 
+    /// The GitHub secrets' write error, if they failed: a bot with GitHub
+    /// on must not start without it.
+    pub fn github_error(&mut self) -> Option<anyhow::Error> {
+        let index = self
+            .failed
+            .iter()
+            .position(|(name, _)| name == super::github::GITHUB_AUTH_ID)?;
+        Some(self.failed.remove(index).1)
+    }
+
     /// The network rules for a guest whose provider is not an API key
     /// here (a subscription login). Failed keys are logged.
     #[must_use]
@@ -364,10 +404,9 @@ fn pass_another_model() -> String {
 
 /// Make sure the platform holds the secrets of every candidate the plan
 /// gives a bot (with GitHub when `github`; `provider` is its provider when
-/// it uses an API key), and
-/// collect their rules. `owner` names the GitHub secrets. The secrets live
-/// in the client's team, the scope its sandboxes bill to, which a header
-/// rule's secret must share. `reserved_hosts` rule hosts are left for the
+/// it uses an API key), and collect their rules. `owner` names the API key
+/// and GitHub secrets. The secrets live in the client's team, the scope its
+/// sandboxes bill to, which a header rule's secret must share. `reserved_hosts` rule hosts are left for the
 /// bot's logins.
 pub async fn provision<T: SandboxTransport>(
     client: &PrimeSandboxClient<T>,
@@ -440,16 +479,8 @@ pub async fn provision<T: SandboxTransport>(
     if let (Some(lock), Some(planned_token)) = (github_lock, planned_github_token) {
         let recheck =
             super::github::recheck_provisioned_token(client, &agent_dir, &planned_token).await;
-        // A stale-reclaimed lock means a clear may have run while this
-        // provisioning wrote: a wedged holder must not outlive its lock
-        // silently. Treat the takeover like a failed recheck.
-        let stolen = !lock.owns();
         drop(lock);
-        let failure = recheck.err().or_else(|| {
-            stolen
-                .then(|| anyhow::anyhow!("the bots github lock was taken over while provisioning"))
-        });
-        if let Some(error) = failure {
+        if let Err(error) = recheck {
             // The secrets may still hold a token the machine no longer
             // resolves, and the cleanup could not prove otherwise: this bot
             // runs without the rules that would send it, never with a token
@@ -509,19 +540,20 @@ async fn provision_planned<T: SandboxTransport>(
                 secret.clone(),
             );
             let description = format!("Prime Agent bot {} credential", candidate.name);
-            let result = if candidate.kind.stable_names() {
-                // Stable names: the value may have changed since the last check.
-                listed = None;
-                ensure_secret(client, secret, value, &description).await
-            } else if confirmed.contains(&scoped) && candidate.kind != SecretKind::Custom {
-                // `/secrets` can delete a custom secret, so it is listed every time.
+            let fingerprint = key_fingerprint(value);
+            let held = confirmed.get(&scoped) == Some(&fingerprint);
+            let result = if held && candidate.kind == SecretKind::ApiKey {
                 Ok(())
+            } else if candidate.kind.stable_names() {
+                // Stable names: the value may have changed since the last check.
+                write_secret(client, secret, value, &description, held, &mut listed).await
             } else {
-                confirm_secret(client, secret, value, &description, &mut listed).await
+                // `/secrets` can delete a custom secret, so it is listed every time.
+                write_secret(client, secret, value, &description, true, &mut listed).await
             };
             match result {
                 Ok(()) => {
-                    confirmed.insert(scoped);
+                    confirmed.insert(scoped, fingerprint);
                 }
                 Err(error) => {
                     outcome = Err(error);
@@ -542,41 +574,14 @@ async fn provision_planned<T: SandboxTransport>(
     provisioned
 }
 
-/// Confirm one fingerprinted secret on the platform: listed (one list
-/// serves every candidate), else created. A refused create lists again:
-/// another process may have created it meanwhile.
-async fn confirm_secret<T: SandboxTransport>(
+async fn secret_ids<T: SandboxTransport>(
     client: &PrimeSandboxClient<T>,
-    secret: &str,
-    value: &str,
-    description: &str,
-    listed: &mut Option<BTreeSet<String>>,
-) -> anyhow::Result<()> {
-    let mut names = match listed.take() {
-        Some(names) => names,
-        None => secret_names(client).await?,
-    };
-    if !names.contains(secret) {
-        if let Err(error) = client.create_secret(secret, value, Some(description)).await {
-            names = secret_names(client).await?;
-            if !names.contains(secret) {
-                return Err(error.into());
-            }
-        }
-        names.insert(secret.to_string());
-    }
-    *listed = Some(names);
-    Ok(())
-}
-
-async fn secret_names<T: SandboxTransport>(
-    client: &PrimeSandboxClient<T>,
-) -> anyhow::Result<BTreeSet<String>> {
+) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(client
         .list_secrets()
         .await?
         .into_iter()
-        .map(|secret| secret.name)
+        .map(|secret| (secret.name, secret.id))
         .collect())
 }
 
@@ -759,8 +764,11 @@ mod tests {
     /// host (serper) are not.
     #[test]
     fn only_stored_api_keys_with_an_api_host_are_injected() {
-        let injected =
-            api_key_candidates(&mut auth(&home_auth()), Some(PRIME_INFERENCE_PROVIDER_ID));
+        let injected = api_key_candidates(
+            &mut auth(&home_auth()),
+            "OWNER",
+            Some(PRIME_INFERENCE_PROVIDER_ID),
+        );
         let summary: Vec<(&str, &str)> = injected
             .iter()
             .map(|candidate| (candidate.name.as_str(), candidate.secrets[0].1.as_str()))
@@ -769,15 +777,22 @@ mod tests {
             summary,
             [("prime-inference", "sk-prime"), ("google", "sk-google")]
         );
-        // A rotated key gets a new secret.
-        assert!(injected[1].secrets[0]
-            .0
-            .starts_with("PRIME_AGENT_GOOGLE_KEY_"));
-        let rotated = api_key_candidates(
-            &mut auth(&json!({ "google": { "type": "api_key", "key": "sk-google-2" } })),
-            Some("google"),
+        // A rotated key keeps its secret, so the rules naming it follow
+        // the new value; a teammate's key gets its own secret.
+        assert_eq!(injected[1].secrets[0].0, "PRIME_AGENT_GOOGLE_KEY_OWNER");
+        let rotated = |owner| {
+            api_key_candidates(
+                &mut auth(&json!({ "google": { "type": "api_key", "key": "sk-google-2" } })),
+                owner,
+                Some("google"),
+            )
+        };
+        assert_eq!(rotated("OWNER")[0].secrets[0].0, injected[1].secrets[0].0);
+        assert_eq!(rotated("OWNER")[0].rules, injected[1].rules);
+        assert_ne!(
+            rotated("TEAMMATE")[0].secrets[0].0,
+            injected[1].secrets[0].0
         );
-        assert_ne!(rotated[0].secrets[0].0, injected[1].secrets[0].0);
 
         let keyed = api_key_candidates(
             &mut auth(&json!({
@@ -786,6 +801,7 @@ mod tests {
                 "anthropic": { "type": "api_key", "key": "sk-ant-api" },
                 "prime-inference": { "type": "api_key", "key": "" },
             })),
+            "OWNER",
             Some(PRIME_INFERENCE_PROVIDER_ID),
         );
         let providers: Vec<&str> = keyed
@@ -796,7 +812,7 @@ mod tests {
 
         // `bots.inject` off keeps a key home, even for the bot's own provider.
         let off = super::super::secrets::plan(
-            api_key_candidates(&mut auth(&home_auth()), Some("google")),
+            api_key_candidates(&mut auth(&home_auth()), "OWNER", Some("google")),
             |provider| provider != "google",
             super::super::secrets::MAX_RULE_HOSTS,
         );
@@ -900,7 +916,7 @@ mod tests {
             std::future::ready(Ok(StreamedResponse {
                 status: 500,
                 headers: Vec::new(),
-                body: ResponseChunks::Queued(VecDeque::new()),
+                body: ResponseChunks::Reqwest(http::Response::new(Vec::<u8>::new()).into()),
             }))
         }
     }
@@ -913,14 +929,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         super::super::github::store_token(dir.path(), "ghp_first").unwrap();
         let platform = Platform::default();
-        // ensure_secret lists and creates both secrets (a create answer
-        // names the created secret); the second create clears the stored
-        // token; the recheck then lists them and refuses the first delete.
+        // One list, then both secrets are created (a create answer names
+        // the created secret); the second create clears the stored token;
+        // the recheck then lists them and refuses the first delete.
         let created = |name: &str| json!({ "data": { "id": format!("id-{name}"), "name": name } });
         platform.answers.lock().unwrap().extend([
             json!({ "data": [] }),
             created("PRIME_AGENT_GITHUB_OWNER"),
-            json!({ "data": [] }),
             created("PRIME_AGENT_GITHUB_OWNER_BASIC"),
             json!({ "data": [
                 { "id": "id-1", "name": "PRIME_AGENT_GITHUB_OWNER" },
@@ -975,5 +990,45 @@ mod tests {
             "the GitHub hosts are dropped: {rules:?}"
         );
         assert!(rules.is_empty(), "GitHub was the only candidate");
+    }
+
+    /// A provisioning with an unchanged GitHub token lists once and writes
+    /// nothing: the platform already holds both values.
+    #[tokio::test]
+    async fn an_unchanged_github_token_is_not_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::github::store_token(dir.path(), "ghp_same").unwrap();
+        let platform = Platform::default();
+        platform.answers.lock().unwrap().push_back(json!({ "data": [
+            { "id": "id-1", "name": "PRIME_AGENT_GITHUB_OWNER" },
+            { "id": "id-2", "name": "PRIME_AGENT_GITHUB_OWNER_BASIC" },
+        ] }));
+        let client = PrimeSandboxClient::with_transport(
+            &platform,
+            "prime-key",
+            ClientOptions {
+                base_url: "https://api.unchanged.test".to_string(),
+                team_id: None,
+                request_timeout: None,
+                allow_insecure_localhost: false,
+            },
+        )
+        .unwrap();
+        let methods = || -> Vec<String> {
+            platform
+                .requests
+                .lock()
+                .unwrap()
+                .drain(..)
+                .map(|request| request.method.as_str().to_string())
+                .collect()
+        };
+
+        let first = provision(&client, dir.path(), "OWNER", None, true, 0).await;
+        assert!(first.rules().contains_key("api.github.com"));
+        assert_eq!(methods(), ["GET", "PATCH", "PATCH"]);
+        let second = provision(&client, dir.path(), "OWNER", None, true, 0).await;
+        assert!(second.rules().contains_key("api.github.com"));
+        assert_eq!(methods(), ["GET"]);
     }
 }

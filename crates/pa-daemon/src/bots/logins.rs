@@ -20,14 +20,15 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use base64::Engine as _;
 use pa_core::auth::{
-    AuthCredential, AuthStorage, ANTHROPIC_PROVIDER_ID, GITHUB_COPILOT_PROVIDER_ID,
-    OPENAI_CODEX_PROVIDER_ID, XAI_PROVIDER_ID,
+    AuthCredential, AuthStorage, AuthStorageData, ANTHROPIC_PROVIDER_ID,
+    GITHUB_COPILOT_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID, XAI_PROVIDER_ID,
 };
 use pa_sandbox::HeaderRule;
 use serde_json::Value;
 
 use super::credentials::{key_fingerprint, GUEST_API_KEY_PLACEHOLDER};
 use super::platform::BotPlatform;
+use super::secrets::MAX_SECRET_BYTES;
 
 /// The subscription logins a bot can use.
 pub const LOGIN_PROVIDERS: [&str; 4] = [
@@ -43,8 +44,6 @@ const REFRESH_MARGIN_MS: i64 = 10 * 60 * 1000;
 pub const REFRESH_TICK: Duration = Duration::from_secs(60);
 /// The guest's expiry (2100-01-01): the guest never refreshes.
 const GUEST_EXPIRES_MS: i64 = 4_102_444_800_000;
-/// The platform's limit on one secret value.
-const MAX_SECRET_BYTES: usize = 16 * 1024;
 /// The auth storage prefix of MCP server logins.
 pub const MCP_PREFIX: &str = "mcp:";
 
@@ -84,6 +83,11 @@ pub fn secret_name(provider: &str, owner: &str) -> String {
         return format!("PRIME_AGENT_LOGIN_{id}_{hash}_{owner}");
     }
     format!("PRIME_AGENT_LOGIN_{id}_{owner}")
+}
+
+/// The Codex account-id secret beside the access-token secret `name`.
+fn account_secret_name(name: &str) -> String {
+    format!("{name}_ACCOUNT")
 }
 
 fn secret_ref(name: &str) -> String {
@@ -175,7 +179,7 @@ pub fn injection(
         ),
         OPENAI_CODEX_PROVIDER_ID => {
             let account = account_id.clone().filter(|account| !account.is_empty())?;
-            let account_secret = format!("{name}_ACCOUNT");
+            let account_secret = account_secret_name(&name);
             let rules = rule(
                 "chatgpt.com",
                 &[
@@ -427,6 +431,63 @@ fn user_mcp_servers(agent_dir: &Path) -> HashMap<String, pa_core::mcp::McpServer
         .collect()
 }
 
+/// The logins bots can get, in plan order: the stored subscription
+/// logins, then the MCP server logins with an endpoint, less the
+/// user-declared servers set to `enabled: false`. `bots.inject.<login>`
+/// applies on top. Blocking: it reads the settings.
+#[must_use]
+pub fn bot_logins(stored: &AuthStorageData, agent_dir: &Path) -> Vec<String> {
+    let subscriptions = LOGIN_PROVIDERS.into_iter().filter(|provider| {
+        matches!(
+            stored.credential(provider),
+            Some(AuthCredential::Oauth { .. })
+        )
+    });
+    let mcp: Vec<String> = stored
+        .0
+        .keys()
+        .filter(|provider| {
+            provider.starts_with(MCP_PREFIX)
+                && matches!(
+                    stored.credential(provider),
+                    Some(
+                        AuthCredential::Oauth {
+                            endpoint: Some(_),
+                            ..
+                        } | AuthCredential::McpStaticToken {
+                            endpoint: Some(_),
+                            ..
+                        }
+                    )
+                )
+        })
+        .cloned()
+        .collect();
+    let user_servers = if mcp.is_empty() {
+        HashMap::new()
+    } else {
+        user_mcp_servers(agent_dir)
+    };
+    let enabled = |login: &String| {
+        !login
+            .strip_prefix(MCP_PREFIX)
+            .and_then(|server| user_servers.get(server))
+            .is_some_and(|config| {
+                matches!(
+                    config,
+                    pa_core::mcp::McpServerConfig::Http {
+                        enabled: Some(false),
+                        ..
+                    }
+                )
+            })
+    };
+    subscriptions
+        .map(str::to_string)
+        .chain(mcp.into_iter().filter(enabled))
+        .collect()
+}
+
 /// The guest's entry for a user-declared HTTP server, bound to the login's
 /// endpoint. It carries no headers, token variables, or client secret.
 fn guest_mcp_server(config: &pa_core::mcp::McpServerConfig, endpoint: &str) -> Option<Value> {
@@ -481,38 +542,18 @@ impl Logins {
         }
     }
 
-    /// The logins this Mac holds, each with whether bots get it
-    /// (`bots.inject.<provider>`, on by default): the subscription logins,
-    /// then the MCP server logins with an endpoint.
+    /// The logins bots can get ([`bot_logins`]), each with whether
+    /// `bots.inject.<provider>` is on (the default).
     async fn stored(&self) -> Vec<(String, bool)> {
         let (auth, agent_dir) = (Arc::clone(&self.auth), self.agent_dir.clone());
         tokio::task::spawn_blocking(move || {
-            let stored = auth("").get_all();
             let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
-            let subscriptions = LOGIN_PROVIDERS.into_iter().filter(|provider| {
-                matches!(
-                    stored.credential(provider),
-                    Some(AuthCredential::Oauth { .. })
-                )
-            });
-            let mcp = stored.0.keys().filter(|provider| {
-                provider.starts_with(MCP_PREFIX)
-                    && matches!(
-                        stored.credential(provider),
-                        Some(
-                            AuthCredential::Oauth {
-                                endpoint: Some(_),
-                                ..
-                            } | AuthCredential::McpStaticToken {
-                                endpoint: Some(_),
-                                ..
-                            }
-                        )
-                    )
-            });
-            subscriptions
-                .chain(mcp.map(String::as_str))
-                .map(|provider| (provider.to_string(), settings.get_bots_inject(provider)))
+            bot_logins(&auth("").get_all(), &agent_dir)
+                .into_iter()
+                .map(|login| {
+                    let inject = settings.get_bots_inject(&login);
+                    (login, inject)
+                })
                 .collect()
         })
         .await
@@ -548,20 +589,7 @@ impl Logins {
         let (user_servers, connections) = user_servers;
         for (login, inject) in stored {
             let required = login == provider;
-            // A user-declared MCP server with `enabled: false` stays off in the bot.
-            let disabled = login
-                .strip_prefix(MCP_PREFIX)
-                .and_then(|server| user_servers.get(server))
-                .is_some_and(|config| {
-                    matches!(
-                        config,
-                        pa_core::mcp::McpServerConfig::Http {
-                            enabled: Some(false),
-                            ..
-                        }
-                    )
-                });
-            if !inject || disabled {
+            if !inject {
                 if required {
                     bail!(
                         "a bot on {provider} needs the owner's {provider} login, \
@@ -647,11 +675,23 @@ impl Logins {
                 credential
             }
             Login::Expired => {
-                let mut state = lock(&self.state);
-                state.stale.insert(provider.to_string());
-                state.expired.insert(provider.to_string());
-                drop(state);
+                {
+                    let mut state = lock(&self.state);
+                    state.stale.insert(provider.to_string());
+                    state.expired.insert(provider.to_string());
+                }
                 self.warn_once(provider, "it expired; log in again on the Mac");
+                // A logged-out token (an MCP static token never expires)
+                // must not stay on the platform for the rules that name it.
+                let name = secret_name(provider, self.platform.owner());
+                let mut names = vec![name.clone()];
+                if provider == OPENAI_CODEX_PROVIDER_ID {
+                    names.push(account_secret_name(&name));
+                }
+                for name in names {
+                    self.platform.delete_secret(&name).await?;
+                    lock(&self.state).pushed.remove(&name);
+                }
                 return Ok(None);
             }
         };
@@ -940,6 +980,71 @@ mod tests {
             "the owner's anthropic login expired; log in again on the Mac"
         );
         assert_eq!(platform.state().secret_puts, 1);
+    }
+
+    #[tokio::test]
+    async fn a_logout_deletes_the_login_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = Arc::new(FakePlatform::default());
+        let refresh = Arc::new(ScriptedRefresh::default());
+        write_auth(
+            dir.path(),
+            "anthropic",
+            &login("a-1", "r-1", now_ms() + 480 * MINUTE),
+        );
+        let logins = logins(dir.path(), &platform, &refresh);
+        let providers = BTreeSet::from(["anthropic".to_string()]);
+        logins.tick(&providers).await;
+        let name = secret_name("anthropic", "OWNER");
+        assert_eq!(platform.state().secrets[&name], "a-1");
+
+        std::fs::write(dir.path().join("auth.json"), "{}").unwrap();
+        logins.tick(&providers).await;
+        assert!(!platform.state().secrets.contains_key(&name));
+
+        // A new login puts the secret back.
+        write_auth(
+            dir.path(),
+            "anthropic",
+            &login("a-1", "r-1", now_ms() + 480 * MINUTE),
+        );
+        logins.tick(&providers).await;
+        assert_eq!(platform.state().secrets[&name], "a-1");
+    }
+
+    #[tokio::test]
+    async fn a_resumed_bot_finds_its_refreshed_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = Arc::new(FakePlatform::default());
+        let refresh = Arc::new(ScriptedRefresh::default());
+        write_auth(
+            dir.path(),
+            "anthropic",
+            &login("a-1", "r-1", now_ms() + 480 * MINUTE),
+        );
+        let manager = BotManager::with_logins(
+            dir.path(),
+            Arc::clone(&platform) as Arc<dyn BotPlatform>,
+            logins(dir.path(), &platform, &refresh),
+        )
+        .unwrap();
+        let mut bot = spec("bot-resume");
+        bot.model = Some("anthropic/claude-sonnet-4-5".into());
+        let record = manager.spawn(&bot).await.unwrap();
+        manager.pause(&record.bot_id).await.unwrap();
+
+        // The token is due when the bot wakes.
+        write_auth(
+            dir.path(),
+            "anthropic",
+            &login("a-1", "r-1", now_ms() + 5 * MINUTE),
+        );
+        *refresh.0.lock().unwrap() = Some(login("a-2", "r-2", now_ms() + 480 * MINUTE));
+        manager.ensure_running(&record.bot_id).await.unwrap();
+        let state = platform.state();
+        let name = secret_name("anthropic", "OWNER");
+        assert_eq!(state.secrets_at_resume.len(), 1);
+        assert_eq!(state.secrets_at_resume[0][&name], "a-2");
     }
 
     #[tokio::test]

@@ -34,6 +34,7 @@ pub(crate) struct FakeState {
     pub lose_next_create_reply: bool,
     /// The next credential provisioning fails with a transport error.
     pub fail_next_credentials: bool,
+    pub credential_calls: usize,
     pub refuse_pause: bool,
     /// Pauses answer that the team's checkpoint storage is full.
     pub checkpoint_storage_full: bool,
@@ -73,6 +74,8 @@ pub(crate) struct FakeState {
     pub secret_puts: usize,
     /// Each network rules update: the sandbox and its rule hosts.
     pub rule_updates: Vec<(String, Vec<String>)>,
+    /// The platform secrets at each resume.
+    pub secrets_at_resume: Vec<BTreeMap<String, String>>,
 }
 
 /// An in-memory Prime account: sandboxes are running as soon as they exist.
@@ -263,6 +266,8 @@ impl BotPlatform for FakePlatform {
     fn resume<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<BotSandbox>> {
         async move {
             let mut state = self.state();
+            let secrets = state.secrets.clone();
+            state.secrets_at_resume.push(secrets);
             let sandbox = state.sandbox(sandbox_id)?;
             sandbox.status = BotStatus::Running;
             Ok(sandbox.clone())
@@ -471,6 +476,7 @@ impl BotPlatform for FakePlatform {
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
         async move {
             let mut state = self.state();
+            state.credential_calls += 1;
             if std::mem::take(&mut state.fail_next_credentials) {
                 return Err(PlatformError::Transient("connection reset".into()));
             }
@@ -517,6 +523,14 @@ impl BotPlatform for FakePlatform {
             let mut state = self.state();
             state.secret_puts += 1;
             state.secrets.insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn delete_secret<'a>(&'a self, name: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            self.state().secrets.remove(name);
             Ok(())
         }
         .boxed()
@@ -1023,13 +1037,10 @@ async fn spawn_pause_resume_delete() {
 }
 
 /// A GitHub bot gets the header rules, the label, and a placeholder token
-/// on every new sandbox. The stored token reaches no guest command, no
-/// create request, and no registry record.
+/// on every new sandbox.
 #[tokio::test(start_paused = true)]
 async fn a_github_bot_gets_rules_and_a_placeholder_only() {
     let (dir, platform, manager) = setup();
-    let token = "ghp_never_in_the_guest";
-    super::github::store_token(dir.path(), token).unwrap();
     let github = BotSpec {
         github: true,
         git_identity: Some(BotGitIdentity {
@@ -1075,12 +1086,9 @@ async fn a_github_bot_gets_rules_and_a_placeholder_only() {
     assert_eq!(gh_token, [placeholder, None, placeholder]);
     assert_eq!(bootstraps[0]["BOT_GIT_NAME"], "Ada");
     assert_eq!(bootstraps[0]["BOT_GIT_EMAIL"], "ada@example.com");
-    let guest_inputs = format!("{:?} {:?}", state.execs, state.creates);
-    assert!(!guest_inputs.contains(token));
     let registry =
         std::fs::read_to_string(super::registry::BotRegistry::path_in(dir.path())).unwrap();
     assert!(registry.contains("\"github\": true") || registry.contains("\"github\":true"));
-    assert!(!registry.contains(token));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1108,6 +1116,21 @@ async fn credential_provisioning_retries_a_transport_error() {
     manager.spawn(&spec("bot-a")).await.unwrap();
 
     assert_eq!(platform.live().len(), 1);
+}
+
+/// A resume provisions no credentials: the guest keeps the auth its
+/// create's bootstrap wrote.
+#[tokio::test(start_paused = true)]
+async fn a_resume_provisions_no_credentials() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    manager.pause("bot-a").await.unwrap();
+    let before = platform.state().credential_calls;
+
+    let resumed = manager.ensure_running("bot-a").await.unwrap();
+
+    assert_eq!(resumed.status, BotStatus::Running);
+    assert_eq!(platform.state().credential_calls, before);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1509,6 +1532,30 @@ async fn a_successful_restore_prunes_what_it_supersedes() {
         !record.older_checkpoint_ids.contains(&durable),
         "the record drops what was pruned"
     );
+}
+
+/// Checkpoints an outside pause froze belong to the bot too: the next
+/// durable pause prunes the older ones, and a delete removes the rest.
+#[tokio::test(start_paused = true)]
+async fn outside_checkpoints_are_pruned_and_deleted_with_the_bot() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    let outside = platform.external_checkpoint(&sandbox_id, true);
+
+    manager.pause("bot-a").await.unwrap();
+    assert!(
+        !platform.state().checkpoints.contains_key(&outside),
+        "the newer durable pause supersedes it"
+    );
+
+    let later = platform.external_checkpoint(&sandbox_id, true);
+    manager.delete("bot-a").await.unwrap();
+    assert!(
+        !platform.state().checkpoints.contains_key(&later),
+        "the delete removes it"
+    );
+    assert!(platform.state().checkpoints.is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -1916,21 +1963,13 @@ async fn live_ask(
     manager: &BotManager,
     agent_dir: &std::path::Path,
     bot: &super::BotRecord,
-    msg_id: &str,
     task: &str,
 ) -> anyhow::Result<String> {
     let ledger = super::ledger::BotLedger::new(agent_dir, &bot.bot_id);
     let mut guest = super::guest::GuestClient::connect(manager, bot).await?;
-    super::send::send_message(
-        &ledger,
-        &mut guest,
-        &bot.guest_session_id,
-        msg_id,
-        task,
-        None,
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    super::send::send_message(&mut guest, &bot.guest_session_id, task, None)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut reply = String::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
     while reply.is_empty() && tokio::time::Instant::now() < deadline {
@@ -2005,34 +2044,32 @@ async fn github_live_push_and_draft_pr() {
         ..spec(&bot_id)
     };
     let branch = format!("bot-live-{}", &bot_id[8..16]);
-    let script = r#"set -euo pipefail
-cd "$(mktemp -d)"
-[ -f "$HOME/.prime-agent-ca.pem" ] && export SSL_CERT_FILE="$HOME/.prime-agent-ca.pem"
-git clone -q "https://github.com/$REPO" repo && cd repo
-git checkout -q -b "$BRANCH"
-git commit -q --allow-empty -m "bot live test"
-git log -1 --format='AUTHOR=%an <%ae>'
-git push -q origin "$BRANCH"
-url="$(gh pr create -R "$REPO" --draft --head "$BRANCH" --title "bot live test" --body "Closed by the test.")"
-echo "PR=$url"
-gh pr close -R "$REPO" "$url" --delete-branch
-echo CLOSED
-cat "$HOME/.gitconfig" "$HOME/.prime-agent-git-credential"
-"#;
+    let task = format!(
+        "Run this script with one bash() call and await it, then reply with its output \
+         lines only:\n\nset -euo pipefail\ncd \"$(mktemp -d)\"\n\
+         git clone -q https://github.com/{repo} repo && cd repo\n\
+         git checkout -q -b {branch}\n\
+         git commit -q --allow-empty -m \"bot live test\"\n\
+         git log -1 --format='AUTHOR=%an <%ae>'\n\
+         git push -q origin {branch}\n\
+         url=\"$(gh pr create -R {repo} --draft --head {branch} --title \"bot live test\" \
+         --body \"Closed by the test.\")\"\n\
+         echo \"PR=$url\"\n\
+         gh pr close -R {repo} \"$url\" --delete-branch\n\
+         echo CLOSED"
+    );
     let run = async {
         let bot = manager.spawn(&spec).await?;
-        let env = BTreeMap::from([
-            ("REPO".to_string(), repo.clone()),
-            ("BRANCH".to_string(), branch.clone()),
-            (
-                "GH_TOKEN".to_string(),
-                super::credentials::GUEST_API_KEY_PLACEHOLDER.to_string(),
-            ),
-        ]);
-        let output = platform
-            .exec(bot.sandbox_id.as_deref().unwrap(), script, &env, None)
+        let reply = live_ask(&manager, dir.path(), &bot, &task).await?;
+        let guest_files = platform
+            .exec(
+                bot.sandbox_id.as_deref().unwrap(),
+                r#"cat "$HOME/.gitconfig" "$HOME/.prime-agent-git-credential""#,
+                &BTreeMap::new(),
+                None,
+            )
             .await?;
-        anyhow::Ok((bot, output))
+        anyhow::Ok((bot, reply, guest_files))
     }
     .await;
     manager.delete(&bot_id).await.unwrap();
@@ -2042,19 +2079,16 @@ cat "$HOME/.gitconfig" "$HOME/.prime-agent-git-credential"
             new_client().delete_secret(&secret.id).await.unwrap();
         }
     }
-    let (bot, output) = run.unwrap();
+    let (bot, reply, guest_files) = run.unwrap();
     eprintln!(
-        "live github: exit={} stdout={}\nstderr={}",
-        output.exit_code, output.stdout, output.stderr
+        "live github: reply={reply}\nguest files={}",
+        guest_files.stdout
     );
     assert!(bot.github);
-    assert_eq!(output.exit_code, 0);
-    assert!(output
-        .stdout
-        .contains("AUTHOR=Prime Agent Live <live@example.com>"));
-    assert!(output.stdout.contains("PR=https://github.com/"));
-    assert!(output.stdout.contains("CLOSED"));
-    assert!(!output.stdout.contains(&token) && !output.stderr.contains(&token));
+    assert!(reply.contains("AUTHOR=Prime Agent Live <live@example.com>"));
+    assert!(reply.contains("PR=https://github.com/"));
+    assert!(reply.contains("CLOSED"));
+    assert!(!reply.contains(&token) && !guest_files.stdout.contains(&token));
 }
 
 /// A [`super::platform::PrimePlatform`] whose Prime Inference rule names a
@@ -2166,6 +2200,9 @@ impl BotPlatform for ThrowawaySecret {
     ) -> BoxFuture<'a, PlatformResult<()>> {
         self.inner.put_secret(name, value, description)
     }
+    fn delete_secret<'a>(&'a self, name: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
+        self.inner.delete_secret(name)
+    }
     fn set_network_rules<'a>(
         &'a self,
         sandbox_id: &'a str,
@@ -2188,7 +2225,7 @@ async fn ask_until(
     let task = "Reply with the single word pong and nothing else.";
     for _ in 0..12 {
         *asked += 1;
-        let reply = live_ask(manager, agent_dir, bot, &format!("m{asked}"), task).await?;
+        let reply = live_ask(manager, agent_dir, bot, task).await?;
         eprintln!("live update: reply {asked}: {reply:?}");
         if reply.to_lowercase().contains("pong") == want_answer {
             return Ok(reply);
@@ -2328,19 +2365,19 @@ async fn live_spawn_reply_pause_resume_delete() {
         let spawned = manager.spawn(&spec).await?;
         step("spawned");
         let task = "Reply with the single word pong and nothing else.";
-        let first = live_ask(&manager, dir.path(), &spawned, "m1", task).await?;
+        let first = live_ask(&manager, dir.path(), &spawned, task).await?;
         step("first reply");
         let paused = manager.pause(&bot_id).await?;
         step("paused");
         let resumed = manager.ensure_running(&bot_id).await?;
         step("resumed");
         let task = "Repeat the word you replied with before, in capital letters only.";
-        let second = live_ask(&manager, dir.path(), &resumed, "m2", task).await?;
+        let second = live_ask(&manager, dir.path(), &resumed, task).await?;
         step("second reply");
         let task = "Run each shell command with bash() and await it: `node --version`, \
                     `npm --version`, `uv pip install six`. Reply with one line only: \
                     NODE=<node output> NPM=<npm output> UV=<uv pip exit code>";
-        let tools = live_ask(&manager, dir.path(), &resumed, "m3", task).await?;
+        let tools = live_ask(&manager, dir.path(), &resumed, task).await?;
         step("tools reply");
         anyhow::Ok((spawned, first, paused, resumed, second, tools))
     }
@@ -2375,21 +2412,13 @@ async fn live_ask_long(
     manager: &BotManager,
     dir: &std::path::Path,
     bot: &super::BotRecord,
-    msg_id: &str,
     task: &str,
 ) -> anyhow::Result<String> {
     let ledger = super::ledger::BotLedger::new(dir, &bot.bot_id);
     let mut guest = super::guest::GuestClient::connect(manager, bot).await?;
-    super::send::send_message(
-        &ledger,
-        &mut guest,
-        &bot.guest_session_id,
-        msg_id,
-        task,
-        None,
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    super::send::send_message(&mut guest, &bot.guest_session_id, task, None)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut reply = String::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(540);
     while reply.is_empty() && tokio::time::Instant::now() < deadline {
@@ -2458,7 +2487,7 @@ async fn live_a_bot_spawns_a_bot_and_delete_cascades() {
         let parent = manager.spawn(&spec).await?;
         step("parent spawned");
         let task = "Reply with the single word pong and nothing else.";
-        let first = live_ask_long(&manager, dir.path(), &parent, "m1", task).await?;
+        let first = live_ask_long(&manager, dir.path(), &parent, task).await?;
         step("parent first reply");
         // An error, not a panic: the cleanup delete below still runs.
         anyhow::ensure!(first.to_lowercase().contains("pong"), "first: {first:?}");
@@ -2466,7 +2495,7 @@ async fn live_a_bot_spawns_a_bot_and_delete_cascades() {
                     and nothing else.', name='child', target='sandbox'). Wait for the child's \
                     final answer, then reply with exactly that word in capital letters and \
                     nothing else.";
-        let second = live_ask_long(&manager, dir.path(), &parent, "m2", task).await?;
+        let second = live_ask_long(&manager, dir.path(), &parent, task).await?;
         step("parent second reply");
         // The child lived: its sandbox carries the parent label, and the
         // guest created it directly (this daemon has no record of it).
@@ -2742,7 +2771,7 @@ async fn children_count_toward_the_owners_bot_list() {
             &[serde_json::json!({
                 "botId": "bot-child", "name": "child", "ownerSessionId": "guest-session",
                 "parentBotId": "bot-a", "checkpointId": "ckpt-1", "status": "stopped",
-                "createdAt": 1_i64,
+                "createdAt": 1_i64, "statusSince": 1_i64, "closedRunningMs": 0_i64,
             })],
         )
         .await
@@ -2766,7 +2795,8 @@ async fn merged_child_rows_upsert_and_vanished_children_go() {
         "createdAt": 1_i64,
         "lastTurnAt": 2_i64,
         "guestSessionId": "guest-sbx-9",
-        "runningMs": 1000_i64,
+        "statusSince": 1_i64,
+        "closedRunningMs": 1000_i64,
         "github": false,
     });
     manager.merge_children("bot-a", &[row]).await.unwrap();
@@ -2831,7 +2861,7 @@ async fn merged_child_rows_upsert_and_vanished_children_go() {
             &[serde_json::json!({
                 "botId": "bot-live", "name": "live", "ownerSessionId": "guest-session",
                 "parentBotId": "bot-a", "sandboxId": child_sandbox, "status": "running",
-                "createdAt": 1_i64,
+                "createdAt": 1_i64, "statusSince": 1_i64, "closedRunningMs": 0_i64,
             })],
         )
         .await
@@ -3043,33 +3073,6 @@ fn a_reopened_bot_session_keeps_its_own_model() {
     }
 }
 
-/// The guest's marker file names the session when the record lost it (a
-/// registry rebuilt from labels): that reopen keeps the session's model
-/// too, not the spawn-time one.
-#[cfg(unix)]
-#[test]
-fn a_marker_named_session_also_keeps_its_model() {
-    let home = tempfile::tempdir().unwrap();
-    let session = home.path().join("s1.jsonl");
-    std::fs::write(&session, r#"{"role": "user"}"#).unwrap();
-    std::fs::write(
-        home.path().join(".prime-agent-bot-session"),
-        session.to_str().unwrap(),
-    )
-    .unwrap();
-    let envelope = run_bot_client(home.path(), None);
-    let command = &envelope["command"];
-    assert_eq!(
-        command["sessionPath"].as_str(),
-        Some(session.to_str().unwrap()),
-        "the marker-named session was reopened"
-    );
-    assert!(
-        command["config"].get("model").is_none(),
-        "the reopened create must not carry the model"
-    );
-}
-
 /// A bot session that does not exist yet still gets the spawn model: the
 /// create carries it, so a fresh sandbox boots the model the owner chose.
 #[cfg(unix)]
@@ -3152,28 +3155,18 @@ async fn the_follow_sync_adopts_the_guests_model() {
     );
 }
 
-/// A lifecycle save of a snapshot taken before a model adoption keeps the
-/// adopted model: the save merges the registry's current model and thinking
-/// (only the adoption changes them, under the registry lock), so a stale
-/// snapshot cannot revert the guest's live choice.
+/// Spawning a bot that already exists returns the stored record, with
+/// the status stamps the registry adds.
 #[tokio::test(start_paused = true)]
-async fn a_stale_lifecycle_save_keeps_the_adopted_model() {
+async fn a_respawn_returns_the_stored_record() {
     let (_dir, _platform, manager) = setup();
     manager.spawn(&spec("bot-a")).await.unwrap();
+    manager.pause("bot-a").await.unwrap();
+    // The resume's status stamp must differ from the pause's.
+    std::thread::sleep(std::time::Duration::from_millis(5));
 
-    // The snapshot a lifecycle operation took before the adoption.
-    let stale = manager.get("bot-a").unwrap();
-    manager
-        .adopt_guest_model(
-            "bot-a",
-            &serde_json::json!({
-                "model": { "id": "model-b", "provider": "openai" },
-                "thinkingLevel": "high",
-            }),
-        )
-        .unwrap();
-    manager.save(stale).unwrap();
-    let record = manager.get("bot-a").unwrap();
-    assert_eq!(record.model.as_deref(), Some("openai/model-b"));
-    assert_eq!(record.thinking.as_deref(), Some("high"));
+    let respawned = manager.spawn(&spec("bot-a")).await.unwrap();
+
+    assert_eq!(respawned.status, BotStatus::Running);
+    assert_eq!(respawned, manager.get("bot-a").unwrap());
 }

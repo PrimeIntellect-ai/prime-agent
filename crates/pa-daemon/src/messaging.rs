@@ -161,7 +161,7 @@ impl Supervisor {
 
     /// Deliver one owner message to a bot: start the bot if it is paused,
     /// open its link, and send a normal `send_message` to the bot
-    /// session through the ledger. Only the bot's owner (or a client) may
+    /// session. Only the bot's owner (or a client) may
     /// send. The receipt names the bot, not the guest's own ids.
     async fn send_message_to_bot(
         self: &Arc<Self>,
@@ -190,14 +190,11 @@ impl Supervisor {
         };
         Self::touch_bot(&bot.bot_id);
         let msg_id = format!("agentmsg_{}", uuid::Uuid::new_v4());
-        let ledger = crate::bots::ledger::BotLedger::new(agent_dir, &bot.bot_id);
+        let began = std::sync::atomic::AtomicBool::new(false);
         // One deadline for wake, link, and send, inside the worker's wait:
         // the worker never gives up on a send that still runs here.
-        let sent = crate::bots::send::send_within(
-            &ledger,
-            &msg_id,
-            crate::bots::commands::BOT_DEADLINE,
-            async {
+        let sent =
+            crate::bots::send::send_within(&began, crate::bots::commands::BOT_DEADLINE, async {
                 let record = manager.ensure_running(&bot.bot_id).await.map_err(|error| {
                     SendError::NotDelivered(error.context("the bot could not start"))
                 })?;
@@ -209,19 +206,17 @@ impl Supervisor {
                     .map_err(|error| {
                         SendError::NotDelivered(error.context("the bot is unreachable"))
                     })?;
+                began.store(true, std::sync::atomic::Ordering::SeqCst);
                 let receipt = crate::bots::send::send_message(
-                    &ledger,
                     &mut client,
                     &record.guest_session_id,
-                    &msg_id,
                     message,
                     delivery_mode,
                 )
                 .await?;
                 Ok((record, receipt))
-            },
-        )
-        .await;
+            })
+            .await;
         // Follow even after a failed send: a bot the send resumed then still
         // gets its reply delivered and its pause re-armed.
         self.follow_bot(&bot.bot_id);
