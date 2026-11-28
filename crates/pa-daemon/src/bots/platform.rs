@@ -226,6 +226,17 @@ pub fn bot_hourly_usd_estimate(cpu: Option<u32>, memory_gb: Option<u32>) -> f64 
         + memory_gb.map_or(BOT_MEMORY_GB, f64::from) * USD_PER_MEMORY_GIB_HOUR
         + BOT_DISK_GB * USD_PER_DISK_GIB_HOUR
 }
+/// The vCPU count a spawn without `cpu` gets: the size the caps compare
+/// an omitted request against.
+#[must_use]
+pub(crate) fn default_cpu_cores() -> u32 {
+    BOT_CPU_CORES as u32
+}
+/// The memory in GB a spawn without `memory_gb` gets.
+#[must_use]
+pub(crate) fn default_memory_gb() -> u32 {
+    BOT_MEMORY_GB as u32
+}
 const CHECKPOINT_WAIT: Duration = Duration::from_mins(10);
 const CHECKPOINT_POLL: Duration = Duration::from_secs(2);
 /// How long a streamed guest process may take to start.

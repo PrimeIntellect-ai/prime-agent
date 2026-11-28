@@ -190,6 +190,10 @@ pub fn bot_row(
         // An estimate from the bot's size and Prime's published rates.
         "costUsd": running_ms as f64 / 3_600_000.0
             * super::platform::bot_hourly_usd_estimate(record.cpu, record.memory_gb),
+        // The bot's size, so a parent daemon merges a nested child's
+        // record with the size it runs at.
+        "cpu": record.cpu,
+        "memoryGb": record.memory_gb,
     })
 }
 
@@ -953,6 +957,10 @@ mod tests {
         sized.cpu = Some(4);
         sized.memory_gb = Some(8);
         manager.spawn(&sized).await.unwrap();
+        // `running_ms` reads the wall clock, so seed a measurable
+        // interval: a pause in the spawn's own millisecond would price
+        // the bot at a valid zero.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         pause_bot(&manager, "bot-a").await.unwrap();
         let record = manager.get("bot-a").unwrap();
         let row = bot_row(&record, false, &[], false);
@@ -962,6 +970,7 @@ mod tests {
 
         // An omitted size prices at the default estimate.
         manager.spawn(&spec("bot-b")).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
         pause_bot(&manager, "bot-b").await.unwrap();
         let record = manager.get("bot-b").unwrap();
         let row = bot_row(&record, false, &[], false);

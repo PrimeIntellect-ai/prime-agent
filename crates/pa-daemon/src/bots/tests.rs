@@ -1242,6 +1242,29 @@ async fn duplicates_are_deleted_and_lost_records_rebuilt() {
     assert_eq!(record.sandbox_id, None);
 }
 
+/// A registry rebuilt from labels recovers a sized spawn's size: the
+/// size labels the create wrote survive the lost registry file, so the
+/// rebuild prices the bot and recreates its sandbox at the same size.
+#[tokio::test(start_paused = true)]
+async fn a_rebuilt_record_recovers_the_size_from_labels() {
+    let (dir, platform, manager) = setup();
+    let owner = saved_session(dir.path(), "owner");
+    let mut sized = spec("bot-a");
+    sized.owner_session_id = owner;
+    sized.cpu = Some(8);
+    sized.memory_gb = Some(16);
+    manager.spawn(&sized).await.unwrap();
+
+    // The registry file is lost; the sandbox lives on.
+    std::fs::remove_file(super::registry::BotRegistry::path_in(dir.path())).unwrap();
+    let reloaded =
+        BotManager::new(dir.path(), Arc::clone(&platform) as Arc<dyn BotPlatform>).unwrap();
+    reloaded.reconcile_on_boot().await.unwrap();
+    let record = reloaded.get("bot-a").unwrap();
+    assert_eq!(record.cpu, Some(8), "the rebuild keeps the size");
+    assert_eq!(record.memory_gb, Some(16), "the rebuild keeps the size");
+}
+
 /// A labeled bot of another agent dir on the same team: its owner label
 /// names a session this agent dir never held. Boot reconcile must leave it
 /// alone: no adoption, no pause, no delete. The supervisor's post-reconcile
@@ -1364,6 +1387,9 @@ async fn a_spawn_size_reaches_the_create_and_survives_a_restore() {
     let first = platform.state().creates[0].clone();
     assert_eq!(first.cpu, Some(8));
     assert_eq!(first.memory_gb, Some(16));
+    // The size rides the sandbox's labels, so a lost registry recovers it.
+    assert!(first.labels.contains(&super::cpu_label(8)));
+    assert!(first.labels.contains(&super::memory_label(16)));
 
     // An omitted size stays the small default on its own create.
     manager.spawn(&spec("bot-b")).await.unwrap();
@@ -1423,6 +1449,87 @@ async fn a_spawn_above_the_size_caps_is_refused() {
     within.memory_gb = Some(8);
     manager.spawn(&within).await.unwrap();
     assert_eq!(platform.state().creates.len(), 1);
+}
+
+/// A cap below the small default refuses an omitted size too: the
+/// default is the size the sandbox would run at.
+#[tokio::test(start_paused = true)]
+async fn a_cap_below_the_default_refuses_an_omitted_size() {
+    let (dir, platform, manager) = setup();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({ "bots": { "maxCpu": 1 } }).to_string(),
+    )
+    .unwrap();
+    let error = manager.spawn(&spec("bot-a")).await.unwrap_err();
+    assert!(
+        error.to_string().contains("cpu=2 exceeds bots.maxCpu 1"),
+        "{error}"
+    );
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({ "bots": { "maxMemoryGb": 2 } }).to_string(),
+    )
+    .unwrap();
+    let error = manager.spawn(&spec("bot-b")).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("memory_gb=4 exceeds bots.maxMemoryGb 2"),
+        "{error}"
+    );
+    assert!(platform.state().creates.is_empty(), "nothing provisioned");
+
+    // An explicit size within the caps still spawns.
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({ "bots": { "maxCpu": 1, "maxMemoryGb": 2 } }).to_string(),
+    )
+    .unwrap();
+    let mut within = spec("bot-c");
+    within.cpu = Some(1);
+    within.memory_gb = Some(2);
+    manager.spawn(&within).await.unwrap();
+    assert_eq!(platform.state().creates.len(), 1);
+}
+
+/// Inside a bot, the owner's caps ride the nested context: the guest's
+/// own settings never widen them.
+#[tokio::test(start_paused = true)]
+async fn a_nested_bot_enforces_the_owners_size_caps() {
+    let (dir, platform, manager) = setup();
+    // The guest's own settings would allow anything.
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({ "bots": { "maxCpu": 32, "maxMemoryGb": 64 } }).to_string(),
+    )
+    .unwrap();
+    nested_context(dir.path(), "bot-a", "owner-9");
+    guest_auth(dir.path());
+    // The owner's caps ride the context, tighter than the guest's settings.
+    let context_path = super::nested::NestedContext::path_in(dir.path());
+    let mut context: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&context_path).unwrap()).unwrap();
+    context["maxCpu"] = serde_json::json!(4);
+    context["maxMemoryGb"] = serde_json::json!(8);
+    std::fs::write(&context_path, context.to_string()).unwrap();
+    let mut over = spec("bot-b");
+    over.cpu = Some(8);
+    let error = manager.spawn(&over).await.unwrap_err();
+    assert!(error.to_string().contains("bots.maxCpu 4"), "{error}");
+    let mut over = spec("bot-c");
+    over.memory_gb = Some(16);
+    let error = manager.spawn(&over).await.unwrap_err();
+    assert!(error.to_string().contains("bots.maxMemoryGb 8"), "{error}");
+    assert!(platform.state().creates.is_empty(), "nothing provisioned");
+
+    // Within the owner's caps, the nested spawn goes through.
+    let mut within = spec("bot-d");
+    within.cpu = Some(4);
+    within.memory_gb = Some(8);
+    let spawned = manager.spawn(&within).await.unwrap();
+    assert_eq!(spawned.cpu, Some(4));
+    assert_eq!(spawned.memory_gb, Some(8));
 }
 
 #[tokio::test(start_paused = true)]
@@ -2708,6 +2815,8 @@ fn nested_context(dir: &std::path::Path, bot_id: &str, owner: &str) {
         owner_session_id: owner.to_string(),
         depth: 1,
         max_bots: 10,
+        max_cpu: 16,
+        max_memory_gb: 32,
         network_rules: BTreeMap::from([
             (
                 super::credentials::sandbox_api_host(),
@@ -2763,6 +2872,11 @@ fn guest_auth(dir: &std::path::Path) {
 async fn a_bot_that_spawns_bots_gets_the_sandbox_api_rule_and_context() {
     let (dir, platform, manager) = setup();
     guest_auth(dir.path());
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({ "bots": { "maxCpu": 6, "maxMemoryGb": 12 } }).to_string(),
+    )
+    .unwrap();
     let mut bot = spec("bot-a");
     bot.bots = true;
     let spawned = manager.spawn(&bot).await.unwrap();
@@ -2814,6 +2928,9 @@ async fn a_bot_that_spawns_bots_gets_the_sandbox_api_rule_and_context() {
     assert_eq!(context.bot_id, "bot-a");
     assert_eq!(context.owner_session_id, "owner-1");
     assert_eq!(context.depth, 1);
+    // The owner's size caps ride the context, so the guest enforces them.
+    assert_eq!(context.max_cpu, 6);
+    assert_eq!(context.max_memory_gb, 12);
     assert!(context
         .network_rules
         .contains_key(&super::credentials::sandbox_api_host()));
@@ -3027,6 +3144,51 @@ async fn merged_child_rows_upsert_and_vanished_children_go() {
             .is_some_and(|sandbox| !sandbox.status.is_terminal()),
         "its sandbox was not deleted"
     );
+}
+
+/// A merged child row carries the child's size, so the parent's registry
+/// prices the nested bot and recreates it at the size it runs at. An
+/// older guest's row without sizes keeps what the registry holds.
+#[tokio::test(start_paused = true)]
+async fn merged_child_rows_carry_the_childs_size() {
+    let (_dir, _platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let row = serde_json::json!({
+        "botId": "bot-c",
+        "name": "helper",
+        "ownerSessionId": "guest-session",
+        "sandboxId": "sbx-9",
+        "status": "running",
+        "createdAt": 1_i64,
+        "lastTurnAt": 2_i64,
+        "guestSessionId": "guest-sbx-9",
+        "runningMs": 1000_i64,
+        "github": false,
+        "cpu": 8,
+        "memoryGb": 16,
+    });
+    manager.merge_children("bot-a", &[row]).await.unwrap();
+    let merged = manager.get("bot-c").expect("the child merged");
+    assert_eq!(merged.cpu, Some(8));
+    assert_eq!(merged.memory_gb, Some(16));
+
+    // An older guest's row carries no sizes: the registry keeps its own.
+    let row = serde_json::json!({
+        "botId": "bot-c",
+        "name": "helper",
+        "ownerSessionId": "guest-session",
+        "sandboxId": "sbx-9",
+        "status": "running",
+        "createdAt": 1_i64,
+        "lastTurnAt": 2_i64,
+        "guestSessionId": "guest-sbx-9",
+        "runningMs": 1000_i64,
+        "github": false,
+    });
+    manager.merge_children("bot-a", &[row]).await.unwrap();
+    let merged = manager.get("bot-c").expect("the child stays");
+    assert_eq!(merged.cpu, Some(8));
+    assert_eq!(merged.memory_gb, Some(16));
 }
 
 /// Deleting a bot deletes its descendants first: the registry's children

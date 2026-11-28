@@ -25,7 +25,7 @@ The `prime sandbox` CLI is the human and admin path only. A bot sandbox has the 
 
 A bot has no shared path with this machine. Its owner copies files out with `await rlm.pull_bot_files(bot, path, dest=".")`: the daemon streams a tar archive of `path` from the bot and unpacks it under `dest`, inside the owner's working directory. A paused bot is resumed for the pull. An archive over 256 MiB fails; nothing is cut. Only files and directories are copied, and an existing file is never replaced.
 
-A bot's sandbox has a size. `rlm.spawn(..., target="sandbox", cpu=8, memory_gb=16)` asks for 8 vCPU and 16 GB of memory. Omitted sizes keep the small defaults (2 vCPU, 4 GB). The daemon refuses a size above `bots.maxCpu` (default 16) or `bots.maxMemoryGb` (default 32) in `settings.json`, before it creates anything. A bot keeps its recorded size: a checkpoint restore recreates its sandbox at the size it ran.
+A bot's sandbox has a size. `rlm.spawn(..., target="sandbox", cpu=8, memory_gb=16)` asks for 8 vCPU and 16 GB of memory. Omitted sizes keep the small defaults (2 vCPU, 4 GB). The daemon refuses a size above `bots.maxCpu` (default 16) or `bots.maxMemoryGb` (default 32) in `settings.json`, before it creates anything; the defaults count as sizes too. A bot keeps its recorded size: a checkpoint restore recreates its sandbox at the size it ran, and a registry rebuilt from the sandbox's labels recovers it. A bot that spawns bots enforces the owner's caps on its children.
 
 ## What it shows
 
