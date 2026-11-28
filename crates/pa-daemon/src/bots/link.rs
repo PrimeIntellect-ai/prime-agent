@@ -125,9 +125,6 @@ impl BotManager {
     }
 }
 
-/// How long a link that closed before the hello waits to learn how the relay ended.
-const RELAY_END_WAIT: Duration = Duration::from_secs(5);
-
 /// Read the hello line, check the version, and put the line back in front
 /// of the read half. A relay that ends first names its exit code and stderr.
 async fn handshake<R, W>(
@@ -149,10 +146,9 @@ where
         anyhow::bail!("the bot's daemon hello is longer than {MAX_HELLO_BYTES} bytes");
     }
     if read == 0 {
-        let relay = match tokio::time::timeout(RELAY_END_WAIT, ended).await {
-            Ok(Ok(relay)) => relay,
-            Ok(Err(_)) | Err(_) => "its end is unknown".to_string(),
-        };
+        let relay = ended
+            .await
+            .unwrap_or_else(|_| "its end is unknown".to_string());
         anyhow::bail!("the bot closed the link before its daemon said hello (relay: {relay})");
     }
     let hello: Value = serde_json::from_str(&line)

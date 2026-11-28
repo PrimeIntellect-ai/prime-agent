@@ -481,31 +481,36 @@ impl Supervisor {
                 }
                 let mut failed_pause_steps = 0;
                 let round_again = loop {
-                    match this.pause_step(&bot_id).await {
+                    let error = match this.pause_step(&bot_id).await {
                         Ok(again) => break again,
-                        // The next settled turn tries the pause again.
-                        Err(error) if this.storage_full(&bot_id, &error) => break false,
-                        // An unreachable guest is tried again soon; after that
-                        // the bot is paused anyway, so it does not run unwatched.
-                        Err(error) if failed_pause_steps + 1 < PAUSE_STEP_ATTEMPTS => {
-                            failed_pause_steps += 1;
-                            eprintln!(
-                                "pa-daemon: bots: {bot_id}: pause after settle failed: {error:#}"
-                            );
-                            tokio::time::sleep(SYNC_RETRY).await;
-                        }
+                        Err(error) => error,
+                    };
+                    // The next settled turn tries the pause again.
+                    if this.storage_full(&bot_id, &error).await {
+                        break false;
+                    }
+                    // An unreachable guest is tried again soon; after that
+                    // the bot is paused anyway, so it does not run unwatched.
+                    if failed_pause_steps + 1 < PAUSE_STEP_ATTEMPTS {
+                        failed_pause_steps += 1;
+                        eprintln!(
+                            "pa-daemon: bots: {bot_id}: pause after settle failed: {error:#}"
+                        );
+                        tokio::time::sleep(SYNC_RETRY).await;
+                        continue;
+                    }
+                    eprintln!(
+                        "pa-daemon: bots: {bot_id}: pause after settle failed; pausing anyway: {error:#}"
+                    );
+                    // An attached TUI or a failed pause keeps watching.
+                    match this.pause_unwatched(&bot_id).await {
+                        Ok(again) => break again,
                         Err(error) => {
-                            eprintln!(
-                                "pa-daemon: bots: {bot_id}: pause after settle failed; pausing anyway: {error:#}"
-                            );
-                            // An attached TUI or a failed pause keeps watching.
-                            break this.pause_unwatched(&bot_id).await.unwrap_or_else(|error| {
-                                if this.storage_full(&bot_id, &error) {
-                                    return false;
-                                }
-                                eprintln!("pa-daemon: bots: {bot_id}: pause failed: {error:#}");
-                                true
-                            });
+                            if this.storage_full(&bot_id, &error).await {
+                                break false;
+                            }
+                            eprintln!("pa-daemon: bots: {bot_id}: pause failed: {error:#}");
+                            break true;
                         }
                     }
                 };
@@ -528,21 +533,29 @@ impl Supervisor {
     }
 
     /// Whether `error` is a pause refused because the team's checkpoint
-    /// storage is full. The bot then stays running, with one warning.
-    fn storage_full(&self, bot_id: &str, error: &anyhow::Error) -> bool {
+    /// storage is full. The bot then stays running, and its owner is told.
+    async fn storage_full(self: &Arc<Self>, bot_id: &str, error: &anyhow::Error) -> bool {
         if !matches!(
             error.downcast_ref::<PlatformError>(),
             Some(PlatformError::CheckpointQuota(_))
         ) {
             return false;
         }
-        let name = manager_for(&self.options.agent_dir)
+        let record = manager_for(&self.options.agent_dir)
             .ok()
-            .and_then(|manager| manager.get(bot_id))
-            .map_or_else(|| bot_id.to_string(), |record| record.name);
+            .and_then(|manager| manager.get(bot_id));
+        let name = record
+            .as_ref()
+            .map_or(bot_id, |record| record.name.as_str());
         eprintln!(
             "pa-daemon: bots: bot {name} stays running: the team's checkpoint storage is full; delete old checkpoints to allow pause"
         );
+        if let Some(record) = &record {
+            let note = "This bot cannot pause and keeps running: the team's checkpoint storage is full. Delete old checkpoints or delete the bot.";
+            if let Err(error) = self.deliver_to_owner(record, note).await {
+                eprintln!("pa-daemon: bots: bot {name}: the storage note did not reach the owner: {error:#}");
+            }
+        }
         true
     }
 
