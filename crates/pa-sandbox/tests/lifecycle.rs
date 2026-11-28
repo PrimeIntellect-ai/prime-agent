@@ -176,6 +176,7 @@ fn create_request() -> VmCreateRequest {
         labels: vec!["prime-agent-bot".to_string()],
         idempotency_key: None,
         checkpoint_id: None,
+        restore_memory: None,
     }
 }
 
@@ -228,6 +229,109 @@ async fn create_reuses_the_idempotency_key_across_transient_retries() {
         body_of(&recorded[0])["idempotency_key"],
         json!("bot-1-gen-0")
     );
+}
+
+#[tokio::test]
+async fn a_conflict_preserves_the_server_detail() {
+    // A pause checkpoint's refusal of a disk-only restore is permanent:
+    // the message must carry the server's reason, not just call the
+    // conflict transient.
+    let transport = ScriptedTransport::new(vec![status_reply(
+        409,
+        json!({"detail": "A pause checkpoint restores only with its memory: set restore_memory (CLI: --memory), or restore a regular checkpoint"}),
+    )]);
+    let client = test_client(&transport);
+    let error = client
+        .create_vm_sandbox(&create_request())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), SandboxErrorCode::Conflict);
+    let message = error.to_string();
+    assert!(
+        message.contains("restore_memory"),
+        "the conflict message names the server's reason: {message}"
+    );
+    assert!(message.contains("A pause checkpoint restores only with its memory"));
+
+    // A conflict without a detail keeps the generic message.
+    let transport = ScriptedTransport::new(vec![status_reply(409, json!({}))]);
+    let client = test_client(&transport);
+    let error = client
+        .create_vm_sandbox(&create_request())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), SandboxErrorCode::Conflict);
+    assert_eq!(
+        error.to_string(),
+        "Sandbox create returned a conflict (HTTP 409); this is typically transient"
+    );
+}
+
+#[tokio::test]
+async fn restore_memory_serializes_in_the_create_body() {
+    let transport = ScriptedTransport::new(vec![ok(sandbox_wire("PENDING"))]);
+    let client = test_client(&transport);
+    let mut request = create_request();
+    request.docker_image = String::new();
+    request.disk_size_gb = 0.0;
+    request.checkpoint_id = Some("ckpt-1".to_string());
+    request.restore_memory = Some(true);
+    client.create_vm_sandbox(&request).await.unwrap();
+    let body = body_of(&transport.recorded()[0]);
+    assert_eq!(body["checkpoint_id"], json!("ckpt-1"));
+    assert_eq!(body["restore_memory"], json!(true));
+    assert!(body.get("docker_image").is_none());
+
+    // Omitted stays off the wire, and an explicit false goes as false.
+    let transport = ScriptedTransport::new(vec![ok(sandbox_wire("PENDING"))]);
+    let client = test_client(&transport);
+    request.restore_memory = None;
+    client.create_vm_sandbox(&request).await.unwrap();
+    assert!(body_of(&transport.recorded()[0])
+        .get("restore_memory")
+        .is_none());
+    let transport = ScriptedTransport::new(vec![ok(sandbox_wire("PENDING"))]);
+    let client = test_client(&transport);
+    request.restore_memory = Some(false);
+    client.create_vm_sandbox(&request).await.unwrap();
+    assert_eq!(
+        body_of(&transport.recorded()[0])["restore_memory"],
+        json!(false)
+    );
+
+    // It is a checkpoint-restore option: without a checkpoint the request
+    // fails local validation and nothing is sent.
+    let transport = ScriptedTransport::new(vec![]);
+    let client = test_client(&transport);
+    let mut request = create_request();
+    request.restore_memory = Some(true);
+    let error = client.create_vm_sandbox(&request).await.unwrap_err();
+    assert_eq!(error.code(), SandboxErrorCode::InvalidRequest);
+    assert!(transport.recorded().is_empty());
+}
+
+#[tokio::test]
+async fn checkpoints_parse_has_memory() {
+    let transport = ScriptedTransport::new(vec![ok(json!({
+        "checkpoints": [
+            checkpoint_with_id("ckpt-1", "DURABLE", "2026-09-29T00:00:00Z"),
+            {
+                "id": "ckpt-2", "sandbox_id": "sb-1", "state": "DURABLE",
+                "depth": 1, "docker_image": "prime-agent:test",
+                "has_memory": true,
+                "created_at": "2026-09-29T00:01:00Z",
+                "updated_at": "2026-09-29T00:01:00Z"
+            }
+        ],
+        "next_cursor": null,
+    }))]);
+    let client = test_client(&transport);
+    let checkpoints = client
+        .list_checkpoints(&["prime-agent-bot".to_string()])
+        .await
+        .unwrap();
+    assert!(!checkpoints[0].has_memory, "the default is false");
+    assert!(checkpoints[1].has_memory);
 }
 
 #[tokio::test]
