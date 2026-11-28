@@ -494,10 +494,9 @@ impl SessionEngine for AgentSessionEngine {
                 core.session
                     .set_model_and_thinking_level(&model, &provider, &model_id, level),
             );
-            // The turn-boundary model facts follow the switch: `model.info`
-            // and the usage estimate's context window report the model now
-            // running. A core that is not built yet rebinds at its build.
-            core.update_model_facts(&model);
+            // The turn-boundary model facts and the system prompt follow the
+            // switch. A core that is not built yet builds for the new model.
+            self.runtime.block_on(core.update_model_facts(&model));
         }
         if let Some(children) = &self.children {
             children.set_model(format!("{}/{}", model.provider, model.id));
@@ -543,7 +542,7 @@ impl SessionEngine for AgentSessionEngine {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
         Box::pin(async move {
             let session = self.session.lock().await.clone()?;
-            Some(session.system_prompt.clone())
+            Some(session.system_prompt().await)
         })
     }
 
@@ -1247,9 +1246,13 @@ impl SessionEngine for AgentSessionEngine {
             // builds it on the async path (the caller's runtime).
             let model = self.resolve_model()?;
             self.ensure_core_session_async(&model).await?;
-            let guard = self.session.lock().await;
-            let engine = guard.as_deref().expect("session built above");
-            Ok(engine.system_prompt.clone())
+            let engine = self
+                .session
+                .lock()
+                .await
+                .clone()
+                .expect("session built above");
+            Ok(engine.system_prompt().await)
         })
     }
 

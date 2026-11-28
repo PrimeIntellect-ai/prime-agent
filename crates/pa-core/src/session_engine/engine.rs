@@ -140,7 +140,7 @@ pub struct SessionEngine {
     pub skill_diagnostics: Vec<crate::skills::ResourceDiagnostic>,
     pub prompt_templates: Vec<PromptTemplate>,
     pub agents_files: Vec<crate::resources::ContextFile>,
-    pub system_prompt: String,
+    system_prompt_inputs: SystemPromptInputs,
     /// The same instance the kernel `goal.*` host handlers reach, so `/goal`
     /// and `goal.complete()` observe one state machine.
     pub goal_driver: std::sync::Arc<tokio::sync::Mutex<super::goal_driver::GoalDriver>>,
@@ -171,6 +171,57 @@ pub struct SessionEngine {
     /// loops the graph and keeps a dropped session's kernel process alive
     /// until the process exits.
     pub(crate) provisioner: std::sync::Arc<crate::kernel::provisioner::IpythonKernelProvisioner>,
+}
+
+/// Everything the session's system prompt is built from except the
+/// model, captured at creation: the creation and every model switch build
+/// through [`SystemPromptInputs::build`], so only the model-dependent parts
+/// (the image-input line, the per-model prompt extras) change.
+struct SystemPromptInputs {
+    settings: crate::settings::SettingsManager,
+    /// Only the prompt fields: the replacement prompt, the appended
+    /// prompt, and the AGENTS.md context files.
+    resources: crate::resources::LoadedResources,
+    skills: Vec<crate::skills::Skill>,
+    selected_tools: Vec<String>,
+    cwd: String,
+    messages_path: Option<String>,
+    generic_mcp_servers: Vec<String>,
+    rlm_depth: u32,
+    factory_child: Option<crate::prompts::FactoryChild>,
+    refine_child: bool,
+    daemonless: bool,
+    can_spawn: bool,
+    agent_dir: PathBuf,
+}
+
+impl SystemPromptInputs {
+    /// The prompt for `model`, plus the model-prompt map's errors.
+    fn build(&self, model: &super::turn_boundary::ModelInfo) -> (String, Vec<String>) {
+        let model_prompts = crate::prompts::model_prompts::load_model_prompts(
+            Some(&format!("{}/{}", model.provider, model.id)),
+            &self.agent_dir,
+        );
+        let system_prompt = crate::prompts::system_prompt::build_system_prompt(
+            &crate::prompts::system_prompt::BuildSystemPromptOptions {
+                settings: &self.settings,
+                resources: &self.resources,
+                skills: &self.skills,
+                selected_tools: self.selected_tools.iter().map(String::as_str).collect(),
+                model_prompt_extras: model_prompts.extras.as_deref(),
+                model_input: &model.input,
+                cwd: self.cwd.clone(),
+                messages_path: self.messages_path.clone(),
+                generic_mcp_servers: self.generic_mcp_servers.clone(),
+                rlm_depth: self.rlm_depth,
+                factory_child: self.factory_child,
+                refine_child: self.refine_child,
+                daemonless: self.daemonless,
+                can_spawn: self.can_spawn,
+            },
+        );
+        (system_prompt, model_prompts.errors)
+    }
 }
 
 /// Skill overrides for built-in integrations the user is not logged into,
@@ -595,48 +646,47 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         });
     }
 
-    let model_prompts = crate::prompts::model_prompts::load_model_prompts(
-        Some(&format!("{}/{}", model_info.provider, model_info.id)),
-        &config.agent_dir,
-    );
-    if !model_prompts.errors.is_empty() {
+    let system_prompt_inputs = SystemPromptInputs {
+        settings: refinement_settings.reopen(),
+        resources: crate::resources::LoadedResources {
+            agents_files: resources.agents_files.clone(),
+            system_prompt: resources.system_prompt.clone(),
+            append_system_prompt: resources.append_system_prompt.clone(),
+            ..Default::default()
+        },
+        skills: model_visible_skills.clone(),
+        selected_tools: active_tool_names.clone(),
+        cwd: cwd.display().to_string(),
+        messages_path: conversation_log.clone(),
+        generic_mcp_servers,
+        // A spawned child's prompt must read "depth: N (not root)" with
+        // the child-agent reply doctrine, never the root identity.
+        rlm_depth: config.rlm_depth.unwrap_or(0),
+        // An empty contract (a state with no outputs) has nothing to emit.
+        factory_child: config.factory_child.then_some(
+            if config.factory_contract.as_ref().is_some_and(|contract| {
+                pa_factory::Contract::from_json(contract)
+                    .is_ok_and(|contract| !contract.outputs.is_empty())
+            }) {
+                crate::prompts::FactoryChild::Emit
+            } else {
+                crate::prompts::FactoryChild::FinalMessage
+            },
+        ),
+        refine_child: config.refine_child,
+        daemonless: config.daemonless,
+        can_spawn: config.rlm_subagent_host.is_some(),
+        agent_dir: config.agent_dir.clone(),
+    };
+    let (system_prompt, model_prompt_errors) = system_prompt_inputs.build(&model_info);
+    if !model_prompt_errors.is_empty() {
         boot_notice_rows
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(crate::prompts::model_prompts::model_prompt_error_message(
-                &model_prompts.errors,
+                &model_prompt_errors,
             ));
     }
-    let system_prompt = crate::prompts::system_prompt::build_system_prompt(
-        &crate::prompts::system_prompt::BuildSystemPromptOptions {
-            settings: &refinement_settings,
-            resources: &resources,
-            skills: &model_visible_skills,
-            selected_tools: active_tool_names.iter().map(String::as_str).collect(),
-            model_prompt_extras: model_prompts.extras.as_deref(),
-            model_input: &model_info.input,
-            cwd: cwd.display().to_string(),
-            messages_path: conversation_log.clone(),
-            generic_mcp_servers,
-            // A spawned child's prompt must read "depth: N (not root)" with
-            // the child-agent reply doctrine, never the root identity.
-            rlm_depth: config.rlm_depth.unwrap_or(0),
-            // An empty contract (a state with no outputs) has nothing to emit.
-            factory_child: config.factory_child.then_some(
-                if config.factory_contract.as_ref().is_some_and(|contract| {
-                    pa_factory::Contract::from_json(contract)
-                        .is_ok_and(|contract| !contract.outputs.is_empty())
-                }) {
-                    crate::prompts::FactoryChild::Emit
-                } else {
-                    crate::prompts::FactoryChild::FinalMessage
-                },
-            ),
-            refine_child: config.refine_child,
-            daemonless: config.daemonless,
-            can_spawn: config.rlm_subagent_host.is_some(),
-        },
-    );
 
     // Captured before the digest context moves the local harness dir and
     // the loop wiring moves the session model: the factory host bridge's
@@ -760,7 +810,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         // (TS `sdk.ts` passes `sessionManager.getSessionId()`).
         session_id: Some(session_id),
         initial_state: AgentInitialState {
-            system_prompt: Some(system_prompt.clone()),
+            system_prompt: Some(system_prompt),
             model: Some(model),
             thinking_level: Some(thinking_level),
             tools: Some(tools),
@@ -998,7 +1048,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         skill_diagnostics: resources.skill_diagnostics,
         prompt_templates: resources.prompts,
         agents_files: resources.agents_files,
-        system_prompt,
+        system_prompt_inputs,
         goal_driver,
         queued_goal_context_purge: config.queued_goal_context_purge.clone(),
         mcp_manager,
@@ -1012,18 +1062,29 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
 }
 
 impl SessionEngine {
-    /// After a model switch, the `model.info` handler and the usage
-    /// estimate's context window follow the model the session now runs.
-    pub fn update_model_facts(&self, model: &pa_types::ai::Model) {
+    /// After a model switch, the `model.info` handler, the usage
+    /// estimate's context window, and the system prompt follow the model
+    /// the session now runs. The agent loop reads the prompt when a run
+    /// starts, so a run in flight keeps its prompt and the next run reads
+    /// the new one. Model-prompt map errors were reported at creation.
+    pub async fn update_model_facts(&self, model: &pa_types::ai::Model) {
+        let model_info = super::turn_boundary::ModelInfo {
+            id: model.id.clone(),
+            provider: model.provider.clone(),
+            input: model.input.clone(),
+        };
+        let (system_prompt, _) = self.system_prompt_inputs.build(&model_info);
+        self.session.agent().set_system_prompt(system_prompt).await;
         super::turn_boundary::TurnBoundaryRequests::rebind_model_facts(
             &self.turn_boundary,
-            super::turn_boundary::ModelInfo {
-                id: model.id.clone(),
-                provider: model.provider.clone(),
-                input: model.input.clone(),
-            },
+            model_info,
             (model.context_window > 0).then_some(model.context_window),
         );
+    }
+
+    /// The system prompt the session's next run sends.
+    pub async fn system_prompt(&self) -> String {
+        self.session.agent().system_prompt().await
     }
 
     /// A weak reference for lock-free kernel liveness probes without

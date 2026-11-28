@@ -1,0 +1,1 @@
+- Switching a session's model now rebuilds the system prompt for the new model, so the image-input line and per-model prompt additions match the model that runs the next turn.

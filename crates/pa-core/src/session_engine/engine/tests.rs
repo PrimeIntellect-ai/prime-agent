@@ -151,10 +151,9 @@ async fn engine_runs_tool_loop_and_persists() {
 
     // The system prompt is the layered assembly: static core layer
     // first, dynamic tail after.
-    assert!(engine.system_prompt.starts_with("# prime-agent harness"));
-    assert!(engine
-        .system_prompt
-        .contains("Recursive agent depth: 0 (root)"));
+    let system_prompt = engine.system_prompt().await;
+    assert!(system_prompt.starts_with("# prime-agent harness"));
+    assert!(system_prompt.contains("Recursive agent depth: 0 (root)"));
 
     let outcome = engine
         .prompt("run the echo tool", PromptOptions::default())
@@ -264,10 +263,9 @@ async fn spawned_child_prompt_stamps_its_depth() {
     .await
     .unwrap();
 
-    assert!(engine
-        .system_prompt
-        .contains("Recursive agent depth: 2 (not root)"));
-    assert!(!engine.system_prompt.contains("depth: 0 (root)"));
+    let system_prompt = engine.system_prompt().await;
+    assert!(system_prompt.contains("Recursive agent depth: 2 (not root)"));
+    assert!(!system_prompt.contains("depth: 0 (root)"));
 }
 
 /// The login chain's prompt-gating end to end: a settings-declared OAuth
@@ -367,7 +365,10 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
     let engine = create_session(config(&cwd, &agent_dir, provider.stream_fn()))
         .await
         .unwrap();
-    assert!(!engine.system_prompt.contains("# Generic MCP Connections"));
+    assert!(!engine
+        .system_prompt()
+        .await
+        .contains("# Generic MCP Connections"));
 
     // The persisted credential begin_login leaves behind (the TS
     // McpCredentials shape, endpoint-bound).
@@ -396,14 +397,18 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
     let engine = create_session(config(&cwd, &agent_dir, provider.stream_fn()))
         .await
         .unwrap();
-    assert!(!engine.system_prompt.contains("# Generic MCP Connections"));
+    assert!(!engine
+        .system_prompt()
+        .await
+        .contains("# Generic MCP Connections"));
 
     write_credential("https://fixture.example/mcp");
     let engine = create_session(config(&cwd, &agent_dir, provider.stream_fn()))
         .await
         .unwrap();
-    assert!(engine.system_prompt.contains("# Generic MCP Connections"));
-    assert!(engine.system_prompt.contains("`fixture-oauth`"));
+    let system_prompt = engine.system_prompt().await;
+    assert!(system_prompt.contains("# Generic MCP Connections"));
+    assert!(system_prompt.contains("`fixture-oauth`"));
 }
 
 #[tokio::test]
@@ -626,9 +631,10 @@ async fn engine_over(
     (engine, tmp)
 }
 
-fn prompt_lists_skill(engine: &SessionEngine, name: &str) -> bool {
+async fn prompt_lists_skill(engine: &SessionEngine, name: &str) -> bool {
     engine
-        .system_prompt
+        .system_prompt()
+        .await
         .contains(&format!("<name>{name}</name>"))
 }
 
@@ -680,10 +686,10 @@ async fn model_visible_skills_follow_the_embedding_wiring() {
     for (label, wired, cron, daemonless, visible) in cases {
         let (engine, _tmp) = engine_over(Some(handlers(wired)), cron, daemonless).await;
         // The bundled fixtures loaded at all.
-        assert!(prompt_lists_skill(&engine, "compact"), "{label}");
+        assert!(prompt_lists_skill(&engine, "compact").await, "{label}");
         for skill in all {
             assert_eq!(
-                prompt_lists_skill(&engine, skill),
+                prompt_lists_skill(&engine, skill).await,
                 visible.contains(&skill),
                 "{label}: {skill}"
             );
@@ -1191,5 +1197,103 @@ async fn a_committed_compaction_finishes_when_the_abort_lands_after_the_commit()
             .iter()
             .any(|entry| matches!(entry, crate::session_engine::FileEntry::Compaction { .. })),
         "the compaction row is committed"
+    );
+}
+
+/// A model switch rebuilds the system prompt for the new model: the next
+/// request carries the new model's image line and prompt extras, and the
+/// message history stays as it was.
+#[tokio::test]
+async fn a_model_switch_rebuilds_the_system_prompt_for_the_next_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("project");
+    let agent_dir = tmp.path().join("agent");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("model-prompts.toml"),
+        "[[rule]]\nmatch = [\"vision\"]\nfiles = [\"vision.md\"]\n",
+    )
+    .unwrap();
+    std::fs::write(agent_dir.join("vision.md"), "VISION_MODEL_EXTRAS").unwrap();
+    let registry_model = |id: &str, input| pa_types::ai::Model {
+        id: id.to_string(),
+        name: id.to_string(),
+        api: "test".to_string(),
+        provider: "test".to_string(),
+        base_url: "http://localhost".to_string(),
+        reasoning: false,
+        thinking_level_map: None,
+        input,
+        cost: pa_types::ai::ModelCost {
+            input: 0.0.into(),
+            output: 0.0.into(),
+            cache_read: 0.0.into(),
+            cache_write: 0.0.into(),
+        },
+        context_window: 100_000,
+        max_tokens: 100,
+        max_tokens_explicit: false,
+        featured: None,
+        serving: None,
+        headers: None,
+        compat: None,
+    };
+    let text_model = registry_model("text", vec![pa_types::ai::ModelInput::Text]);
+    let vision_model = registry_model(
+        "vision",
+        vec![
+            pa_types::ai::ModelInput::Text,
+            pa_types::ai::ModelInput::Image,
+        ],
+    );
+    let agent_model =
+        crate::session_engine::provider_adapter::json_round_trip(&text_model).unwrap();
+    let provider = Arc::new(ScriptedProvider::new(agent_model));
+    provider.push_text_turn("first reply");
+    provider.push_text_turn("second reply");
+    let engine = create_session(SessionEngineConfig {
+        cwd,
+        agent_dir,
+        model: crate::session_engine::provider_adapter::json_round_trip(&text_model),
+        model_info: Some(text_model),
+        stream_fn: Some(provider.stream_fn()),
+        daemonless: true,
+        prewarm_ipython_kernel: Some(false),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let agent = engine.session.agent();
+    engine
+        .prompt("first", PromptOptions::default())
+        .await
+        .unwrap();
+    agent.wait_for_idle().await;
+    let history = agent.state().await.messages;
+
+    engine
+        .session
+        .set_model(&vision_model, "test", "vision")
+        .await
+        .unwrap();
+    engine.update_model_facts(&vision_model).await;
+    assert_eq!(agent.state().await.messages, history);
+    engine
+        .prompt("second", PromptOptions::default())
+        .await
+        .unwrap();
+    agent.wait_for_idle().await;
+
+    let calls = provider.calls();
+    let first = calls[0].system_prompt.as_deref().unwrap();
+    let second = calls[1].system_prompt.as_deref().unwrap();
+    assert!(first.contains("this model cannot see images"));
+    assert!(!first.contains("VISION_MODEL_EXTRAS"));
+    assert!(second.contains("this model can see images"));
+    assert!(second.contains("VISION_MODEL_EXTRAS"));
+    assert_eq!(
+        calls[1].messages[..calls[0].messages.len()],
+        calls[0].messages[..]
     );
 }

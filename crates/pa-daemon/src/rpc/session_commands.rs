@@ -446,7 +446,7 @@ async fn export_html(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
             let manager = persistence.lock().await;
             manager.get_leaf_id().map(str::to_string)
         },
-        system_prompt: Some(handle.engine.system_prompt.clone()),
+        system_prompt: Some(handle.engine.system_prompt().await),
         tools: Some(tools),
         rendered_tools: None,
     };
