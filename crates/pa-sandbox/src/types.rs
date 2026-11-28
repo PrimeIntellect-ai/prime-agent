@@ -17,12 +17,6 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// `timeout_minutes` value for a sandbox with no lifetime cap.
 pub const NO_TIMEOUT_MINUTES: i64 = -1;
 
-/// Default overall wait budget.
-pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// Default wait poll interval.
-pub const DEFAULT_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
 /// The sandbox lifecycle statuses (wire names uppercase).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxStatus {
@@ -138,7 +132,8 @@ pub struct SandboxCheckpoint {
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
-    /// `PENDING`, `DURABLE`, or a terminal failure state.
+    /// `DURABLE`, a failure state (`FAILED`, `DELETING`), or an in-flight
+    /// state (`PENDING`, `FROZEN`, ...).
     pub state: String,
     pub depth: u32,
     pub docker_image: String,
@@ -154,28 +149,17 @@ pub struct SandboxCheckpoint {
     pub updated_at: String,
 }
 
-/// The states a checkpoint may take; only [`Self::Durable`] restores.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SandboxCheckpointState {
-    Pending,
-    Durable,
-}
-
 impl SandboxCheckpoint {
-    /// The parsed state, when recognized.
-    #[must_use]
-    pub fn checkpoint_state(&self) -> Option<SandboxCheckpointState> {
-        match self.state.as_str() {
-            "PENDING" => Some(SandboxCheckpointState::Pending),
-            "DURABLE" => Some(SandboxCheckpointState::Durable),
-            _ => None,
-        }
-    }
-
     /// True once the checkpoint outlives its source sandbox.
     #[must_use]
     pub fn is_durable(&self) -> bool {
-        self.checkpoint_state() == Some(SandboxCheckpointState::Durable)
+        self.state == "DURABLE"
+    }
+
+    /// True when the checkpoint will never become durable.
+    #[must_use]
+    pub fn is_failed(&self) -> bool {
+        matches!(self.state.as_str(), "FAILED" | "DELETING")
     }
 }
 
@@ -281,24 +265,6 @@ impl std::fmt::Debug for VmCreateRequest {
 pub struct HeaderRule {
     /// Header name to value template.
     pub headers: BTreeMap<String, String>,
-}
-
-/// Wait configuration for [`crate::PrimeSandboxClient::wait_for_running`].
-#[derive(Debug, Clone)]
-pub struct WaitOptions {
-    /// Overall wait budget; default 10 minutes.
-    pub timeout: Duration,
-    /// Poll interval; default 2 seconds.
-    pub poll_interval: Duration,
-}
-
-impl Default for WaitOptions {
-    fn default() -> Self {
-        Self {
-            timeout: DEFAULT_WAIT_TIMEOUT,
-            poll_interval: DEFAULT_WAIT_POLL_INTERVAL,
-        }
-    }
 }
 
 /// A sandbox record (the `GET /api/v1/sandbox/{id}` response; `camelCase`

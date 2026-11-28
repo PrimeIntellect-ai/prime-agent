@@ -15,5 +15,9 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 
+[dev-dependencies]
+# Scripted test transports build a reqwest response from a canned body.
+http = "1"
+
 [lints]
 workspace = true

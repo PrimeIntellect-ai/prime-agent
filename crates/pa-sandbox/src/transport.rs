@@ -2,9 +2,9 @@
 //! implementation:
 //! - a per-request deadline raced against the request (the timeout wins
 //!   even when the server never answers);
-//! - buffered responses are read through a streaming cap (32 MiB default,
-//!   per-request overridable), so an unbounded body is a typed `too_large`
-//!   error, never an unbounded allocation;
+//! - buffered responses are read through a streaming 32 MiB cap, so an
+//!   unbounded body is a typed `too_large` error, never an unbounded
+//!   allocation;
 //! - transport failures are already-typed [`SandboxError`]s carrying the
 //!   request method and URL; non-2xx statuses are returned to the caller,
 //!   which owns the error-body preview (the transport never parses);
@@ -24,7 +24,7 @@ use std::time::Duration;
 use crate::error::SandboxError;
 use crate::types::Method;
 
-/// Default response body cap.
+/// Response body cap for buffered reads.
 pub const MAX_JSON_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 /// One outbound HTTP request.
@@ -43,9 +43,6 @@ pub struct TransportRequest {
     /// multipart body; the `command_session` client passes enveloped proto
     /// frames.
     pub body: Option<Vec<u8>>,
-    /// Per-request response byte cap for buffered reads; `None` uses the
-    /// transport default (32 MiB).
-    pub max_response_bytes: Option<usize>,
     /// The per-request deadline; `None` is no deadline (the `ConnectRPC`
     /// streams that inherit the server default rather than sending
     /// `Connect-Timeout-Ms`).
@@ -61,7 +58,6 @@ impl std::fmt::Debug for TransportRequest {
             .field("headers", &header_names)
             .field("body", &self.body.as_ref().map(|_| "[redacted]"))
             .field("timeout", &self.timeout)
-            .field("max_response_bytes", &self.max_response_bytes)
             .finish()
     }
 }
@@ -71,8 +67,7 @@ impl std::fmt::Debug for TransportRequest {
 pub struct TransportResponse {
     /// The response status.
     pub status: u16,
-    /// The response body, read under the request's (or transport's) byte
-    /// cap.
+    /// The response body, read under [`MAX_JSON_BODY_BYTES`].
     pub body: Vec<u8>,
 }
 
@@ -114,9 +109,6 @@ impl StreamedResponse {
 pub enum ResponseChunks {
     /// Backed by a live reqwest response; reads pull network chunks.
     Reqwest(reqwest::Response),
-    /// Pre-loaded chunks for in-process scripted transports; drains to
-    /// end-of-body.
-    Queued(std::collections::VecDeque<Vec<u8>>),
 }
 
 impl ResponseChunks {
@@ -137,7 +129,6 @@ impl ResponseChunks {
                     "Request failed while reading the response body: {error}"
                 ))),
             },
-            Self::Queued(chunks) => Ok(chunks.pop_front()),
         }
     }
 }
@@ -170,7 +161,6 @@ pub trait SandboxTransport: Send + Sync {
 #[derive(Debug)]
 pub struct ReqwestSandboxTransport {
     client: reqwest::Client,
-    max_response_bytes: usize,
 }
 
 impl Default for ReqwestSandboxTransport {
@@ -188,17 +178,6 @@ impl ReqwestSandboxTransport {
     /// is not recoverable at runtime).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_max_response_bytes(MAX_JSON_BODY_BYTES)
-    }
-
-    /// A transport with an explicit default response cap (tests use a
-    /// small cap to prove the streaming limit).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the reqwest client fails to build.
-    #[must_use]
-    pub fn with_max_response_bytes(max_response_bytes: usize) -> Self {
         Self {
             client: pa_ai::utils::tls::http_client_builder()
                 // Redirects are refused: a redirected call would forward the
@@ -208,7 +187,6 @@ impl ReqwestSandboxTransport {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("sandbox reqwest client"),
-            max_response_bytes,
         }
     }
 
@@ -238,9 +216,6 @@ impl SandboxTransport for ReqwestSandboxTransport {
     async fn execute(&self, request: TransportRequest) -> Result<TransportResponse, SandboxError> {
         let method = request.method;
         let url = request.url.clone();
-        let max_response_bytes = request
-            .max_response_bytes
-            .unwrap_or(self.max_response_bytes);
         let call = async {
             let mut response = self.open(&request).await?;
             let status = response.status().as_u16();
@@ -248,9 +223,9 @@ impl SandboxTransport for ReqwestSandboxTransport {
             loop {
                 match response.chunk().await {
                     Ok(Some(chunk)) => {
-                        if body.len() + chunk.len() > max_response_bytes {
+                        if body.len() + chunk.len() > MAX_JSON_BODY_BYTES {
                             return Err(SandboxError::too_large(format!(
-                                "Sandbox response exceeds the {max_response_bytes} byte limit"
+                                "Sandbox response exceeds the {MAX_JSON_BODY_BYTES} byte limit"
                             ))
                             .with_http_context(
                                 method,
@@ -374,7 +349,6 @@ mod tests {
             headers: vec![("Authorization".to_string(), format!("Bearer {key}"))],
             body: Some(format!(r#"{{"secrets":{{"PRIVATE":"{key}"}}}}"#).into_bytes()),
             timeout: Some(Duration::from_secs(5)),
-            max_response_bytes: None,
         };
         let rendered = format!("{request:?}");
         assert!(!rendered.contains(key));

@@ -224,7 +224,7 @@ mod tests {
             std::future::ready(Ok(StreamedResponse {
                 status: 200,
                 headers: vec![("content-type".to_string(), "application/proto".to_string())],
-                body: ResponseChunks::Queued(std::collections::VecDeque::new()),
+                body: ResponseChunks::Reqwest(http::Response::new(Vec::<u8>::new()).into()),
             }))
         }
     }

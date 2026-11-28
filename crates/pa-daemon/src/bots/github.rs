@@ -398,7 +398,7 @@ mod tests {
             std::future::ready(Ok(StreamedResponse {
                 status: 500,
                 headers: Vec::new(),
-                body: ResponseChunks::Queued(VecDeque::new()),
+                body: ResponseChunks::Reqwest(http::Response::new(Vec::<u8>::new()).into()),
             }))
         }
     }

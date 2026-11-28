@@ -23,7 +23,6 @@ fn request(method: Method, url: String) -> TransportRequest {
         ],
         url,
         body: None,
-        max_response_bytes: None,
         timeout: Some(Duration::from_secs(2)),
     }
 }

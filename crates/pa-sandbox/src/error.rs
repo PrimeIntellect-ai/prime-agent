@@ -30,8 +30,7 @@ pub enum SandboxErrorCode {
     InvalidResponse,
     /// A response body exceeded the JSON body cap (32 MiB).
     TooLarge,
-    /// The sandbox reached `ERROR`/`TERMINATED`/`TIMEOUT` while waiting for
-    /// `RUNNING`.
+    /// A checkpoint reached a failure state while waiting for `DURABLE`.
     TerminalStatus,
     /// Server-reported request timeout (HTTP 408).
     RequestTimeout,
@@ -40,25 +39,6 @@ pub enum SandboxErrorCode {
     /// Gateway 502 with `{ "error": "sandbox_not_found" }`: the sandbox is
     /// gone.
     SandboxNotFound,
-}
-
-impl SandboxErrorCode {
-    /// The stable code name.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidRequest => "invalid_request",
-            Self::Network => "network",
-            Self::Timeout => "timeout",
-            Self::Http => "http",
-            Self::InvalidResponse => "invalid_response",
-            Self::TooLarge => "too_large",
-            Self::TerminalStatus => "terminal_status",
-            Self::RequestTimeout => "request_timeout",
-            Self::Conflict => "conflict",
-            Self::SandboxNotFound => "sandbox_not_found",
-        }
-    }
 }
 
 /// A typed, redacted sandbox client failure.
@@ -386,15 +366,5 @@ mod tests {
         let preview = SandboxError::preview_from_text(&body, &[]).unwrap();
         assert_eq!(preview.len(), MAX_RESPONSE_PREVIEW_CHARS + "\u{2026}".len());
         assert!(preview.ends_with('\u{2026}'));
-    }
-
-    #[test]
-    fn codes_round_trip_the_ts_wire_names() {
-        assert_eq!(SandboxErrorCode::InvalidRequest.as_str(), "invalid_request");
-        assert_eq!(SandboxErrorCode::TerminalStatus.as_str(), "terminal_status");
-        assert_eq!(
-            SandboxErrorCode::SandboxNotFound.as_str(),
-            "sandbox_not_found"
-        );
     }
 }

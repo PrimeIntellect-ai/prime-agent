@@ -1,8 +1,8 @@
 //! Prime Sandboxes lifecycle client.
 //!
 //! [`PrimeSandboxClient`] calls the Prime platform REST API: idempotent VM
-//! create, fetch, list by label, pause, resume, delete, wait-until-running,
-//! and filesystem checkpoints.
+//! create, fetch, list by label, pause, resume, delete, and filesystem
+//! checkpoints.
 //!
 //! [`CommandSessionClient`] runs processes in a VM sandbox through the
 //! sandbox gateway's `ConnectRPC` `command_session` stream (Start, Connect,
@@ -49,9 +49,8 @@ pub use transport::{
     MAX_JSON_BODY_BYTES,
 };
 pub use types::{
-    HeaderRule, PausedSandbox, Sandbox, SandboxCheckpoint, SandboxCheckpointState, SandboxStatus,
-    StartCommand, VmCreateRequest, WaitOptions, DEFAULT_REQUEST_TIMEOUT,
-    DEFAULT_WAIT_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT, NO_TIMEOUT_MINUTES,
+    HeaderRule, PausedSandbox, Sandbox, SandboxCheckpoint, SandboxStatus, StartCommand,
+    VmCreateRequest, DEFAULT_REQUEST_TIMEOUT, NO_TIMEOUT_MINUTES,
     PRIME_SANDBOX_CREATE_MAX_ATTEMPTS,
 };
 pub use vm_error::{CommandSessionError, CommandSessionErrorCode};
