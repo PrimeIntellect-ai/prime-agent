@@ -696,10 +696,30 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     }
 }
 
+/// The server's `detail` string from an error-response body, redacted and
+/// bounded: the platform names a conflict's reason there, such as that a
+/// pause checkpoint restores only with its memory.
+fn server_detail(body: &[u8], secrets: &[&str]) -> Option<String> {
+    let text = String::from_utf8_lossy(body);
+    let detail = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .get("detail")?
+        .as_str()?
+        .trim()
+        .to_string();
+    if detail.is_empty() {
+        return None;
+    }
+    Some(SandboxError::bound_preview(&SandboxError::redact_secrets(
+        &detail, secrets,
+    )))
+}
+
 /// Map a non-2xx response onto the typed error contract:
 /// a 3xx is a refused redirect (the transport never follows one),
-/// HTTP 408 is a `request_timeout`, HTTP 409 a `conflict`, and HTTP 502
-/// with `{ "error": "sandbox_not_found" }` a `sandbox_not_found`; anything
+/// HTTP 408 is a `request_timeout`, HTTP 409 a `conflict` whose message
+/// carries the server's reason, and HTTP 502 with
+/// `{ "error": "sandbox_not_found" }` a `sandbox_not_found`; anything
 /// else is a generic `http` error. `details` carries a bounded,
 /// secret-scrubbed preview of the response body.
 pub(crate) fn http_error(
@@ -734,9 +754,16 @@ pub(crate) fn http_error(
     let error = if status == 408 {
         SandboxError::request_timeout(format!("{context} timed out on the server (HTTP 408)"))
     } else if status == 409 {
-        SandboxError::conflict(format!(
-            "{context} returned a conflict (HTTP 409); this is typically transient"
-        ))
+        // The server's reason decides what the caller does next: a
+        // pause checkpoint's refusal of a disk-only restore is
+        // permanent, unlike a transient conflict, so the message carries
+        // it instead of claiming the failure is typically transient.
+        let mut message =
+            format!("{context} returned a conflict (HTTP 409); this is typically transient");
+        if let Some(detail) = server_detail(body, secrets) {
+            message = format!("{message}: {detail}");
+        }
+        SandboxError::conflict(message)
     } else if sandbox_not_found {
         SandboxError::sandbox_not_found(format!(
             "{context} target sandbox is no longer present on the runtime node"

@@ -1685,10 +1685,12 @@ impl BotManager {
             .cloned()
             .collect();
         for checkpoint in candidates {
-            if !self.platform.checkpoint_durable(&checkpoint).await? {
+            // The checkpoint's own metadata sets the restore mode: one a
+            // pause froze holds memory and restores only with it.
+            let Some(meta) = self.platform.durable_checkpoint(&checkpoint).await? else {
                 continue;
-            }
-            match self.create(record, Some(&checkpoint), deadline).await {
+            };
+            match self.create(record, Some(&meta), deadline).await {
                 Ok(sandbox) => {
                     // The restore succeeded: everything older than it is
                     // superseded. A promotion defers its prune to here,
@@ -1722,11 +1724,17 @@ impl BotManager {
     async fn create(
         &self,
         record: &mut BotRecord,
-        checkpoint_id: Option<&str>,
+        checkpoint: Option<&BotCheckpoint>,
         deadline: Instant,
     ) -> Result<BotSandbox> {
-        let source = match checkpoint_id {
-            Some(checkpoint) => format!("ckpt:disk:{checkpoint}"),
+        let source = match checkpoint {
+            // A memory restore is its own source, so it gets its own
+            // idempotency key: after the disk form of the same checkpoint
+            // was refused, the platform must not replay that refusal.
+            Some(checkpoint) if checkpoint.has_memory => {
+                format!("ckpt:mem:{}", checkpoint.id)
+            }
+            Some(checkpoint) => format!("ckpt:disk:{}", checkpoint.id),
             None => format!("img:{}", self.image),
         };
         let (credentials, logins, relay_host) =
@@ -1771,12 +1779,38 @@ impl BotManager {
             image: self.image.clone(),
             labels,
             idempotency_key: idempotency_key(&record.bot_id, record.generation, &source),
-            checkpoint_id: checkpoint_id.map(str::to_string),
+            checkpoint_id: checkpoint.map(|checkpoint| checkpoint.id.clone()),
+            // A checkpoint with memory continues from the paused state; a
+            // disk one cold-boots. The create's fresh rules and labels
+            // reach the restored sandbox either way (verified against the
+            // platform), so no egress-policy push follows.
+            restore_memory: checkpoint
+                .filter(|checkpoint| checkpoint.has_memory)
+                .map(|_| true),
             network_rules: credentials.network_rules.clone(),
             cpu: record.cpu,
             memory_gb: record.memory_gb,
         };
-        let created = retry(|| self.platform.create(&request)).await?;
+        let created = match retry_create(|| self.platform.create(&request)).await {
+            Ok(created) => created,
+            // The checkpoint held memory after all (its metadata said it
+            // did not): restore it with its memory under the memory key.
+            // The refusal is permanent and surfaces from any attempt, so
+            // this runs whether the disk create failed at once or after
+            // a transient fault.
+            Err(error) if request.restore_memory.is_none() && refuses_disk_restore(&error) => {
+                let Some(checkpoint) = checkpoint else {
+                    return Err(error.into());
+                };
+                let memory_source = format!("ckpt:mem:{}", checkpoint.id);
+                let mut memory = request.clone();
+                memory.restore_memory = Some(true);
+                memory.idempotency_key =
+                    idempotency_key(&record.bot_id, record.generation, &memory_source);
+                retry_create(|| self.platform.create(&memory)).await?
+            }
+            Err(error) => return Err(error.into()),
+        };
         lock(&self.guest_auth).insert(created.id.clone(), credentials);
         record.sandbox_id = Some(created.id.clone());
         record.status = created.status;
@@ -2417,7 +2451,12 @@ impl BotManager {
         oldest_first.extend(record.checkpoint_id.clone());
         let mut newest_durable = None;
         for (index, checkpoint) in oldest_first.iter().enumerate().rev() {
-            if self.platform.checkpoint_durable(checkpoint).await? {
+            if self
+                .platform
+                .durable_checkpoint(checkpoint)
+                .await?
+                .is_some()
+            {
                 newest_durable = Some(index);
                 break;
             }
@@ -2515,6 +2554,13 @@ fn is_transient(error: &anyhow::Error) -> bool {
         error.downcast_ref::<PlatformError>(),
         Some(PlatformError::Transient(_) | PlatformError::Conflict(_))
     )
+}
+
+/// True when a create's conflict refusal says the checkpoint restores only
+/// with its memory: the platform's 409 detail names `restore_memory`, so a
+/// disk-only create of that checkpoint can never succeed.
+fn refuses_disk_restore(error: &PlatformError) -> bool {
+    matches!(error, PlatformError::Conflict(reason) if reason.contains("restore_memory"))
 }
 
 /// sha256 of `bot_id:generation:source`, first 32 hex chars (orbs
@@ -2894,6 +2940,32 @@ where
     let mut attempt = 1;
     loop {
         match call().await {
+            Err(PlatformError::Conflict(_) | PlatformError::Transient(_))
+                if attempt < RETRY_ATTEMPTS =>
+            {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(5));
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Retry a create's transient failures like [`retry`], but surface a
+/// restore-memory refusal at once: it is permanent, so the retry budget
+/// must not burn on it and the caller can restore with the memory
+/// instead.
+async fn retry_create<T, F, Fut>(mut call: F) -> PlatformResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = PlatformResult<T>>,
+{
+    let mut delay = Duration::from_millis(250);
+    let mut attempt = 1;
+    loop {
+        match call().await {
+            Err(error) if refuses_disk_restore(&error) => return Err(error),
             Err(PlatformError::Conflict(_) | PlatformError::Transient(_))
                 if attempt < RETRY_ATTEMPTS =>
             {

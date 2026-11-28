@@ -128,6 +128,11 @@ fn validate_source_and_resources(request: &VmCreateRequest) -> Result<(), Sandbo
         .checkpoint_id
         .as_deref()
         .is_some_and(|checkpoint_id| !checkpoint_id.is_empty());
+    if !restore && request.restore_memory.is_some() {
+        return Err(SandboxError::invalid_request(
+            "restoreMemory is a checkpoint restore option; it needs checkpointId",
+        ));
+    }
     if restore {
         if !request.docker_image.is_empty() {
             return Err(SandboxError::invalid_request(
@@ -278,6 +283,9 @@ pub(crate) fn build_create_body(
         );
     } else {
         body.insert("docker_image".into(), request.docker_image.clone().into());
+    }
+    if let Some(restore_memory) = request.restore_memory {
+        body.insert("restore_memory".into(), restore_memory.into());
     }
     body.insert("cpu_cores".into(), request.cpu_cores.into());
     body.insert("memory_gb".into(), request.memory_gb.into());

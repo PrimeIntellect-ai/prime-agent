@@ -42,6 +42,19 @@ pub(crate) struct FakeState {
     pub pause_checkpoints_pending: bool,
     /// Checkpoints that exist but are not durable yet.
     pub pending_checkpoints: std::collections::HashSet<String>,
+    /// Checkpoints a pause froze with the sandbox's memory: like the
+    /// platform, only a `restore_memory` create restores them.
+    pub memory_checkpoints: std::collections::HashSet<String>,
+    /// The checkpoint metadata reports no memory while creates still
+    /// refuse disk-only restores of pause checkpoints: simulates stale
+    /// platform metadata, exercising the create's 409 fallback.
+    pub misreport_memory: bool,
+    /// Creates the platform refused (a disk-only restore of a checkpoint
+    /// that holds memory), in order.
+    pub refused_creates: Vec<BotCreate>,
+    /// The next create answers a transport error before the platform
+    /// processes it (no commit, no idempotency replay).
+    pub transient_next_create: bool,
     /// Each checkpoint's sandbox and creation stamp, as the platform's
     /// checkpoint list reports them.
     pub checkpoint_origins: HashMap<String, (String, String)>,
@@ -136,6 +149,8 @@ impl FakePlatform {
         state.checkpoints.insert(id.clone(), version);
         let origin = (sandbox_id.to_string(), state.stamp());
         state.checkpoint_origins.insert(id.clone(), origin);
+        // The relay's self-pause pauses the sandbox, freezing memory too.
+        state.memory_checkpoints.insert(id.clone());
         if !durable {
             state.pending_checkpoints.insert(id.clone());
         }
@@ -159,6 +174,7 @@ impl FakePlatform {
         state.checkpoints.insert(id.clone(), version);
         let origin = (sandbox_id.to_string(), created_at.to_string());
         state.checkpoint_origins.insert(id.clone(), origin);
+        state.memory_checkpoints.insert(id.clone());
         if !durable {
             state.pending_checkpoints.insert(id.clone());
         }
@@ -188,9 +204,28 @@ impl FakeState {
 impl BotPlatform for FakePlatform {
     fn create<'a>(&'a self, request: &'a BotCreate) -> BoxFuture<'a, PlatformResult<BotSandbox>> {
         async move {
+            if std::mem::take(&mut self.state().transient_next_create) {
+                return Err(PlatformError::Transient("connection reset".into()));
+            }
             let existing = self.state().keys.get(&request.idempotency_key).cloned();
             if let Some(id) = existing {
                 return Ok(self.state().sandboxes[&id].clone());
+            }
+            // Like the platform, a checkpoint a pause froze (it holds
+            // memory) refuses a disk-only restore: the conflict's detail
+            // names restore_memory.
+            if let (Some(checkpoint), None | Some(false)) =
+                (&request.checkpoint_id, request.restore_memory)
+            {
+                if self.state().memory_checkpoints.contains(checkpoint) {
+                    self.state().refused_creates.push(request.clone());
+                    return Err(PlatformError::Conflict(
+                        "Sandbox create returned a conflict (HTTP 409); this is typically \
+                         transient: A pause checkpoint restores only with its memory: set \
+                         restore_memory (CLI: --memory), or restore a regular checkpoint"
+                            .into(),
+                    ));
+                }
             }
             if let Some(checkpoint) = &self.state().fail_create_from {
                 if request.checkpoint_id.as_deref() == Some(checkpoint.as_str()) {
@@ -262,6 +297,8 @@ impl BotPlatform for FakePlatform {
             state.checkpoints.insert(checkpoint.clone(), version);
             let origin = (sandbox_id.to_string(), state.stamp());
             state.checkpoint_origins.insert(checkpoint.clone(), origin);
+            // A pause freezes memory with the disk.
+            state.memory_checkpoints.insert(checkpoint.clone());
             if state.pause_checkpoints_pending {
                 state.pending_checkpoints.insert(checkpoint.clone());
             }
@@ -302,6 +339,7 @@ impl BotPlatform for FakePlatform {
                 .map(|(id, (_, created_at))| BotCheckpoint {
                     id: id.clone(),
                     durable: !state.pending_checkpoints.contains(id),
+                    has_memory: !state.misreport_memory && state.memory_checkpoints.contains(id),
                     created_at: created_at.clone(),
                 })
                 .collect();
@@ -337,14 +375,28 @@ impl BotPlatform for FakePlatform {
         .boxed()
     }
 
-    fn checkpoint_durable<'a>(
+    fn durable_checkpoint<'a>(
         &'a self,
         checkpoint_id: &'a str,
-    ) -> BoxFuture<'a, PlatformResult<bool>> {
+    ) -> BoxFuture<'a, PlatformResult<Option<BotCheckpoint>>> {
         async move {
             let state = self.state();
-            Ok(state.checkpoints.contains_key(checkpoint_id)
-                && !state.pending_checkpoints.contains(checkpoint_id))
+            let durable = state.checkpoints.contains_key(checkpoint_id)
+                && !state.pending_checkpoints.contains(checkpoint_id);
+            if !durable {
+                return Ok(None);
+            }
+            Ok(Some(BotCheckpoint {
+                id: checkpoint_id.to_string(),
+                durable: true,
+                has_memory: !state.misreport_memory
+                    && state.memory_checkpoints.contains(checkpoint_id),
+                created_at: state
+                    .checkpoint_origins
+                    .get(checkpoint_id)
+                    .map(|(_, created_at)| created_at.clone())
+                    .unwrap_or_default(),
+            }))
         }
         .boxed()
     }
@@ -1586,6 +1638,150 @@ async fn refused_pause_checkpoints_and_restores() {
     assert_eq!(platform.state().installs, 1);
 }
 
+/// A checkpoint a pause froze holds the sandbox's memory: the platform
+/// refuses a disk-only restore of it, so the restore create must ask for
+/// the memory too.
+#[tokio::test(start_paused = true)]
+async fn a_pause_checkpoint_restores_with_its_memory() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let paused = manager.pause("bot-a").await.unwrap();
+    let checkpoint = paused.checkpoint_id.clone().unwrap();
+    let sandbox_id = paused.sandbox_id.unwrap();
+    // The paused sandbox is gone: only a restore can bring the bot back.
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    let restore = creates.last().unwrap();
+    assert_eq!(restore.checkpoint_id.as_deref(), Some(checkpoint.as_str()));
+    assert_eq!(
+        restore.restore_memory,
+        Some(true),
+        "a pause checkpoint restores only with its memory"
+    );
+    assert_eq!(creates.len(), 2, "spawn then one restore create");
+}
+
+/// A regular disk checkpoint holds no memory: it restores without
+/// `restore_memory`, exactly as before.
+#[tokio::test(start_paused = true)]
+async fn a_disk_checkpoint_restores_without_memory() {
+    let (_dir, platform, manager) = setup();
+    let spawned = manager.spawn(&spec("bot-a")).await.unwrap();
+    let sandbox_id = spawned.sandbox_id.clone().unwrap();
+    // The manager's pause-refused fallback freezes a disk checkpoint.
+    let disk = platform.checkpoint(&sandbox_id).await.unwrap();
+    platform.wait_checkpoint(&disk).await.unwrap();
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager
+        .update("bot-a", |record| {
+            record.checkpoint_id = Some(disk.clone());
+        })
+        .unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let restore = platform.state().creates.last().cloned().unwrap();
+    assert_eq!(restore.checkpoint_id.as_deref(), Some(disk.as_str()));
+    assert_eq!(
+        restore.restore_memory, None,
+        "a disk checkpoint cold-boots its disk"
+    );
+}
+
+/// When the checkpoint metadata says no memory but the platform still
+/// refuses the disk-only restore, the create retries with the memory
+/// under a fresh idempotency key, so the platform does not replay the
+/// refusal.
+#[tokio::test(start_paused = true)]
+async fn a_refused_disk_restore_retries_with_memory_under_a_fresh_key() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let paused = manager.pause("bot-a").await.unwrap();
+    let checkpoint = paused.checkpoint_id.clone().unwrap();
+    let sandbox_id = paused.sandbox_id.unwrap();
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    // The metadata lies: the checkpoint reads as disk-only while the
+    // create still refuses a disk-only restore of it.
+    platform.state().misreport_memory = true;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let refused = platform.state().refused_creates.clone();
+    assert_eq!(refused.len(), 1, "one disk-only create was refused");
+    assert_eq!(
+        refused[0].checkpoint_id.as_deref(),
+        Some(checkpoint.as_str())
+    );
+    assert_eq!(refused[0].restore_memory, None);
+    let creates = platform.state().creates.clone();
+    assert_eq!(creates.len(), 2, "spawn, then the memory retry");
+    let retried = &creates[1];
+    assert_eq!(retried.checkpoint_id.as_deref(), Some(checkpoint.as_str()));
+    assert_eq!(retried.restore_memory, Some(true));
+    assert_ne!(
+        retried.idempotency_key, refused[0].idempotency_key,
+        "the memory retry must not replay the refusal"
+    );
+    assert_eq!(
+        manager.get("bot-a").unwrap().status,
+        BotStatus::Running,
+        "the fallback restore brings the bot back"
+    );
+}
+
+/// A transient failure on the disk create's first attempt must not lose
+/// the memory fallback: the refusal surfaces from a later retry, and the
+/// create still restores with the memory under the fresh key.
+#[tokio::test(start_paused = true)]
+async fn a_refusal_after_a_transient_create_still_falls_back_to_memory() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let paused = manager.pause("bot-a").await.unwrap();
+    let checkpoint = paused.checkpoint_id.clone().unwrap();
+    let sandbox_id = paused.sandbox_id.unwrap();
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    // The metadata lies (the checkpoint holds memory), and the disk
+    // create's first attempt dies on the transport.
+    platform.state().misreport_memory = true;
+    platform.state().transient_next_create = true;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let refused = platform.state().refused_creates.clone();
+    assert_eq!(refused.len(), 1, "the retried disk create was refused");
+    assert_eq!(refused[0].restore_memory, None);
+    let creates = platform.state().creates.clone();
+    assert_eq!(creates.len(), 2, "spawn, then the memory retry");
+    let retried = &creates[1];
+    assert_eq!(retried.checkpoint_id.as_deref(), Some(checkpoint.as_str()));
+    assert_eq!(retried.restore_memory, Some(true));
+    assert_ne!(retried.idempotency_key, refused[0].idempotency_key);
+    assert_eq!(
+        manager.get("bot-a").unwrap().status,
+        BotStatus::Running,
+        "the fallback still brings the bot back"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn restore_falls_back_to_the_newest_durable_checkpoint() {
     let (_dir, platform, manager) = setup();
@@ -2400,11 +2596,11 @@ impl BotPlatform for ThrowawaySecret {
     fn wait_checkpoint<'a>(&'a self, checkpoint_id: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
         self.inner.wait_checkpoint(checkpoint_id)
     }
-    fn checkpoint_durable<'a>(
+    fn durable_checkpoint<'a>(
         &'a self,
         checkpoint_id: &'a str,
-    ) -> BoxFuture<'a, PlatformResult<bool>> {
-        self.inner.checkpoint_durable(checkpoint_id)
+    ) -> BoxFuture<'a, PlatformResult<Option<BotCheckpoint>>> {
+        self.inner.durable_checkpoint(checkpoint_id)
     }
     fn delete_checkpoint<'a>(
         &'a self,
@@ -2676,7 +2872,14 @@ async fn live_spawn_reply_pause_resume_delete() {
     assert!(tools.contains("UV=0"), "tools: {tools:?}");
     assert!(left.iter().all(|sandbox| sandbox.status.is_terminal()));
     let checkpoint = paused.checkpoint_id.as_deref().unwrap();
-    assert!(!platform.checkpoint_durable(checkpoint).await.unwrap());
+    assert!(
+        platform
+            .durable_checkpoint(checkpoint)
+            .await
+            .unwrap()
+            .is_none(),
+        "the deleted sandbox's pause checkpoint must not read as durable"
+    );
 }
 
 /// Send `task` to a live bot and wait up to 9 minutes for its reply: the

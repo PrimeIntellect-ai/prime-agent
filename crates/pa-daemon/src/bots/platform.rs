@@ -40,6 +40,10 @@ pub struct BotCheckpoint {
     /// True once the checkpoint outlives its source sandbox and can be
     /// restored; a pending or failed one cannot.
     pub durable: bool,
+    /// True when the checkpoint holds the sandbox's memory (a pause froze
+    /// it): it restores only with `restore_memory`, never as a cold disk
+    /// boot.
+    pub has_memory: bool,
     /// RFC 3339; newest wins among the durable ones.
     pub created_at: String,
 }
@@ -53,6 +57,10 @@ pub struct BotCreate {
     pub idempotency_key: String,
     /// Restore the disk from this checkpoint instead of booting the image.
     pub checkpoint_id: Option<String>,
+    /// Restore the checkpoint's memory too (it holds memory: a pause
+    /// froze it), continuing from the paused state instead of cold-booting
+    /// its disk, which the platform refuses for such a checkpoint.
+    pub restore_memory: Option<bool>,
     /// Header rules that put the provider keys on the guest's API requests.
     pub network_rules: BTreeMap<String, HeaderRule>,
     /// The sandbox's vCPU count; `None` keeps the small default.
@@ -126,11 +134,12 @@ pub trait BotPlatform: Send + Sync {
     fn checkpoint<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<String>>;
     /// Wait until the checkpoint is durable.
     fn wait_checkpoint<'a>(&'a self, checkpoint_id: &'a str) -> BoxFuture<'a, PlatformResult<()>>;
-    /// True when the checkpoint exists and is durable.
-    fn checkpoint_durable<'a>(
+    /// The durable checkpoint's metadata; `None` when it is missing or not
+    /// durable yet.
+    fn durable_checkpoint<'a>(
         &'a self,
         checkpoint_id: &'a str,
-    ) -> BoxFuture<'a, PlatformResult<bool>>;
+    ) -> BoxFuture<'a, PlatformResult<Option<BotCheckpoint>>>;
     /// A missing checkpoint is success.
     fn delete_checkpoint<'a>(&'a self, checkpoint_id: &'a str)
         -> BoxFuture<'a, PlatformResult<()>>;
@@ -463,6 +472,7 @@ impl BotPlatform for PrimePlatform {
                 labels: request.labels.clone(),
                 idempotency_key: Some(request.idempotency_key.clone()),
                 checkpoint_id: request.checkpoint_id.clone(),
+                restore_memory: request.restore_memory,
             };
             self.client
                 .create_vm_sandbox(&create)
@@ -549,6 +559,7 @@ impl BotPlatform for PrimePlatform {
                             BotCheckpoint {
                                 id: checkpoint.id,
                                 durable,
+                                has_memory: checkpoint.has_memory,
                                 created_at: checkpoint.created_at,
                             }
                         })
@@ -581,18 +592,27 @@ impl BotPlatform for PrimePlatform {
         .boxed()
     }
 
-    fn checkpoint_durable<'a>(
+    fn durable_checkpoint<'a>(
         &'a self,
         checkpoint_id: &'a str,
-    ) -> BoxFuture<'a, PlatformResult<bool>> {
+    ) -> BoxFuture<'a, PlatformResult<Option<BotCheckpoint>>> {
         async move {
-            match self.client.get_checkpoint(checkpoint_id).await {
-                Ok(checkpoint) => Ok(checkpoint.is_durable()),
+            let checkpoint = match self.client.get_checkpoint(checkpoint_id).await {
+                Ok(checkpoint) => checkpoint,
                 Err(error) => match map_error(&error) {
-                    PlatformError::NotFound(_) => Ok(false),
-                    other => Err(other),
+                    PlatformError::NotFound(_) => return Ok(None),
+                    other => return Err(other),
                 },
+            };
+            if !checkpoint.is_durable() {
+                return Ok(None);
             }
+            Ok(Some(BotCheckpoint {
+                id: checkpoint.id,
+                durable: true,
+                has_memory: checkpoint.has_memory,
+                created_at: checkpoint.created_at,
+            }))
         }
         .boxed()
     }

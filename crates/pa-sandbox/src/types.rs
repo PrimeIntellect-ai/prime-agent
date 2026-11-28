@@ -150,6 +150,11 @@ pub struct SandboxCheckpoint {
     pub occupied_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// True when the checkpoint holds the sandbox's memory too (a pause
+    /// froze it): it restores only with
+    /// [`VmCreateRequest::restore_memory`], never as a cold disk boot.
+    #[serde(default)]
+    pub has_memory: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -236,6 +241,12 @@ pub struct VmCreateRequest {
     /// checkpoint's image and disk size, so `docker_image` and
     /// `disk_size_gb` must be left unset on a restore.
     pub checkpoint_id: Option<String>,
+    /// With `checkpoint_id`: `Some(true)` restores the checkpoint's memory
+    /// too, continuing from the paused state with its shape and
+    /// environment. `None` or `Some(false)` cold-boots the checkpoint's
+    /// disk, which a checkpoint that holds memory (a pause checkpoint)
+    /// refuses with a 409.
+    pub restore_memory: Option<bool>,
 }
 
 impl std::fmt::Debug for VmCreateRequest {
@@ -269,6 +280,7 @@ impl std::fmt::Debug for VmCreateRequest {
             .field("labels", &self.labels)
             .field("idempotency_key", &self.idempotency_key)
             .field("checkpoint_id", &self.checkpoint_id)
+            .field("restore_memory", &self.restore_memory)
             .finish()
     }
 }
