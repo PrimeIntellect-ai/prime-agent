@@ -232,7 +232,7 @@ fn candidates(
     if github {
         candidates.extend(github::candidate(agent_dir, owner));
     }
-    candidates.extend(custom_candidates(auth, &settings.get_bots_secrets()));
+    candidates.extend(custom_candidates(auth, &settings.get_bots_secrets(), owner));
     candidates
 }
 
@@ -256,26 +256,16 @@ pub fn plan_for(
     )
 }
 
-/// The stored logins as candidates: the subscription logins, or (with
-/// `mcp`) the MCP server logins. An OAuth login past its expiry is stale.
-fn login_candidates(auth: &AuthStorage, owner: &str, mcp: bool) -> Vec<Candidate> {
+/// The logins bots can get ([`logins::bot_logins`]) as candidates, in
+/// its order. An OAuth login past its expiry is stale.
+fn login_candidates(auth: &AuthStorage, agent_dir: &Path, owner: &str) -> Vec<Candidate> {
     let stored = auth.get_all();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
         });
-    let providers: Vec<String> = if mcp {
-        stored
-            .0
-            .keys()
-            .filter(|provider| provider.starts_with(logins::MCP_PREFIX))
-            .cloned()
-            .collect()
-    } else {
-        logins::LOGIN_PROVIDERS.map(str::to_string).to_vec()
-    };
-    providers
+    logins::bot_logins(&stored, agent_dir)
         .into_iter()
         .filter_map(|provider| {
             let credential = stored.credential(&provider)?;
@@ -283,12 +273,12 @@ fn login_candidates(auth: &AuthStorage, owner: &str, mcp: bool) -> Vec<Candidate
                 matches!(credential, AuthCredential::Oauth { expires, .. } if expires <= now);
             let injection = logins::injection(&provider, owner, &credential)?;
             Some(Candidate {
-                name: provider,
-                kind: if mcp {
+                kind: if provider.starts_with(logins::MCP_PREFIX) {
                     SecretKind::Mcp
                 } else {
                     SecretKind::Login
                 },
+                name: provider,
                 secrets: injection.secrets,
                 rules: injection.rules,
                 stale,
@@ -305,7 +295,10 @@ fn login_candidates(auth: &AuthStorage, owner: &str, mcp: bool) -> Vec<Candidate
 pub fn view_plan(agent_dir: &Path, owner: &str) -> Vec<Planned> {
     let mut auth = AuthStorage::create(agent_dir);
     let settings = SettingsManager::create(agent_dir, agent_dir);
-    let mut all = login_candidates(&auth, owner, false);
+    let (mcp, mut all): (Vec<Candidate>, Vec<Candidate>) =
+        login_candidates(&auth, agent_dir, owner)
+            .into_iter()
+            .partition(|candidate| candidate.kind == SecretKind::Mcp);
     all.extend(candidates(
         &mut auth,
         &settings,
@@ -314,7 +307,7 @@ pub fn view_plan(agent_dir: &Path, owner: &str) -> Vec<Planned> {
         Some(PRIME_INFERENCE_PROVIDER_ID),
         settings.get_bots_github(),
     ));
-    all.extend(login_candidates(&auth, owner, true));
+    all.extend(mcp);
     plan(all, |name| settings.get_bots_inject(name), MAX_RULE_HOSTS)
 }
 
@@ -344,14 +337,20 @@ pub fn view_rows(planned: &[Planned]) -> Value {
     })
 }
 
-/// The platform secret name of a custom secret's `value`.
-fn custom_secret_name(name: &str, value: &str) -> String {
-    format!("{}{}", custom_secret_prefix(name), key_fingerprint(value))
+/// The platform secret name of a custom secret's `value` for the Prime
+/// account `owner`.
+fn custom_secret_name(name: &str, owner: &str, value: &str) -> String {
+    format!(
+        "{}{}",
+        custom_secret_prefix(name, owner),
+        key_fingerprint(value)
+    )
 }
 
-/// The prefix of every platform secret a custom secret ever had.
-#[must_use]
-pub fn custom_secret_prefix(name: &str) -> String {
+/// The prefix of every platform secret a custom secret of the Prime
+/// account `owner` ever had. The owner part keeps teammates who share a
+/// team's secrets apart.
+fn custom_secret_prefix(name: &str, owner: &str) -> String {
     let id: String = name
         .chars()
         .map(|c| {
@@ -362,7 +361,7 @@ pub fn custom_secret_prefix(name: &str) -> String {
             }
         })
         .collect();
-    format!("PRIME_AGENT_SECRET_{id}_")
+    format!("PRIME_AGENT_SECRET_{id}_{owner}_")
 }
 
 /// The value the platform stores: Basic credentials are sent encoded.
@@ -378,10 +377,10 @@ fn platform_value(def: &BotSecretDef, value: &str) -> String {
     }
 }
 
-/// One custom secret's candidate.
-fn custom_candidate(name: &str, def: &BotSecretDef, value: &str) -> Candidate {
+/// One custom secret's candidate; `owner` names its platform secret.
+fn custom_candidate(name: &str, def: &BotSecretDef, owner: &str, value: &str) -> Candidate {
     let value = platform_value(def, value);
-    let secret = custom_secret_name(name, &value);
+    let secret = custom_secret_name(name, owner, &value);
     let prefix = def
         .scheme
         .as_deref()
@@ -405,13 +404,17 @@ fn custom_candidate(name: &str, def: &BotSecretDef, value: &str) -> Candidate {
 }
 
 /// The custom secrets whose value the auth storage holds.
-fn custom_candidates(auth: &AuthStorage, defs: &BTreeMap<String, BotSecretDef>) -> Vec<Candidate> {
+fn custom_candidates(
+    auth: &AuthStorage,
+    defs: &BTreeMap<String, BotSecretDef>,
+    owner: &str,
+) -> Vec<Candidate> {
     let stored = auth.get_all();
     defs.iter()
         .filter_map(
             |(name, def)| match stored.credential(&custom_auth_id(name)) {
                 Some(AuthCredential::ApiKey { key, .. }) if !key.is_empty() => {
-                    Some(custom_candidate(name, def, &key))
+                    Some(custom_candidate(name, def, owner, &key))
                 }
                 _ => None,
             },
@@ -425,10 +428,11 @@ pub fn custom_auth_id(name: &str) -> String {
     format!("{CUSTOM_AUTH_PREFIX}{name}")
 }
 
-/// Whether `secret` is a platform secret of the custom secret `name`.
-fn is_custom_secret_of(secret: &str, name: &str) -> bool {
+/// Whether `secret` is a platform secret of the custom secret `name` of
+/// the Prime account `owner`.
+fn is_custom_secret_of(secret: &str, name: &str, owner: &str) -> bool {
     secret
-        .strip_prefix(&custom_secret_prefix(name))
+        .strip_prefix(&custom_secret_prefix(name, owner))
         .is_some_and(|fingerprint| {
             fingerprint.len() == 12 && fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
         })
@@ -441,8 +445,8 @@ fn is_custom_secret_of(secret: &str, name: &str) -> bool {
 ///
 /// # Errors
 /// Returns the reason the secret is refused, or a storage error.
-pub fn add(agent_dir: &Path, new: &NewSecret) -> Result<()> {
-    let def = validate(new, &view_plan(agent_dir, ""))?;
+pub fn add(agent_dir: &Path, owner: &str, new: &NewSecret) -> Result<()> {
+    let def = validate(new, owner, &view_plan(agent_dir, owner))?;
     let id = custom_auth_id(&new.name);
     let mut auth = AuthStorage::create(agent_dir);
     if let Some(error) = auth.load_error() {
@@ -489,12 +493,12 @@ pub async fn remove(agent_dir: &Path, name: &str) -> Result<()> {
             bail!("\"{owned}\" is not a custom secret; turn it off for bots instead");
         }
         // Without a Prime credential no platform secret was ever made.
-        Ok(super::prime_client(&dir).ok().map(|(client, _)| client))
+        Ok(super::prime_client(&dir).ok())
     })
     .await??;
-    if let Some(client) = client {
+    if let Some((client, owner)) = client {
         for secret in client.list_secrets().await? {
-            if is_custom_secret_of(&secret.name, name) {
+            if is_custom_secret_of(&secret.name, name, &owner) {
                 client.delete_secret(&secret.id).await?;
             }
         }
@@ -560,12 +564,12 @@ pub fn normalize_host(host: &str) -> Result<String> {
     Ok(host)
 }
 
-/// Check a new custom secret against the names, headers, and limits, and
-/// return its settings entry.
+/// Check a new custom secret of the Prime account `owner` against the
+/// names, headers, and limits, and return its settings entry.
 ///
 /// # Errors
 /// Returns the reason the secret is refused.
-pub fn validate(new: &NewSecret, existing: &[Planned]) -> Result<BotSecretDef> {
+pub fn validate(new: &NewSecret, owner: &str, existing: &[Planned]) -> Result<BotSecretDef> {
     let name = &new.name;
     if name.is_empty()
         || name.len() > 64
@@ -596,10 +600,17 @@ pub fn validate(new: &NewSecret, existing: &[Planned]) -> Result<BotSecretDef> {
     if new.value.is_empty() || new.value.contains(['\r', '\n']) {
         bail!("the value is one line of text");
     }
+    let scheme = new.scheme.clone().filter(|scheme| !scheme.is_empty());
+    if scheme
+        .as_deref()
+        .is_some_and(|scheme| !matches!(scheme, "Bearer" | "Basic"))
+    {
+        bail!("the scheme is Bearer, Basic, or none");
+    }
     let def = BotSecretDef {
         host,
         header,
-        scheme: new.scheme.clone().filter(|scheme| !scheme.is_empty()),
+        scheme,
     };
     if platform_value(&def, &new.value).len() > MAX_SECRET_BYTES {
         bail!("the value is over the platform's 16 KiB limit");
@@ -615,7 +626,7 @@ pub fn validate(new: &NewSecret, existing: &[Planned]) -> Result<BotSecretDef> {
         .filter(|entry| entry.status == SecretStatus::Off)
         .map(|entry| entry.candidate.name.clone())
         .collect();
-    candidates.push(custom_candidate(name, &def, &new.value));
+    candidates.push(custom_candidate(name, &def, owner, &new.value));
     let planned = plan(
         candidates,
         |candidate| !off.contains(candidate),
@@ -718,10 +729,60 @@ mod tests {
 
     #[test]
     fn a_custom_secret_owns_only_its_own_platform_secrets() {
-        let own = custom_secret_name("ci", "v");
-        assert!(is_custom_secret_of(&own, "ci"));
-        assert!(!is_custom_secret_of(&custom_secret_name("ci_b", "v"), "ci"));
-        assert!(!is_custom_secret_of("PRIME_AGENT_SECRET_CI_KEY", "ci"));
+        let own = custom_secret_name("ci", "OWNER", "v");
+        assert!(is_custom_secret_of(&own, "ci", "OWNER"));
+        assert!(!is_custom_secret_of(
+            &custom_secret_name("ci_b", "OWNER", "v"),
+            "ci",
+            "OWNER"
+        ));
+        assert!(!is_custom_secret_of(
+            "PRIME_AGENT_SECRET_CI_KEY",
+            "ci",
+            "OWNER"
+        ));
+        // A teammate's secret of the same name in the shared team scope.
+        assert!(!is_custom_secret_of(
+            &custom_secret_name("ci", "TEAMMATE", "v"),
+            "ci",
+            "OWNER"
+        ));
+    }
+
+    /// A user-declared MCP server set to `enabled: false` is never given to
+    /// bots, so the view does not list it or count its host.
+    #[test]
+    fn the_view_leaves_out_a_disabled_mcp_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let login = AuthCredential::Oauth {
+            access: "gamma-token".into(),
+            refresh: Some("gamma-refresh".into()),
+            expires: i64::MAX,
+            account_id: None,
+            enterprise_url: None,
+            endpoint: Some("https://gamma.example.org/mcp".into()),
+            token_endpoint: None,
+            client_id: None,
+            resource: None,
+            issuer: None,
+            audience_mode: None,
+        };
+        std::fs::write(
+            dir.path().join("auth.json"),
+            json!({ "mcp:gamma": login }).to_string(),
+        )
+        .unwrap();
+        let settings = json!({
+            "bots": { "github": false },
+            "mcpServers": { "gamma": {
+                "type": "http", "url": "https://gamma.example.org/mcp", "enabled": false,
+            } },
+        });
+        std::fs::write(dir.path().join("settings.json"), settings.to_string()).unwrap();
+        let planned = view_plan(dir.path(), "OWNER");
+        assert!(planned
+            .iter()
+            .all(|entry| entry.candidate.name != "mcp:gamma"));
     }
 
     #[test]
@@ -762,28 +823,37 @@ mod tests {
         );
         let def = validate(
             &new("ci", "https://ci.example.com", Some("Basic")),
+            "OWNER",
             &existing,
         )
         .unwrap();
-        let added = custom_candidate("ci", &def, "user:pass");
+        let added = custom_candidate("ci", &def, "OWNER", "user:pass");
         assert_eq!(added.secrets[0].1, "dXNlcjpwYXNz");
-        assert!(added.secrets[0].0.starts_with("PRIME_AGENT_SECRET_CI_"));
+        assert!(added.secrets[0]
+            .0
+            .starts_with("PRIME_AGENT_SECRET_CI_OWNER_"));
         assert_eq!(
             added.rules["ci.example.com"].headers["Authorization"],
             format!("Basic ${{prime.secrets.{}}}", added.secrets[0].0)
         );
 
-        assert!(validate(&new("anthropic", "x.example.com", None), &existing).is_err());
-        assert!(validate(&new("dup", "api.anthropic.com", None), &existing).is_err());
+        assert!(validate(&new("anthropic", "x.example.com", None), "OWNER", &existing).is_err());
+        assert!(validate(
+            &new("tok", "tok.example.com", Some("Token")),
+            "OWNER",
+            &existing
+        )
+        .is_err());
+        assert!(validate(&new("dup", "api.anthropic.com", None), "OWNER", &existing).is_err());
 
         let hosts: Vec<String> = (0..MAX_RULE_HOSTS)
             .map(|i| format!("h{i}.example.com"))
             .collect();
         let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
         let full = plan(vec![candidate("wide", &hosts)], |_| true, MAX_RULE_HOSTS);
-        assert!(validate(&new("more", "more.example.com", None), &full).is_err());
+        assert!(validate(&new("more", "more.example.com", None), "OWNER", &full).is_err());
         let off = plan(vec![candidate("wide", &hosts)], |_| false, MAX_RULE_HOSTS);
-        assert!(validate(&new("more", "more.example.com", None), &off).is_ok());
+        assert!(validate(&new("more", "more.example.com", None), "OWNER", &off).is_ok());
         // A secret that is off needs no host: its replacement saves on a full plan.
         let mut ci = candidate("ci", &["ci.example.com"]);
         ci.kind = SecretKind::Custom;
@@ -792,6 +862,6 @@ mod tests {
             |name| name != "ci",
             MAX_RULE_HOSTS,
         );
-        assert!(validate(&new("ci", "ci2.example.com", None), &full_and_off).is_ok());
+        assert!(validate(&new("ci", "ci2.example.com", None), "OWNER", &full_and_off).is_ok());
     }
 }

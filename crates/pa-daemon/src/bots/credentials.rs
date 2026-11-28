@@ -332,6 +332,16 @@ impl Provisioned {
         guest_auth_json(&self.providers, self.prime_team.as_ref())
     }
 
+    /// The GitHub secrets' write error, if they failed: a bot with GitHub
+    /// on must not start without it.
+    pub fn github_error(&mut self) -> Option<anyhow::Error> {
+        let index = self
+            .failed
+            .iter()
+            .position(|(name, _)| name == super::github::GITHUB_AUTH_ID)?;
+        Some(self.failed.remove(index).1)
+    }
+
     /// The network rules for a guest whose provider is not an API key
     /// here (a subscription login). Failed keys are logged.
     #[must_use]

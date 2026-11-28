@@ -690,7 +690,7 @@ impl BotPlatform for PrimePlatform {
         reserved_hosts: usize,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
         async move {
-            let provisioned = credentials::provision(
+            let mut provisioned = credentials::provision(
                 &self.client,
                 &self.agent_dir,
                 &self.owner,
@@ -699,6 +699,11 @@ impl BotPlatform for PrimePlatform {
                 reserved_hosts,
             )
             .await;
+            if let Some(error) = provisioned.github_error() {
+                return Err(credential_error(&error.context(
+                    "the platform secrets for GitHub could not be provisioned",
+                )));
+            }
             let auth_json = provisioned.guest_auth();
             let network_rules = match provider {
                 Some(provider) => provisioned

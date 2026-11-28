@@ -20,14 +20,15 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use base64::Engine as _;
 use pa_core::auth::{
-    AuthCredential, AuthStorage, ANTHROPIC_PROVIDER_ID, GITHUB_COPILOT_PROVIDER_ID,
-    OPENAI_CODEX_PROVIDER_ID, XAI_PROVIDER_ID,
+    AuthCredential, AuthStorage, AuthStorageData, ANTHROPIC_PROVIDER_ID,
+    GITHUB_COPILOT_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID, XAI_PROVIDER_ID,
 };
 use pa_sandbox::HeaderRule;
 use serde_json::Value;
 
 use super::credentials::{key_fingerprint, GUEST_API_KEY_PLACEHOLDER};
 use super::platform::BotPlatform;
+use super::secrets::MAX_SECRET_BYTES;
 
 /// The subscription logins a bot can use.
 pub const LOGIN_PROVIDERS: [&str; 4] = [
@@ -43,8 +44,6 @@ const REFRESH_MARGIN_MS: i64 = 10 * 60 * 1000;
 pub const REFRESH_TICK: Duration = Duration::from_secs(60);
 /// The guest's expiry (2100-01-01): the guest never refreshes.
 const GUEST_EXPIRES_MS: i64 = 4_102_444_800_000;
-/// The platform's limit on one secret value.
-const MAX_SECRET_BYTES: usize = 16 * 1024;
 /// The auth storage prefix of MCP server logins.
 pub const MCP_PREFIX: &str = "mcp:";
 
@@ -432,6 +431,63 @@ fn user_mcp_servers(agent_dir: &Path) -> HashMap<String, pa_core::mcp::McpServer
         .collect()
 }
 
+/// The logins bots can get, in plan order: the stored subscription
+/// logins, then the MCP server logins with an endpoint, less the
+/// user-declared servers set to `enabled: false`. `bots.inject.<login>`
+/// applies on top. Blocking: it reads the settings.
+#[must_use]
+pub fn bot_logins(stored: &AuthStorageData, agent_dir: &Path) -> Vec<String> {
+    let subscriptions = LOGIN_PROVIDERS.into_iter().filter(|provider| {
+        matches!(
+            stored.credential(provider),
+            Some(AuthCredential::Oauth { .. })
+        )
+    });
+    let mcp: Vec<String> = stored
+        .0
+        .keys()
+        .filter(|provider| {
+            provider.starts_with(MCP_PREFIX)
+                && matches!(
+                    stored.credential(provider),
+                    Some(
+                        AuthCredential::Oauth {
+                            endpoint: Some(_),
+                            ..
+                        } | AuthCredential::McpStaticToken {
+                            endpoint: Some(_),
+                            ..
+                        }
+                    )
+                )
+        })
+        .cloned()
+        .collect();
+    let user_servers = if mcp.is_empty() {
+        HashMap::new()
+    } else {
+        user_mcp_servers(agent_dir)
+    };
+    let enabled = |login: &String| {
+        !login
+            .strip_prefix(MCP_PREFIX)
+            .and_then(|server| user_servers.get(server))
+            .is_some_and(|config| {
+                matches!(
+                    config,
+                    pa_core::mcp::McpServerConfig::Http {
+                        enabled: Some(false),
+                        ..
+                    }
+                )
+            })
+    };
+    subscriptions
+        .map(str::to_string)
+        .chain(mcp.into_iter().filter(enabled))
+        .collect()
+}
+
 /// The guest's entry for a user-declared HTTP server, bound to the login's
 /// endpoint. It carries no headers, token variables, or client secret.
 fn guest_mcp_server(config: &pa_core::mcp::McpServerConfig, endpoint: &str) -> Option<Value> {
@@ -486,38 +542,18 @@ impl Logins {
         }
     }
 
-    /// The logins this Mac holds, each with whether bots get it
-    /// (`bots.inject.<provider>`, on by default): the subscription logins,
-    /// then the MCP server logins with an endpoint.
+    /// The logins bots can get ([`bot_logins`]), each with whether
+    /// `bots.inject.<provider>` is on (the default).
     async fn stored(&self) -> Vec<(String, bool)> {
         let (auth, agent_dir) = (Arc::clone(&self.auth), self.agent_dir.clone());
         tokio::task::spawn_blocking(move || {
-            let stored = auth("").get_all();
             let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
-            let subscriptions = LOGIN_PROVIDERS.into_iter().filter(|provider| {
-                matches!(
-                    stored.credential(provider),
-                    Some(AuthCredential::Oauth { .. })
-                )
-            });
-            let mcp = stored.0.keys().filter(|provider| {
-                provider.starts_with(MCP_PREFIX)
-                    && matches!(
-                        stored.credential(provider),
-                        Some(
-                            AuthCredential::Oauth {
-                                endpoint: Some(_),
-                                ..
-                            } | AuthCredential::McpStaticToken {
-                                endpoint: Some(_),
-                                ..
-                            }
-                        )
-                    )
-            });
-            subscriptions
-                .chain(mcp.map(String::as_str))
-                .map(|provider| (provider.to_string(), settings.get_bots_inject(provider)))
+            bot_logins(&auth("").get_all(), &agent_dir)
+                .into_iter()
+                .map(|login| {
+                    let inject = settings.get_bots_inject(&login);
+                    (login, inject)
+                })
                 .collect()
         })
         .await
@@ -553,20 +589,7 @@ impl Logins {
         let (user_servers, connections) = user_servers;
         for (login, inject) in stored {
             let required = login == provider;
-            // A user-declared MCP server with `enabled: false` stays off in the bot.
-            let disabled = login
-                .strip_prefix(MCP_PREFIX)
-                .and_then(|server| user_servers.get(server))
-                .is_some_and(|config| {
-                    matches!(
-                        config,
-                        pa_core::mcp::McpServerConfig::Http {
-                            enabled: Some(false),
-                            ..
-                        }
-                    )
-                });
-            if !inject || disabled {
+            if !inject {
                 if required {
                     bail!(
                         "a bot on {provider} needs the owner's {provider} login, \

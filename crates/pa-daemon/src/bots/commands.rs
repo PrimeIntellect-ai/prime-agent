@@ -766,7 +766,7 @@ impl Supervisor {
                     value: value.clone(),
                 };
                 let dir = agent_dir.clone();
-                blocking(move || super::secrets::add(&dir, &new)).await
+                blocking(move || super::secrets::add(&dir, &owner_of(&dir), &new)).await
             }
             DaemonCommand::RemoveBotSecret { name, .. } => {
                 super::secrets::remove(&agent_dir, name).await
