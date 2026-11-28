@@ -2771,7 +2771,7 @@ async fn children_count_toward_the_owners_bot_list() {
             &[serde_json::json!({
                 "botId": "bot-child", "name": "child", "ownerSessionId": "guest-session",
                 "parentBotId": "bot-a", "checkpointId": "ckpt-1", "status": "stopped",
-                "createdAt": 1_i64,
+                "createdAt": 1_i64, "statusSince": 1_i64, "closedRunningMs": 0_i64,
             })],
         )
         .await
@@ -2795,7 +2795,8 @@ async fn merged_child_rows_upsert_and_vanished_children_go() {
         "createdAt": 1_i64,
         "lastTurnAt": 2_i64,
         "guestSessionId": "guest-sbx-9",
-        "runningMs": 1000_i64,
+        "statusSince": 1_i64,
+        "closedRunningMs": 1000_i64,
         "github": false,
     });
     manager.merge_children("bot-a", &[row]).await.unwrap();
@@ -2860,7 +2861,7 @@ async fn merged_child_rows_upsert_and_vanished_children_go() {
             &[serde_json::json!({
                 "botId": "bot-live", "name": "live", "ownerSessionId": "guest-session",
                 "parentBotId": "bot-a", "sandboxId": child_sandbox, "status": "running",
-                "createdAt": 1_i64,
+                "createdAt": 1_i64, "statusSince": 1_i64, "closedRunningMs": 0_i64,
             })],
         )
         .await

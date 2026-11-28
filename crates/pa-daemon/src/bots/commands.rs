@@ -945,17 +945,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_record_without_a_status_stamp_counts_from_the_next_load() {
-        let (dir, _platform, manager) = setup();
-        let mut record = manager.spawn(&spec("bot-a")).await.unwrap();
-        record.status_since = None;
-        let mut registry = super::super::registry::BotRegistry::load(dir.path()).unwrap();
-        registry.put(record).unwrap();
-        let loaded = super::super::registry::BotRegistry::load(dir.path()).unwrap();
-        assert!(loaded.get("bot-a").unwrap().status_since.is_some());
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn a_pause_off_process_ends_the_running_time_at_the_idle_grace() {
         let (dir, platform, manager) = setup();
         let mut bot = manager.spawn(&spec("bot-a")).await.unwrap();
@@ -1029,8 +1018,8 @@ mod tests {
         let row = serde_json::json!({
             "botId": "bot-c", "name": "helper", "ownerSessionId": "guest-session",
             "sandboxId": "sbx-9", "status": "running", "createdAt": 1_i64,
-            "guestSessionId": "guest-sbx-9", "closedRunningMs": 1000_i64,
-            "github": false,
+            "guestSessionId": "guest-sbx-9", "statusSince": 1_i64,
+            "closedRunningMs": 1000_i64, "github": false,
         });
         manager.merge_children("bot-a", &[row]).await.unwrap();
         // The Mac upgraded while the daemon's own bot ran.

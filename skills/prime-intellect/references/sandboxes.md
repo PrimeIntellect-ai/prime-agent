@@ -1,6 +1,6 @@
 # Sandboxes & Tunnels
 
-Prime Sandboxes are disposable VM environments for running AI-generated or untrusted code in the cloud: isolated, fast to create, billed only while running (CPU $0.05/core/hr, memory $0.01/GB/hr, disk $0.001/GB/hr).
+Prime Sandboxes are disposable VM environments for running AI-generated or untrusted code in the cloud: isolated, fast to create, billed only while running (a paused sandbox pays for its disk only). Current rates: the Pricing section of `sandboxes/overview.md` in the live docs below.
 
 ## Agents: spawn a bot
 

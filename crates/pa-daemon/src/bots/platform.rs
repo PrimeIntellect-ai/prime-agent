@@ -199,7 +199,8 @@ pub fn bot_status(status: SandboxStatus) -> BotStatus {
 const BOT_CPU_CORES: f64 = 2.0;
 const BOT_MEMORY_GB: f64 = 4.0;
 const BOT_DISK_GB: f64 = 20.0;
-/// Prime's published sandbox rates in USD per hour: the sandbox API carries no price.
+/// Prime's published sandbox rates in USD per hour (the Pricing section of
+/// docs.primeintellect.ai/sandboxes/overview.md): the sandbox API carries no price.
 const USD_PER_CPU_HOUR: f64 = 0.02;
 const USD_PER_MEMORY_GIB_HOUR: f64 = 0.0125;
 const USD_PER_DISK_GIB_HOUR: f64 = 0.0002;

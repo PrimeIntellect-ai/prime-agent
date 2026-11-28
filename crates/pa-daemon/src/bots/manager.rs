@@ -2698,8 +2698,8 @@ fn checkpoint_millis(checkpoint: &BotCheckpoint) -> u64 {
 
 /// One `list_bots` row of a bot's daemon, as this daemon's record for the
 /// child: the row's facts over an existing record's, the fields the row
-/// does not carry kept from it. `None` for a row without identity, or one
-/// whose bot never provisioned (no sandbox and no checkpoint).
+/// does not carry kept from it. `None` for a row without identity or status
+/// stamps, or one whose bot never provisioned (no sandbox and no checkpoint).
 fn child_record(
     row: &Value,
     parent_bot_id: &str,
@@ -2715,15 +2715,8 @@ fn child_record(
     let existing = existing.unwrap_or_default();
     let field = |key: &str| row.get(key).cloned().unwrap_or(Value::Null);
     let status = serde_json::from_value(field("status")).unwrap_or(BotStatus::Stopped);
-    // An older guest's row has no closed time: keep the registry's, and close
-    // a running interval the row ends.
-    let running_ms = field("closedRunningMs").as_i64().unwrap_or_else(|| {
-        if existing.status == BotStatus::Running && status != BotStatus::Running {
-            existing.running_ms_at(field("statusSince").as_i64().unwrap_or_else(now_ms))
-        } else {
-            existing.running_ms
-        }
-    });
+    let status_since = field("statusSince").as_i64()?;
+    let running_ms = field("closedRunningMs").as_i64()?;
     Some(BotRecord {
         bot_id: bot_id.to_string(),
         name: text("name").unwrap_or_default().to_string(),
@@ -2751,11 +2744,7 @@ fn child_record(
         bots: false,
         parent_bot_id: Some(parent_bot_id.to_string()),
         pause_at: field("pauseAt").as_i64(),
-        // A guest row without the stamp counts from the first merge.
-        status_since: field("statusSince")
-            .as_i64()
-            .or(existing.status_since.filter(|_| existing.status == status))
-            .or_else(|| Some(now_ms())),
+        status_since: Some(status_since),
         // The record adds the open interval from `status_since` itself.
         running_ms,
         pause_token: existing.pause_token,
