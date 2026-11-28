@@ -387,7 +387,6 @@ pub struct Settings {
     pub enable_builtin_skills: Option<bool>,
     pub terminal: Option<TerminalSettings>,
     pub images: Option<ImageSettings>,
-    pub enabled_models: Option<Vec<String>>,
     /// Rust-only daemon-level model allowlist: a model outside fails loudly instead
     /// of resolving, with no fallback. `None` is unrestricted.
     pub allowed_models: Option<Vec<String>>,

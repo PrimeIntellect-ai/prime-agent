@@ -60,12 +60,11 @@ class CaptureGuards(unittest.TestCase):
             value['selected_model'] = selected
             validate_observation('authorized', value)
 
-    def test_unavailable_or_excluded_private_model_is_rejected(self):
-        for scenario in ('unavailable', 'excluded'):
-            value = observation(scenario)
-            value['selected_model'] = PRIVATE
-            with self.assertRaisesRegex(AssertionError, 'unavailable or excluded'):
-                validate_observation(scenario, value)
+    def test_unavailable_private_model_is_rejected(self):
+        value = observation('unavailable')
+        value['selected_model'] = PRIVATE
+        with self.assertRaisesRegex(AssertionError, 'unavailable model'):
+            validate_observation('unavailable', value)
 
     def test_mismatched_authorization_state_is_rejected(self):
         for scenario in ('authorized', 'unavailable'):
@@ -84,11 +83,10 @@ class CaptureGuards(unittest.TestCase):
                 validate_observation('unavailable', value)
 
     def test_unexpected_warning_outside_unavailable_case_is_rejected(self):
-        for scenario in ('authorized', 'excluded'):
-            value = observation(scenario)
-            value['fallback_message'] = WARNING
-            with self.assertRaisesRegex(AssertionError, 'unexpected warning'):
-                validate_observation(scenario, value)
+        value = observation('authorized')
+        value['fallback_message'] = WARNING
+        with self.assertRaisesRegex(AssertionError, 'unexpected warning'):
+            validate_observation('authorized', value)
 
     def test_svg_escapes_real_cells_and_retains_matched_dimensions(self):
         screen = Screen(120, 40)

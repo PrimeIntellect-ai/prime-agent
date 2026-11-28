@@ -165,7 +165,6 @@ pub struct Args {
     pub no_session: bool,
     pub fork: Option<String>,
     pub session_dir: Option<String>,
-    pub models: Option<Vec<String>>,
     pub print: bool,
     pub export: Option<String>,
     pub no_skills: bool,
@@ -327,16 +326,6 @@ pub fn parse_args(args: &[String]) -> Args {
             "--no-session" => result.no_session = true,
             "--fork" => result.fork = Some(require_value!(arg)),
             "--session-dir" => result.session_dir = Some(require_value!(arg)),
-            "--models" => {
-                let value = require_value!(arg);
-                result.models = Some(
-                    value
-                        .split(',')
-                        .map(str::trim)
-                        .map(str::to_string)
-                        .collect(),
-                );
-            }
             "--thinking" => {
                 let level = require_value!(arg);
                 if let Some(level) = parse_thinking_level(&level) {

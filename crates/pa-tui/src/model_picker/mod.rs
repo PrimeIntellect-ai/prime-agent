@@ -40,8 +40,6 @@ pub enum ModelPickerAction {
     Cancel,
     /// Navigation, filtering, or effort editing only.
     None,
-    /// The scope key toggled the picker's list (the picker stays mounted).
-    ScopeToggled { scoped: bool },
 }
 
 /// The outcome of dispatching `/model [search]`.
@@ -62,21 +60,15 @@ pub struct ModelPickerOptions {
     pub configured_providers: HashSet<String>,
     /// The settings recent-model list (`provider/id` keys, newest first).
     pub recent_models: Vec<String>,
-    /// The session's scoped models as `provider/id` keys: the picker opens on them when non-empty,
-    /// else the full catalog; the keys resolve against the loaded catalog (a missing entry is not
-    /// listed).
-    pub scoped_models: Vec<String>,
     /// The effort a fresh selection starts from (TS `thinkingLevel`).
     pub thinking_level: Option<ModelThinkingLevel>,
     /// The viewport height the list sizes itself against (already the `getRows` value).
     pub viewport_rows: usize,
 }
 
-mod scope;
 mod search;
 mod sort;
 
-use scope::ModelScope;
 use search::{score_model_search, SearchMatch};
 use sort::{natural_cmp, version_desc, version_key};
 
@@ -118,13 +110,6 @@ pub struct ModelPicker {
     render_width: usize,
     visible_items: usize,
     last_query: String,
-    /// The session's scoped list as `provider/id` keys; empty is the unscoped picker.
-    scoped_models: Vec<String>,
-    /// The scoped entries' positions in `all_models`, in the scoped list's own order
-    /// (the scoped view keeps the session's scope order, not the catalog's sorted one).
-    scoped_positions: Vec<usize>,
-    /// The active list: `Scoped` while the session holds scoped models, else the full catalog.
-    scope: ModelScope,
     /// The version runs parsed from each `all_models` entry's id, indexed alike
     /// (the search sort's recency tier: the ids' versions stand in for release recency).
     version_keys: Vec<Vec<String>>,
@@ -154,21 +139,11 @@ impl ModelPicker {
             render_width: 80,
             visible_items: 8,
             last_query: String::new(),
-            scoped_models: options.scoped_models,
-            scoped_positions: Vec::new(),
-            scope: ModelScope::All,
             version_keys: Vec::new(),
         };
         picker.load_models(options.models);
-        picker.resolve_scope_positions();
-        if picker.has_scoped_models() {
-            picker.scope = ModelScope::Scoped;
-        }
         let query = picker.search.value().to_string();
         picker.filter_models(&query);
-        if matches!(picker.scope, ModelScope::Scoped) {
-            picker.select_current_or_top();
-        }
         picker
     }
 
@@ -191,9 +166,6 @@ impl ModelPicker {
             .selected_model()
             .map(|model| Self::model_key_provider(&model.provider, &model.id));
         self.load_models(models);
-        // The refresh re-resolves the scoped keys against it: an entry missing
-        // from the loaded catalog is not listed, and one the refresh brings appears.
-        self.resolve_scope_positions();
         let query = self.search.value().to_string();
         self.filter_models(&query);
         if let Some(key) = selected_key {
@@ -214,25 +186,6 @@ impl ModelPicker {
         // overlay only cancels, like the TS model selector.
         if key == "ctrl+c" {
             return ModelPickerAction::Cancel;
-        }
-        // The scope toggle goes first: it toggles only with scoped entries,
-        // re-filters, and re-selects the current model, else the top.
-        if kb.matches(key, "app.model.toggleScope")
-            || kb.matches_option_composed(key, "app.model.toggleScope")
-        {
-            if self.has_scoped_models() {
-                self.scope = match self.scope {
-                    ModelScope::All => ModelScope::Scoped,
-                    ModelScope::Scoped => ModelScope::All,
-                };
-                let query = self.search.value().to_string();
-                self.filter_models(&query);
-                self.select_current_or_top();
-                return ModelPickerAction::ScopeToggled {
-                    scoped: self.scoped_side(),
-                };
-            }
-            return ModelPickerAction::None;
         }
         if self.search.value().is_empty() || self.navigated_into_list {
             for (binding, direction) in
@@ -319,9 +272,7 @@ impl ModelPicker {
             Some(self.viewport_rows),
             8,
             self.filtered.len(),
-            // The frame's fixed rows plus the scope row when the session has
-            // scoped models.
-            4 + usize::from(self.has_scoped_models()) + detail_rows,
+            4 + detail_rows,
             1,
         )
     }
@@ -465,11 +416,9 @@ impl ModelPicker {
         let query_changed = query != self.last_query;
         self.last_query = query.to_string();
         if query.trim().is_empty() {
-            self.filtered = self.active_indices();
+            self.filtered = (0..self.all_models.len()).collect();
         } else {
-            let mut matches: Vec<(usize, SearchMatch)> = self
-                .active_indices()
-                .into_iter()
+            let mut matches: Vec<(usize, SearchMatch)> = (0..self.all_models.len())
                 .filter_map(|index| {
                     score_model_search(&self.all_models[index], query).map(|match_| (index, match_))
                 })

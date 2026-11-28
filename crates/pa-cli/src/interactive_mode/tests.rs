@@ -329,8 +329,6 @@ fn settings_sink_completes_a_provisioned_home_without_touching_the_choice() {
             agent_dir: agent_dir.clone(),
             cli_provider: None,
             cli_model: None,
-            models: None,
-            is_continuing: false,
             api_key: None,
         },
     };
@@ -383,8 +381,6 @@ async fn report_an_aborted_flow_once() {
             agent_dir: agent_dir.clone(),
             cli_provider: None,
             cli_model: None,
-            models: None,
-            is_continuing: false,
             api_key: None,
         },
     };
@@ -432,8 +428,6 @@ fn settings_sink_persists_the_fresh_home_answer_with_the_flag() {
             agent_dir: agent_dir.clone(),
             cli_provider: None,
             cli_model: None,
-            models: None,
-            is_continuing: false,
             api_key: None,
         },
     };

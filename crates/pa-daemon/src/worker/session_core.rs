@@ -89,9 +89,6 @@ pub(crate) struct SessionCore {
     /// armed items co-deliver as ONE batched turn at the next boundary, even
     /// under "one-at-a-time". Disarms when no armed item remains queued.
     pub(crate) forced_all_steering: bool,
-    /// The scoped model list (TS `_scopedModels`): wire entries
-    /// `{ model, thinkingLevel? }` the model cycler cycles within.
-    pub(crate) scoped_models: Vec<Value>,
     /// A retry in flight was aborted (`abort_retry`); the turn's abort
     /// probe reads it and the next turn start clears it.
     pub(crate) retry_abort_requested: bool,
@@ -200,7 +197,6 @@ impl SessionCore {
             steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
-            scoped_models: Vec::new(),
             retry_abort_requested: false,
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),

@@ -123,7 +123,6 @@ impl Worker {
             session_actions: session_snapshot(core),
             compaction_count: store.map_or(0, |store| store.compaction_count() as u32),
             goal: inputs.goal,
-            scoped_models: core.scoped_models.clone(),
             active_tool_names: Vec::new(),
             // TS `createAgentConnectionState` carries `contextUsage:
             // session.getContextUsage()` in every attach snapshot, so

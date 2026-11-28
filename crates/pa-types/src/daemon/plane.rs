@@ -63,7 +63,6 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
         | "release_session_input_pause"
         | "set_model"
         | "cycle_model"
-        | "set_scoped_models"
         | "set_thinking_level"
         | "set_service_tier"
         | "cycle_thinking_level"

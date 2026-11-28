@@ -279,14 +279,6 @@ pub trait InteractionTelemetry: Send + Sync {
         &self,
         outcome: &'static str,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-    /// A scoped-models interaction (`tui scoped models used`): `action` is `cycle_forward` /
-    /// `cycle_backward` or `toggle_scope`; `scoped` reports whether the cycle ran within the
-    /// session's scoped list.
-    fn scoped_models_used(
-        &self,
-        action: &'static str,
-        scoped: bool,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// An agents-view action ran. Actions include `program_shown`, `renamed`, and
     /// `content_search` (ctrl+g switched the search to message text). Only adoption counts are
     /// recorded.
@@ -329,10 +321,6 @@ pub struct InteractiveOptions {
     pub script_path: Option<PathBuf>,
     /// Model flags to carry into the create config.
     pub model_selection: ModelSelection,
-    /// The `--models` scope patterns: raw strings — `provider/id`, globs, `:thinking`
-    /// suffixes — that ride the create config's `models` field; the daemon resolves them into
-    /// the session's scoped list. `None` leaves the scope unset.
-    pub models: Option<Vec<String>>,
     /// Create without a session file (`--no-session`).
     pub no_session: bool,
     pub session: SessionSelection,
@@ -406,7 +394,6 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("session_dir", &self.session_dir)
             .field("script_path", &self.script_path)
             .field("model_selection", &self.model_selection)
-            .field("models", &self.models)
             .field("model_catalog", &self.model_catalog)
             .field("no_session", &self.no_session)
             .field("session", &self.session)
@@ -452,11 +439,6 @@ impl InteractiveOptions {
         }
         if let Some(thinking) = self.model_selection.thinking {
             config["thinking"] = json!(thinking.wire_name());
-        }
-        // The raw `--models` patterns ride the create config: the daemon resolves them once per
-        // create.
-        if let Some(models) = &self.models {
-            config["models"] = json!(models);
         }
         // `telemetryDisabled` rides the runtime config: a resume's create reads it back.
         if self.telemetry_disabled == Some(true) {

@@ -120,8 +120,6 @@ fn session_model(
     pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
         cli_provider: None,
         cli_model: None,
-        scoped_models: &[],
-        is_continuing: false,
         default_provider: settings.get_default_provider(),
         default_model_id: settings.get_default_model(),
         all_models: all,

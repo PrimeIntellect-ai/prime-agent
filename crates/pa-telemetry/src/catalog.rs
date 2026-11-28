@@ -1026,7 +1026,6 @@ const TUI_EXIT: EventRule = EventRule {
         ("tui_bash_shortcut_count", optional(count())),
         ("tui_bash_bang_count", optional(count())),
         ("tui_external_editor_count", optional(count())),
-        ("tui_scoped_models_count", optional(count())),
         ("tui_suspend_count", optional(count())),
         ("tui_agents_action_count", optional(count())),
         ("tui_agents_content_search_count", optional(count())),

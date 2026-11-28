@@ -505,7 +505,6 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
     .await;
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -1311,7 +1310,6 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
     .expect("write script");
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -1393,7 +1391,6 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
     ] });
     std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -1606,7 +1603,6 @@ async fn tui_model_picker_applies_and_effort_reports() {
     );
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -1751,7 +1747,6 @@ async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_fla
     assert_eq!(catalog[0].id, "chat-plus");
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -1850,7 +1845,6 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
     let script = serde_json::json!({ "engine": "faux", "responses": [] });
     std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -1969,7 +1963,6 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
     });
     std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -2139,7 +2132,6 @@ async fn tui_session_tree_navigates_forks_and_clones() {
     });
     std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -2313,7 +2305,6 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
     });
     std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -2478,7 +2469,6 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
     std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -2633,7 +2623,6 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
     std::fs::write(&script_path, script.to_string()).expect("write script");
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -2740,7 +2729,6 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
     }))
     .expect("catalog entry");
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -2871,7 +2859,6 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         "both models.json models resolve available"
     );
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -2941,10 +2928,9 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
     drop(supervisor);
 }
 
-/// `--models` scope end to end: the cycle keys walk the session's scope
-/// order, not the catalog's (mock-2 must never appear).
+/// The cycle keys walk the available catalog end to end.
 #[tokio::test]
-async fn tui_scoped_models_cycle_through_the_session_scope() {
+async fn tui_model_cycle_walks_the_available_catalog() {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -2981,20 +2967,16 @@ async fn tui_scoped_models_cycle_through_the_session_scope() {
     // No scripted engine: the real startup chain resolves the session's model
     // (the scripted engine answers none and the cycle would refuse to switch).
     options.script_path = None;
-    options.models = Some(vec![
-        "test-provider/mock-1".to_string(),
-        "test-provider/mock-3".to_string(),
-    ]);
     let key = |code: KeyCode, modifiers: KeyModifiers| {
         pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(code, modifiers))
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // alt+m cycles forward: mock-1 -> mock-3 (unscoped would show mock-2).
+            // alt+m cycles forward: mock-1 -> mock-2.
             key(KeyCode::Char('m'), KeyModifiers::ALT),
             pa_tui::interactive::HeadlessStep::WaitRender {
-                needle: "Model: test-provider/mock-3".to_string(),
+                needle: "Model: test-provider/mock-2".to_string(),
                 timeout_ms: 30_000,
             },
             key(KeyCode::Char('m'), KeyModifiers::SHIFT | KeyModifiers::ALT),
@@ -3011,16 +2993,12 @@ async fn tui_scoped_models_cycle_through_the_session_scope() {
         .expect("interactive run");
     let rendered = outcome.frames.join("\n");
     assert!(
-        rendered.contains("Model: test-provider/mock-3"),
-        "alt+m cycled forward through the scope:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("Model: test-provider/mock-2"),
-        "the unscoped catalog order never surfaced:\n{rendered}"
+        rendered.contains("Model: test-provider/mock-2"),
+        "alt+m cycled forward through the catalog:\n{rendered}"
     );
     assert!(
         rendered.contains("Model: test-provider/mock-1"),
-        "shift+alt+m cycled backward through the scope:\n{rendered}"
+        "shift+alt+m cycled backward through the catalog:\n{rendered}"
     );
     drop(supervisor);
 }
@@ -3032,7 +3010,6 @@ fn base_options(
     session_dir: &Path,
 ) -> pa_tui::interactive::InteractiveOptions {
     pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.to_path_buf(),
         session_dir: Some(session_dir.to_path_buf()),
@@ -3607,7 +3584,6 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
     .await;
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         provider_auth: None,
         traces: None,
         update_commands: None,
@@ -3740,7 +3716,6 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
     let prompt_stash: std::sync::Arc<std::sync::Mutex<pa_tui::prompt_stash::PromptStashStore>> =
         std::sync::Arc::default();
     let make_options = || pa_tui::interactive::InteractiveOptions {
-        models: None,
         provider_auth: None,
         traces: None,
         update_commands: None,
@@ -3901,7 +3876,6 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
     .await;
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         provider_auth: None,
         traces: None,
         update_commands: None,
@@ -4026,7 +4000,6 @@ async fn tui_ctrl_s_stashes_and_restores_the_prompt_draft() {
     .await;
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         provider_auth: None,
         traces: None,
         update_commands: None,
@@ -4185,7 +4158,6 @@ async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
     .await;
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         provider_auth: None,
         traces: None,
         update_commands: None,
@@ -4329,7 +4301,6 @@ async fn tui_ctrl_s_stash_is_remappable_via_keybindings_json() {
     .await;
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         provider_auth: None,
         traces: None,
         update_commands: None,
@@ -4474,7 +4445,6 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
     .await;
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         provider_auth: None,
         traces: None,
         update_commands: None,
@@ -5184,7 +5154,6 @@ async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
     std::fs::write(&script_path, script.to_string()).expect("write script");
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -5305,7 +5274,6 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
     .await;
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -5418,7 +5386,6 @@ async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel()
     std::fs::write(&script_path, script.to_string()).expect("write script");
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -5537,7 +5504,6 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
     });
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),
@@ -5660,7 +5626,6 @@ async fn tui_accepted_then_killed_turn_renders_closed_error() {
         client.close();
     });
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir),
@@ -5813,7 +5778,6 @@ async fn assert_close_reason_survives_late_turn_status(reason: &str, explanation
         client.close();
     });
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir),

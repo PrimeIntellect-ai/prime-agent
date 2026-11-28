@@ -393,7 +393,6 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
 
 fn chat_options(socket: PathBuf, cwd: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
         socket_path: socket,
         cwd,
         session_dir: None,

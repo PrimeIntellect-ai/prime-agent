@@ -26,11 +26,11 @@ impl std::fmt::Display for ModelAllowlistRefusal {
 
 impl std::error::Error for ModelAllowlistRefusal {}
 
-/// Whether a selector is allowed by the `allowedModels` patterns (the
-/// `--models` grammar, case-insensitive, matched against the full selector
-/// `provider/model-id` and the bare id, whose `prime-inference` ids may
-/// carry slashes): wildcards glob, plain patterns match exactly. An empty
-/// pattern list allows nothing.
+/// Whether a selector is allowed by the `allowedModels` patterns
+/// (case-insensitive, matched against the full selector `provider/model-id`
+/// and the bare id, whose `prime-inference` ids may carry slashes):
+/// wildcards glob, plain patterns match exactly. An empty pattern list
+/// allows nothing.
 #[must_use]
 pub fn model_allowed(selector: &str, allowlist: &[String]) -> bool {
     allowlist

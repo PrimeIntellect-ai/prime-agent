@@ -113,7 +113,6 @@ pub fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
 /// update syntax.
 pub fn options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

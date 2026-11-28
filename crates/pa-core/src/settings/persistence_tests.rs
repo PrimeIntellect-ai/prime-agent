@@ -182,13 +182,6 @@ fn resource_save_preserves_a_document_corrupted_after_load() {
 }
 
 #[test]
-fn clearing_a_setting_removes_only_that_key() {
-    let (storage, mut manager) = fixture(r#"{"enabledModels":["old"],"theme":"light"}"#);
-    manager.set_enabled_models(None).unwrap();
-    assert_eq!(document(storage.as_ref()), json!({"theme":"light"}));
-}
-
-#[test]
 fn resource_save_survives_an_unrelated_later_save() {
     let (storage, mut manager) = fixture("{}");
     manager.set_packages(vec![json!("first")]);

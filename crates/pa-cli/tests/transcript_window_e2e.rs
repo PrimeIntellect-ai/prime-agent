@@ -221,7 +221,6 @@ async fn create_session_from_file(socket: &Path, dir: &Path, session_path: &Path
 
 fn chat_options(socket: &Path, dir: &Path, active: String) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
         socket_path: socket.to_path_buf(),
         cwd: dir.to_path_buf(),
         session_dir: None,

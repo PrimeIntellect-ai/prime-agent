@@ -141,7 +141,6 @@ pub(crate) async fn cycle_model(state: &Arc<RpcState>) -> Result<ResponseData, S
     Ok(ResponseData::Present(json!({
         "model": next,
         "thinkingLevel": level,
-        "isScoped": false,
     })))
 }
 

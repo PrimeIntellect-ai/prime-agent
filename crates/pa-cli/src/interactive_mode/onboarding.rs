@@ -11,10 +11,6 @@ pub(super) struct StartupModelProbe {
     pub(super) agent_dir: PathBuf,
     pub(super) cli_provider: Option<String>,
     pub(super) cli_model: Option<String>,
-    /// The `--models` scope pattern list, resolved against the fresh
-    /// catalog on every probe.
-    pub(super) models: Option<Vec<String>>,
-    pub(super) is_continuing: bool,
     /// An explicit `--api-key` counts as configured auth (it rides the
     /// resolved model's provider as a runtime key).
     pub(super) api_key: Option<String>,
@@ -30,17 +26,10 @@ impl StartupModelProbe {
         let all: Vec<pa_types::ai::Model> = registry.get_all().to_vec();
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();
-        let scoped = self
-            .models
-            .as_deref()
-            .map(|patterns| pa_core::models::resolve_model_scope_from_models(patterns, &available))
-            .unwrap_or_default();
         let startup_model =
             pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
                 cli_provider: self.cli_provider.as_deref(),
                 cli_model: self.cli_model.as_deref(),
-                scoped_models: &scoped,
-                is_continuing: self.is_continuing,
                 default_provider: settings.get_default_provider(),
                 default_model_id: settings.get_default_model(),
                 all_models: &all,
@@ -280,12 +269,6 @@ pub(super) fn onboarding_task(
         agent_dir: config.agent_dir.clone(),
         cli_provider: config.provider.clone(),
         cli_model: config.model.clone(),
-        models: config.models.clone(),
-        // A fork launch resolves the startup model as a continuation
-        // (#2806): the copy holds the source's rows.
-        is_continuing: options.session.resume.is_some()
-            || options.session.continue_recent
-            || options.session.fork.is_some(),
         api_key: config.api_key.clone(),
     };
     let (current_model, model_ready_now) = probe.resolve();

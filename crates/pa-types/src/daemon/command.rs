@@ -967,14 +967,6 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    SetScopedModels {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        active_session_id: String,
-        scoped_models: Value,
-        #[serde(flatten)]
-        rest: JsonMap,
-    },
     SetThinkingLevel {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

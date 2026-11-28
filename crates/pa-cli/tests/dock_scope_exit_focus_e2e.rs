@@ -164,7 +164,6 @@ fn session_options(
     restore_dock_focus: bool,
 ) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
         socket_path: socket.to_path_buf(),
         cwd: PathBuf::from("/tmp"),
         model_catalog: Vec::new(),

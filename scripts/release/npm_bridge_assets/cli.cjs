@@ -26,7 +26,7 @@ let updateRequested = coordinator;
 // text such as `--print update` as an update retry. The value options mirror
 // the genuine fallback CLI's leading-global-flags contract.
 const valueFlags = new Set(["--mode", "--daemon-socket", "--provider", "--model", "--api-key",
-  "--cwd", "--system-prompt", "--append-system-prompt", "--fork", "--session-dir", "--models",
+  "--cwd", "--system-prompt", "--append-system-prompt", "--fork", "--session-dir",
   "--tools", "-t", "--thinking", "--extension", "-e", "--skill", "--prompt-template", "--theme",
   "--autonomous-gate", "--autonomous-gate-retries", "--autonomous-gate-timeout-ms",
   "--autonomous-max-continuations", "--autonomous-max-turns", "--autonomous-max-tokens",

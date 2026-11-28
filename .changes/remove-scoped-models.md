@@ -1,0 +1,1 @@
+- The model picker and model cycling always list all available models. The scoped-models feature is gone: the `--models` flag, the `enabledModels` setting (an old value is ignored), and the picker's Alt+S scope toggle.

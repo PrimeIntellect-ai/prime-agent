@@ -52,7 +52,6 @@ const KNOWN_FIELDS: &[&str] = &[
     "enableBuiltinSkills",
     "terminal",
     "images",
-    "enabledModels",
     "allowedModels",
     "treeFilterMode",
     "chatDetail",
