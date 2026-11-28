@@ -8,7 +8,8 @@ use pa_types::daemon::DaemonCommand;
 use serde_json::{json, Value};
 
 use super::{
-    follows, pause_verdict, sync_deliveries, Follow, GuestCommands, PauseVerdict, PAUSE_GRACE,
+    follows, pause_verdict, sync_deliveries, Follow, GuestCommands, PauseVerdict, MAX_ANSWER_PARTS,
+    MAX_OUTBOX_PAGES, PAUSE_GRACE,
 };
 use crate::bots::ledger::{BotLedger, DeliveryState};
 use crate::bots::remote_parent::READ_PAGE_LINES;
@@ -22,6 +23,9 @@ struct FakeGuest {
     outbox: Vec<(String, u64)>,
     clock: u64,
     state: Value,
+    /// Answer every outbox read from the first line, ignoring `after_seq`.
+    replay_outbox: bool,
+    outbox_reads: usize,
 }
 
 impl FakeGuest {
@@ -66,9 +70,12 @@ impl GuestCommands for FakeGuest {
         std::future::ready(Ok(match command {
             DaemonCommand::GetSessionMessages { .. } => json!({ "messages": self.rows }),
             DaemonCommand::ReadRemoteParent { after_seq, .. } => {
+                self.outbox_reads += 1;
+                assert!(self.outbox_reads < 50, "the owner keeps reading the outbox");
+                let after_seq = if self.replay_outbox { 0 } else { *after_seq };
                 let entries: Vec<Value> = (1u64..)
                     .zip(&self.outbox)
-                    .filter(|(seq, _)| seq > after_seq)
+                    .filter(|(seq, _)| *seq > after_seq)
                     .take(READ_PAGE_LINES)
                     .map(|(seq, (message, at_ms))| json!({ "seq": seq, "id": format!("m{seq}"), "message": message, "atMs": at_ms }))
                     .collect();
@@ -180,16 +187,49 @@ async fn long_answers_and_outbox_backlogs_arrive_whole() {
     }
     assert_eq!(joined, answer);
 
-    // A backlog longer than one read page is read page by page.
+    // A longer answer is cut after the last part, with a note.
+    let answer = answer.repeat(3);
+    guest.turn("a2", &answer);
+    let parts = sync(dir.path(), &mut guest).await;
+    assert_eq!(parts.len(), MAX_ANSWER_PARTS + 1);
+    assert!(parts[MAX_ANSWER_PARTS - 1].starts_with(&format!(
+        "[bot answer part {MAX_ANSWER_PARTS}/{MAX_ANSWER_PARTS}]"
+    )));
+    assert!(parts[MAX_ANSWER_PARTS].contains("rlm.pull_bot_files"));
+
+    // A backlog longer than one read page is read page by page, up to
+    // the page cap; the rest arrives on the next sync.
     guest.clock += 10;
     let clock = guest.clock;
-    let lines: Vec<String> = (0..READ_PAGE_LINES * 2 + 3)
+    let lines: Vec<String> = (0..READ_PAGE_LINES * MAX_OUTBOX_PAGES + 3)
         .map(|index| format!("line {index}"))
         .collect();
     guest
         .outbox
         .extend(lines.iter().map(|line| (line.clone(), clock)));
+    let mut delivered = sync(dir.path(), &mut guest).await;
+    assert_eq!(delivered.len(), READ_PAGE_LINES * MAX_OUTBOX_PAGES);
+    delivered.extend(sync(dir.path(), &mut guest).await);
+    assert_eq!(delivered, lines);
+}
+
+/// A guest whose outbox reads never move past old lines delivers each
+/// line once and ends the sync.
+#[tokio::test]
+async fn a_guest_that_repeats_its_outbox_page_ends_the_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut guest = FakeGuest {
+        replay_outbox: true,
+        ..FakeGuest::default()
+    };
+    let lines: Vec<String> = (0..READ_PAGE_LINES)
+        .map(|index| format!("line {index}"))
+        .collect();
+    guest
+        .outbox
+        .extend(lines.iter().map(|line| (line.clone(), 1)));
     assert_eq!(sync(dir.path(), &mut guest).await, lines);
+    assert!(sync(dir.path(), &mut guest).await.is_empty());
 }
 
 #[tokio::test]

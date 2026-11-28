@@ -175,27 +175,41 @@ impl GuestCommands for GuestClient {
     }
 }
 
+/// The most outbox pages one sync reads.
+pub(crate) const MAX_OUTBOX_PAGES: usize = 4;
+
 /// Room kept in each part for its `[bot answer part i/n]` line.
 const PART_HEADER_CHARS: usize = 40;
+/// The most parts one answer delivers; a longer answer ends with a note.
+pub(crate) const MAX_ANSWER_PARTS: usize = 4;
 
 /// A turn answer as agent messages: whole when it fits one, else split into
-/// numbered parts that each fit. The parts' bodies join to the full answer.
+/// numbered parts that each fit. Up to [`MAX_ANSWER_PARTS`] parts join to
+/// the full answer; a longer answer is cut and ends with a note.
 fn answer_parts(answer: &str) -> Vec<String> {
     let answer = answer.trim();
     if answer.chars().count() <= DEFAULT_AGENT_MESSAGE_MAX_CHARS {
         return vec![answer.to_string()];
     }
     let chars: Vec<char> = answer.chars().collect();
-    let chunks: Vec<String> = chars
+    let chunks: Vec<&[char]> = chars
         .chunks(DEFAULT_AGENT_MESSAGE_MAX_CHARS - PART_HEADER_CHARS)
-        .map(|chunk| chunk.iter().collect())
         .collect();
-    let count = chunks.len();
-    chunks
-        .into_iter()
+    let count = chunks.len().min(MAX_ANSWER_PARTS);
+    let mut parts: Vec<String> = chunks[..count]
+        .iter()
         .enumerate()
-        .map(|(index, chunk)| format!("[bot answer part {}/{count}]\n{chunk}", index + 1))
-        .collect()
+        .map(|(index, chunk)| {
+            let chunk: String = chunk.iter().collect();
+            format!("[bot answer part {}/{count}]\n{chunk}", index + 1)
+        })
+        .collect();
+    if chunks.len() > count {
+        parts.push(format!(
+            "[bot answer cut after {count} parts: ask the bot to write the full answer to a file and copy it with rlm.pull_bot_files]"
+        ));
+    }
+    parts
 }
 
 enum Delivery {
@@ -256,10 +270,12 @@ where
     };
     let rows = page["messages"].as_array().cloned().unwrap_or_default();
     // The guest answers one page of outbox lines per read, so a backlog
-    // never outgrows one link frame.
+    // never outgrows one link frame. A sync reads at most
+    // [`MAX_OUTBOX_PAGES`] pages and stops at a line that does not move
+    // past the last one; the ledger resumes there on the next sync.
     let mut messages: Vec<RemoteParentEntry> = Vec::new();
     let mut after_seq = last_seq;
-    loop {
+    for _ in 0..MAX_OUTBOX_PAGES {
         let outbox = guest
             .command(&DaemonCommand::ReadRemoteParent {
                 id: None,
@@ -268,13 +284,15 @@ where
             })
             .await?;
         let page: Vec<RemoteParentEntry> = serde_json::from_value(outbox["entries"].clone())?;
-        let Some(last) = page.last() else {
-            break;
-        };
-        after_seq = last.seq;
-        let full = page.len() >= READ_PAGE_LINES;
-        messages.extend(page);
-        if !full {
+        let before = messages.len();
+        for entry in page {
+            if entry.seq <= after_seq {
+                break;
+            }
+            after_seq = entry.seq;
+            messages.push(entry);
+        }
+        if messages.len() - before < READ_PAGE_LINES {
             break;
         }
     }
