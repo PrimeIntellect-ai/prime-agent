@@ -479,16 +479,8 @@ pub async fn provision<T: SandboxTransport>(
     if let (Some(lock), Some(planned_token)) = (github_lock, planned_github_token) {
         let recheck =
             super::github::recheck_provisioned_token(client, &agent_dir, &planned_token).await;
-        // A stale-reclaimed lock means a clear may have run while this
-        // provisioning wrote: a wedged holder must not outlive its lock
-        // silently. Treat the takeover like a failed recheck.
-        let stolen = !lock.owns();
         drop(lock);
-        let failure = recheck.err().or_else(|| {
-            stolen
-                .then(|| anyhow::anyhow!("the bots github lock was taken over while provisioning"))
-        });
-        if let Some(error) = failure {
+        if let Err(error) = recheck {
             // The secrets may still hold a token the machine no longer
             // resolves, and the cleanup could not prove otherwise: this bot
             // runs without the rules that would send it, never with a token
