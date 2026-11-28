@@ -1534,6 +1534,30 @@ async fn a_successful_restore_prunes_what_it_supersedes() {
     );
 }
 
+/// Checkpoints an outside pause froze belong to the bot too: the next
+/// durable pause prunes the older ones, and a delete removes the rest.
+#[tokio::test(start_paused = true)]
+async fn outside_checkpoints_are_pruned_and_deleted_with_the_bot() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    let outside = platform.external_checkpoint(&sandbox_id, true);
+
+    manager.pause("bot-a").await.unwrap();
+    assert!(
+        !platform.state().checkpoints.contains_key(&outside),
+        "the newer durable pause supersedes it"
+    );
+
+    let later = platform.external_checkpoint(&sandbox_id, true);
+    manager.delete("bot-a").await.unwrap();
+    assert!(
+        !platform.state().checkpoints.contains_key(&later),
+        "the delete removes it"
+    );
+    assert!(platform.state().checkpoints.is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_promotion_orders_checkpoints_chronologically() {
     let (_dir, platform, manager) = setup();

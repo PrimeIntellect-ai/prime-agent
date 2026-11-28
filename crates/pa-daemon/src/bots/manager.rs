@@ -2306,13 +2306,9 @@ impl BotManager {
         let Some(index) = order.iter().position(|id| id == restored) else {
             return Ok(());
         };
-        if index == 0 {
-            return Ok(());
-        }
-        let stale: Vec<String> = record.older_checkpoint_ids.drain(..index).collect();
-        lock(&self.registry).add_orphans(&stale)?;
-        self.save(record.clone())?;
-        self.delete_orphans(stale).await
+        let mut stale = self.unrecorded_before(record, restored).await;
+        stale.extend(record.older_checkpoint_ids.drain(..index));
+        self.prune(record, stale).await
     }
 
     /// Delete every checkpoint older than the newest durable one.
@@ -2326,10 +2322,55 @@ impl BotManager {
                 break;
             }
         }
-        let Some(index) = newest_durable.filter(|index| *index > 0) else {
+        let Some(index) = newest_durable else {
             return Ok(());
         };
-        let stale: Vec<String> = record.older_checkpoint_ids.drain(..index).collect();
+        let mut stale = self.unrecorded_before(record, &oldest_first[index]).await;
+        stale.extend(record.older_checkpoint_ids.drain(..index));
+        self.prune(record, stale).await
+    }
+
+    /// The bot's durable checkpoints on the platform that are older than
+    /// `kept` and not in the record: the ones an outside pause froze (a
+    /// guest self-pause, or a pause the owner then resumed). Empty when the
+    /// list fails or does not hold `kept` yet.
+    async fn unrecorded_before(&self, record: &BotRecord, kept: &str) -> Vec<String> {
+        let label = bot_label(&record.bot_id);
+        let listed = match retry(|| self.platform.list_checkpoints(&label)).await {
+            Ok(listed) => listed,
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: bot {}: checkpoint list failed ({error}); pruning the recorded ones",
+                    record.bot_id
+                );
+                return Vec::new();
+            }
+        };
+        let Some(kept) = listed
+            .iter()
+            .find(|checkpoint| checkpoint.id == kept)
+            .map(checkpoint_millis)
+        else {
+            return Vec::new();
+        };
+        listed
+            .into_iter()
+            .filter(|checkpoint| {
+                checkpoint.durable
+                    && checkpoint_millis(checkpoint) < kept
+                    && record.checkpoint_id.as_ref() != Some(&checkpoint.id)
+                    && !record.older_checkpoint_ids.contains(&checkpoint.id)
+            })
+            .map(|checkpoint| checkpoint.id)
+            .collect()
+    }
+
+    /// Delete `stale` checkpoints, tracked as orphans until each delete
+    /// succeeds.
+    async fn prune(&self, record: &BotRecord, stale: Vec<String>) -> Result<()> {
+        if stale.is_empty() {
+            return Ok(());
+        }
         lock(&self.registry).add_orphans(&stale)?;
         self.save(record.clone())?;
         self.delete_orphans(stale).await
@@ -2373,6 +2414,19 @@ impl BotManager {
         };
         let mut checkpoints = record.older_checkpoint_ids;
         checkpoints.extend(record.checkpoint_id);
+        // Outside pauses freeze checkpoints the record never holds.
+        match retry(|| self.platform.list_checkpoints(&label)).await {
+            Ok(listed) => {
+                for checkpoint in listed {
+                    if !checkpoints.contains(&checkpoint.id) {
+                        checkpoints.push(checkpoint.id);
+                    }
+                }
+            }
+            Err(error) => eprintln!(
+                "pa-daemon: bot {bot_id}: checkpoint list failed ({error}); deleting the recorded ones"
+            ),
+        }
         {
             let mut registry = lock(&self.registry);
             registry.add_orphans(&checkpoints)?;
