@@ -244,10 +244,12 @@ impl BotManager {
         });
         // A guest whose file still matches the last sync is at the base:
         // the merge reduces to the owner state, so nothing is downloaded.
-        let guest_state = if guest_sha == base.last_synced_sha256 && !owner_below_base {
-            None
+        let at_base = guest_sha == base.last_synced_sha256 && !owner_below_base;
+        let (guest_state, expected_sha) = if at_base {
+            (None, guest_sha.clone())
         } else {
-            Some(self.download_guest_state(sandbox_id, deadline).await?)
+            let (state, expected) = self.download_guest_state(sandbox_id, deadline).await?;
+            (Some(state), expected)
         };
         let mut merged = match &guest_state {
             Some(guest) => merge_harness_states(&owner_state, guest, &base_versions),
@@ -285,8 +287,13 @@ impl BotManager {
                 None => guest_sha.as_deref() != Some(final_sha.as_str()),
             };
             if needed {
-                self.push_guest_harness(sandbox_id, &final_bytes, guest_sha.as_deref(), deadline)
-                    .await?;
+                self.push_guest_harness(
+                    sandbox_id,
+                    &final_bytes,
+                    expected_sha.as_deref(),
+                    deadline,
+                )
+                .await?;
                 pushed = true;
             }
         }
@@ -298,7 +305,7 @@ impl BotManager {
         if pushed {
             base.recorded_as(&merged, final_sha);
             base.save(&self.agent_dir, &record.bot_id)?;
-        } else if let (Some(guest), Some(sha)) = (&guest_state, guest_sha) {
+        } else if let (Some(guest), Some(sha)) = (&guest_state, expected_sha) {
             base.recorded_as(guest, sha);
             base.save(&self.agent_dir, &record.bot_id)?;
         }
@@ -336,14 +343,16 @@ impl BotManager {
         bail!("the bot answered an unreadable harness digest (exit {exit_code})");
     }
 
-    /// Download and parse the guest state. A guest that lost its file
-    /// (an empty answer or a missing path) reads as the empty state, so
-    /// the push that follows restores one.
+    /// Download and parse the guest state, with the digest the merge
+    /// consumed: the push's compare-and-swap expectation. A guest that
+    /// lost its file (an empty answer or a missing path) reads as the
+    /// empty state that must still be missing, so the push that follows
+    /// restores one.
     async fn download_guest_state(
         &self,
         sandbox_id: &str,
         deadline: Instant,
-    ) -> Result<HarnessState> {
+    ) -> Result<(HarnessState, Option<String>)> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let downloaded = match tokio::time::timeout(
             remaining,
@@ -357,15 +366,18 @@ impl BotManager {
             Ok(Ok(bytes)) => bytes,
         };
         if downloaded.is_empty() {
-            return Ok(empty_harness_state());
+            return Ok((empty_harness_state(), None));
         }
-        serde_json::from_slice(&downloaded).with_context(|| "the bot's harness state is malformed")
+        let digest = sha256_hex(&downloaded);
+        let state = serde_json::from_slice(&downloaded)
+            .with_context(|| "the bot's harness state is malformed")?;
+        Ok((state, Some(digest)))
     }
 
     /// Upload the merged state to the temp path and move it into place.
-    /// `expected_sha` is the guest file's sha the merge was built from
-    /// (`None` when the bot had no state file); the move refuses to
-    /// replace a file that moved past it.
+    /// `expected_sha` is the digest of the guest content the merge
+    /// consumed (`None` when the bot had no state file); the move refuses
+    /// to replace a file that moved past it.
     async fn push_guest_harness(
         &self,
         sandbox_id: &str,
@@ -388,9 +400,15 @@ impl BotManager {
                 expected_sha.unwrap_or_default().to_string(),
             ),
         ]);
-        let output = self
-            .exec_ready(sandbox_id, HARNESS_MOVE_SCRIPT, &env, None, deadline)
-            .await?;
+        // Like the probe, the move rides the remaining deadline: one
+        // hung gateway call must not outlive the sync's budget.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let output = tokio::time::timeout(
+            remaining,
+            self.exec_ready(sandbox_id, HARNESS_MOVE_SCRIPT, &env, None, deadline),
+        )
+        .await
+        .map_err(|_| anyhow!("the harness move timed out"))??;
         if output.exit_code == 3 {
             bail!("the bot's harness changed during the sync; retrying on the newer state");
         }
@@ -774,6 +792,43 @@ mod tests {
         for id in ["owner-memory", "owner-new", "bot-memory"] {
             assert!(guest.entries[&RefinementKind::Memory].contains_key(id));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_write_between_the_probe_and_the_download_does_not_refuse_the_push() {
+        let (dir, platform, manager) = setup();
+        save_owner(&dir, &state_with(&[("owner-memory", 1)]));
+        let record = manager.spawn(&spec("bot-a")).await.unwrap();
+        let sandbox_id = record.sandbox_id.clone().unwrap();
+
+        // The bot refines; the owner adds an entry of its own.
+        let mut guest = guest_state(&platform, &sandbox_id);
+        let mut entry = guest.entries[&RefinementKind::Memory]["owner-memory"].clone();
+        entry.id = "bot-memory".to_string();
+        entry.title = "Entry bot-memory".to_string();
+        guest
+            .entries
+            .get_mut(&RefinementKind::Memory)
+            .unwrap()
+            .insert("bot-memory".to_string(), entry);
+        write_guest_state(&platform, &sandbox_id, &guest);
+        save_owner(&dir, &state_with(&[("owner-memory", 1), ("owner-new", 1)]));
+
+        // A guest write lands between the probe and the download: the
+        // merge consumes the newer bytes, so the push's compare-and-swap
+        // must expect them, not the probed digest.
+        platform.state().harness_write_after_probe = true;
+        manager
+            .sync_global_harness(&record, deadline())
+            .await
+            .unwrap();
+
+        let guest = guest_state(&platform, &sandbox_id);
+        for id in ["owner-memory", "owner-new", "bot-memory"] {
+            assert!(guest.entries[&RefinementKind::Memory].contains_key(id));
+        }
+        let owner = load_owner(&dir);
+        assert!(owner.entries[&RefinementKind::Memory].contains_key("bot-memory"));
     }
 
     #[tokio::test(start_paused = true)]

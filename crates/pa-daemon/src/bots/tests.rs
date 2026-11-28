@@ -80,6 +80,9 @@ pub(crate) struct FakeState {
     /// The next download answers, then rewrites the stored file: a guest
     /// harness save that lands mid-sync.
     pub harness_write_after_download: bool,
+    /// The next probe answers, then rewrites the stored file: a guest
+    /// harness save between the probe and the download.
+    pub harness_write_after_probe: bool,
 }
 
 /// An in-memory Prime account: sandboxes are running as soon as they exist.
@@ -410,6 +413,15 @@ impl BotPlatform for FakePlatform {
                     Some(bytes) => super::sha256_hex(bytes),
                     None => super::harness_sync::NO_STATE_MARKER.to_string(),
                 };
+                if std::mem::take(&mut state.harness_write_after_probe) {
+                    // A guest harness save lands right after the probe.
+                    state
+                        .harness_files
+                        .get_mut(sandbox_id)
+                        .and_then(|files| files.get_mut(&path))
+                        .expect("the probed guest state")
+                        .extend_from_slice(b" ");
+                }
             } else if script == super::harness_sync::HARNESS_MOVE_SCRIPT {
                 // The real script only replaces an unchanged state file.
                 let files = state
