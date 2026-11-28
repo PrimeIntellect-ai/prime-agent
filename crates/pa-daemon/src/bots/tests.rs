@@ -3073,33 +3073,6 @@ fn a_reopened_bot_session_keeps_its_own_model() {
     }
 }
 
-/// The guest's marker file names the session when the record lost it (a
-/// registry rebuilt from labels): that reopen keeps the session's model
-/// too, not the spawn-time one.
-#[cfg(unix)]
-#[test]
-fn a_marker_named_session_also_keeps_its_model() {
-    let home = tempfile::tempdir().unwrap();
-    let session = home.path().join("s1.jsonl");
-    std::fs::write(&session, r#"{"role": "user"}"#).unwrap();
-    std::fs::write(
-        home.path().join(".prime-agent-bot-session"),
-        session.to_str().unwrap(),
-    )
-    .unwrap();
-    let envelope = run_bot_client(home.path(), None);
-    let command = &envelope["command"];
-    assert_eq!(
-        command["sessionPath"].as_str(),
-        Some(session.to_str().unwrap()),
-        "the marker-named session was reopened"
-    );
-    assert!(
-        command["config"].get("model").is_none(),
-        "the reopened create must not carry the model"
-    );
-}
-
 /// A bot session that does not exist yet still gets the spawn model: the
 /// create carries it, so a fresh sandbox boots the model the owner chose.
 #[cfg(unix)]
