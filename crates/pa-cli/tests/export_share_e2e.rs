@@ -290,7 +290,6 @@ async fn tui_export_and_share_surface() {
         .to_string();
 
     let options = pa_tui::interactive::InteractiveOptions {
-        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
         session_dir: Some(session_dir.clone()),

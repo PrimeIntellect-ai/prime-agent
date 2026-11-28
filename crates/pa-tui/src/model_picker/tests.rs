@@ -118,7 +118,6 @@ fn picker_options(catalog: Vec<Model>) -> ModelPickerOptions {
         current: Some(current()),
         configured_providers: configured(),
         recent_models: Vec::new(),
-        scoped_models: Vec::new(),
         thinking_level: Some(ModelThinkingLevel::Medium),
         viewport_rows: 19,
     }
@@ -136,109 +135,6 @@ fn frame_text(picker: &mut ModelPicker) -> Vec<String> {
         })
         .map(|row| row.trim_end().to_string())
         .collect()
-}
-
-/// The scope view: a session with scoped models opens on the scoped list, the scope row above it;
-/// Alt+S swaps to the full catalog and back, and the macOS option-composed `ß` toggles too.
-#[test]
-fn scope_toggles_between_the_scoped_list_and_the_catalog() {
-    let catalog = battery_catalog();
-    let mut options = picker_options(catalog);
-    options.scoped_models = [0, 3]
-        .into_iter()
-        .map(|index| {
-            let model = &options.models[index];
-            ModelPicker::model_key_provider(&model.provider, &model.id)
-        })
-        .collect();
-    let mut picker = ModelPicker::new(options);
-    assert_eq!(
-        picker.filtered_len(),
-        2,
-        "the picker opens on the scoped list"
-    );
-    let rows = frame_text(&mut picker);
-    // The scope row renders ABOVE the search field with one leading space (TS
-    // v0.9.7, the parity run's b3 frame).
-    let scope_row = rows
-        .iter()
-        .position(|row| row.starts_with(" Scope: all | scoped"));
-    let search_row = rows
-        .iter()
-        .position(|row| row.contains("Search models"))
-        .expect("the search field renders");
-    // The toggle key renders with the host platform's `alt` label
-    // (macOS: Option+S, elsewhere: Alt+S).
-    let scope_key = format!(
-        "{}+S scope (all/scoped)",
-        crate::keybindings::host_alt_label()
-    );
-    assert!(
-        scope_row.is_some_and(|scope_row| {
-            scope_row < search_row && rows[scope_row].contains(&scope_key)
-        }),
-        "the scope row renders above the search field with its leading space:
-{}",
-        rows.join("\n")
-    );
-    assert_eq!(
-        picker.handle_key("alt+s", &kb()),
-        ModelPickerAction::ScopeToggled { scoped: false },
-        "alt+s swaps to the catalog side"
-    );
-    assert_eq!(
-        picker.filtered_len(),
-        9,
-        "the catalog side lists everything"
-    );
-    assert_eq!(
-        picker.handle_key("alt+s", &kb()),
-        ModelPickerAction::ScopeToggled { scoped: true },
-        "alt+s swaps back to the scoped side"
-    );
-    assert_eq!(picker.filtered_len(), 2);
-    assert_eq!(
-        picker.handle_key("\u{df}", &kb()),
-        ModelPickerAction::ScopeToggled { scoped: false },
-        "the option-composed \u{df} toggles too"
-    );
-    assert_eq!(picker.filtered_len(), 9);
-}
-
-/// A scope the loaded catalog cannot resolve still scopes (the scope keys off the session's list,
-/// never off what the catalog resolves): the picker opens with no rows, Alt+S still works, and a
-/// refresh that brings the entries fills them.
-#[test]
-fn a_scope_the_catalog_cannot_resolve_still_scopes() {
-    let catalog = battery_catalog();
-    let mut options = picker_options(catalog);
-    options.scoped_models = vec!["prime-inference/mock-9".to_string()];
-    let mut picker = ModelPicker::new(options);
-    assert!(picker.has_scoped_models(), "the session's scope counts");
-    assert_eq!(picker.filtered_len(), 0, "the scoped side has no rows yet");
-    assert_eq!(
-        picker.handle_key("alt+s", &kb()),
-        ModelPickerAction::ScopeToggled { scoped: false },
-        "alt+s still offers the catalog side"
-    );
-    assert_eq!(
-        picker.filtered_len(),
-        9,
-        "the catalog side lists everything"
-    );
-    assert_eq!(
-        picker.handle_key("alt+s", &kb()),
-        ModelPickerAction::ScopeToggled { scoped: true },
-        "alt+s returns to the scoped side"
-    );
-    let mut refreshed = battery_catalog();
-    refreshed.push(model("prime-inference", "mock-9", "Mock 9", false, None));
-    picker.update_state(None, refreshed, configured());
-    assert_eq!(
-        picker.filtered_len(),
-        1,
-        "the refresh resolved the key: the scoped row appears"
-    );
 }
 
 /// The frame matches the TS inline menu panel row for row (the f17 model-selector capture

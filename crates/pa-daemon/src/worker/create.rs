@@ -211,8 +211,8 @@ impl Worker {
         // `is_continuing` reads this arm fact, never an existence check.
         let mut opened_existing_session = false;
         let mut restored_tier: Option<Option<pa_types::ai::ServiceTier>> = None;
-        // The fresh arms defer their creation prefix to after the startup scope
-        // registers, so a fresh `--models` session persists the scoped startup pick.
+        // The fresh arms defer their creation prefix until the create's model
+        // selection settles, so the prefix persists the settled startup pick.
         let mut fresh_prefix = FreshPrefixPlan::None;
         let (settings, trace_consent) = pa_core::agent_traces::ContinuousTraceUpload::load_settings(
             std::path::Path::new(&cwd),
@@ -404,41 +404,9 @@ impl Worker {
             self.engine.set_session_file(store.path.clone());
         }
 
-        // The `models` patterns (else settings `enabledModels`) resolve once into
-        // the scoped list, AFTER the store open (the saved-model restore's wait
-        // already covered the catalog fetch): resolving earlier stores an empty scope.
-        let model_patterns = match payload.get("models").and_then(Value::as_array) {
-            Some(patterns) => patterns
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<String>>(),
-            None => settings.get_enabled_models().unwrap_or_default(),
-        };
-        let is_continuing = opened_existing_session;
-        let scoped_models = if model_patterns.is_empty() {
-            Vec::new()
-        } else {
-            let mut registry = crate::state_getters::worker_model_registry(&self.config.agent_dir);
-            pa_core::models::resolve_model_scope_from_models_with_readiness(
-                &mut registry,
-                &model_patterns,
-                settings
-                    .get_default_provider()
-                    .zip(settings.get_default_model()),
-                is_continuing,
-                pa_core::models::SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
-            )
-            .await
-        };
-        self.engine.configure_startup_scope(
-            scoped_models.clone(),
-            model_patterns.clone(),
-            is_continuing,
-        );
-        // The fresh arms' deferred creation prefix runs here, against the
-        // registered scope; the continuing arm wrote its own prefix above, so
-        // the scope never changes a continuing file's pinned model and thinking.
+        self.engine.configure_startup(opened_existing_session);
+        // The fresh arms' deferred creation prefix runs here, once the create's
+        // model selection settled; the continuing arm wrote its own prefix above.
         match fresh_prefix {
             FreshPrefixPlan::None => {}
             FreshPrefixPlan::InMemory => {
@@ -470,21 +438,6 @@ impl Worker {
                 }
             }
         }
-        // The wire shape `set_scoped_models` stores (the connection state
-        // surface and the cycler's input): `{ model, thinkingLevel? }`.
-        let scoped_entries: Vec<Value> = scoped_models
-            .iter()
-            .map(|scoped| {
-                let mut entry = json!({ "model": scoped.model });
-                // The pattern's `:thinking` suffix; the wire name is the level the
-                // cycler and the state readers parse back.
-                if let Some(level) = scoped.thinking_level {
-                    entry["thinkingLevel"] = json!(level);
-                }
-                entry
-            })
-            .collect();
-
         if !name_persisted_by_fresh_arm {
             if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
                 if let Err(error) =
@@ -584,7 +537,6 @@ impl Worker {
             // gate rides the lane, so a restored forced batch keeps its
             // one-turn semantics.
             core.forced_all_steering = core.steering.iter().any(|item| item.forced_batch);
-            core.scoped_models.clone_from(&scoped_entries);
             core.retry_abort_requested = false;
             // The session's depth falls back to the opened file's header: a resumed
             // subagent file carries its persisted depth, so the roster never re-nests
@@ -842,10 +794,9 @@ fn create_payload_rlm_depth(payload: &Value) -> Result<(Option<u32>, Option<u32>
 
 /// Creation prefix for a daemon-hosted session file: fresh files record all three changes;
 /// a reopened session records them only when no earlier entry did. Which fresh create
-/// arm still owes its creation prefix (the prefix runs after the startup scope registers).
+/// arm still owes its creation prefix (the prefix runs once the model selection settles).
 enum FreshPrefixPlan {
-    /// Nothing pending: the continuing arm wrote its own prefix before
-    /// the scope.
+    /// Nothing pending: the continuing arm wrote its own prefix.
     None,
     /// The in-memory `noSession` create: the prefix stays in memory, no
     /// rewrite.

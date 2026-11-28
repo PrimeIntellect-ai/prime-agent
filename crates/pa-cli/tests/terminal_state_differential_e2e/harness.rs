@@ -1055,7 +1055,6 @@ pub(crate) fn quiet_child_epilogue() {
 
 pub(crate) fn child_options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

@@ -175,7 +175,6 @@ fn session_running(socket: &Path, dir: &Path, cell: &str) -> String {
 
 fn chat_options(socket: PathBuf, cwd: PathBuf, active: String) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
         socket_path: socket,
         cwd,
         session_dir: None,

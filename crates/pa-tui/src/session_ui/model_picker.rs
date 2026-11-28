@@ -39,36 +39,14 @@ impl SessionUi {
         search: &str,
     ) -> Result<()> {
         let current = self.current_model(view);
-        // One connection-state read feeds both the thinking seed and the
-        // scoped-model list.
         let state = self.connection_state(view).await;
         let thinking_level = self.picker_initial_thinking_level(current.as_ref(), state.as_ref());
-        // The session's scoped list as `provider/id` keys; the picker resolves
-        // them against its loaded catalog.
-        let scoped_models: Vec<String> = state
-            .as_ref()
-            .and_then(|state| state.get("scopedModels"))
-            .and_then(Value::as_array)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| {
-                        let model = entry.get("model")?;
-                        Some(ModelPicker::model_key_provider(
-                            model.get("provider")?.as_str()?,
-                            model.get("id")?.as_str()?,
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         let options = ModelPickerOptions {
             models: self.model_catalog.clone(),
             current,
             configured_providers: self.model_configured_providers.clone(),
             recent_models: self.model_recent_models.clone(),
             thinking_level,
-            scoped_models,
             viewport_rows: picker_viewport_rows(view.terminal_rows()),
         };
         // Always open the menu (an empty catalog renders the empty panel).
@@ -115,14 +93,6 @@ impl SessionUi {
         };
         match action {
             Some(ModelPickerAction::None) | None => {}
-            Some(ModelPickerAction::ScopeToggled { scoped }) => {
-                // The picker stays mounted; only the adoption event rides out.
-                if let Some(telemetry) = self.telemetry.clone() {
-                    tokio::spawn(async move {
-                        telemetry.scoped_models_used("toggle_scope", scoped).await;
-                    });
-                }
-            }
             Some(ModelPickerAction::Cancel) => {
                 view.overlay = None;
                 self.picker_restored_draft = false;
@@ -336,9 +306,8 @@ impl SessionUi {
         }
     }
 
-    /// Cycle within the session's scoped list when one is set, else the available catalog. A `null`
-    /// answer means "no other model"; the status names the provider (`Model: provider/id`, unlike
-    /// the picker's `Model: <id>`).
+    /// Cycle within the available catalog. A `null` answer means "no other model"; the status names
+    /// the provider (`Model: provider/id`, unlike the picker's `Model: <id>`).
     pub(super) async fn cycle_model(&mut self, direction: CycleDirection, view: &mut AgentView) {
         let cycled = self
             .bounded_request(
@@ -373,21 +342,6 @@ impl SessionUi {
                 self.model_selection.model = Some(model_id.clone());
                 self.refresh_model_label(&provider, &model_id, view).await;
                 self.note(&format!("Model: {provider}/{model_id}"), view);
-                if let Some(telemetry) = self.telemetry.clone() {
-                    // TS has no scoped-models telemetry: the adoption event reports the
-                    // cycle's lane (the response's `isScoped`).
-                    let action = match direction {
-                        CycleDirection::Forward => "cycle_forward",
-                        CycleDirection::Backward => "cycle_backward",
-                    };
-                    let scoped = data
-                        .get("isScoped")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    tokio::spawn(async move {
-                        telemetry.scoped_models_used(action, scoped).await;
-                    });
-                }
             }
             Err(error) => {
                 self.error_row(&format!("{error:#}"), view);

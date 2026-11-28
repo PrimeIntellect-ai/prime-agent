@@ -29,42 +29,14 @@ pub(super) fn render(
     picker.set_render_width(width);
     picker.set_visible_items(picker.list_layout());
 
-    // The scope row renders ABOVE the search field (TS v0.9.7's headerHelpContainer mounts before
-    // the search input): one leading space, the active side accented, then the dim toggle key and
-    // muted description, truncated with "...".
-    let mut lines = Vec::new();
-    if picker.has_scoped_models() {
-        let muted = |text: &str| theme.fg_span(ThemeColor::Muted, text.to_string());
-        let (all, scoped) = if picker.scoped_side() {
-            (muted("all"), theme.fg_span(ThemeColor::Accent, "scoped"))
-        } else {
-            (theme.fg_span(ThemeColor::Accent, "all"), muted("scoped"))
-        };
-        let mut line = vec![
-            muted(" Scope: "),
-            all,
-            muted(" | "),
-            scoped,
-            muted(" \u{b7} "),
-        ];
-        if let Some(key) = kb
-            .first_key("app.model.toggleScope")
-            .as_deref()
-            .map(crate::keybindings::format_key_text)
-        {
-            line.push(theme.fg_span(ThemeColor::Dim, key));
-            line.push(muted(" scope (all/scoped)"));
-        }
-        lines.push(crate::width::truncate_line(&line, width, "..."));
-    }
-    lines.extend(search_field_lines(
+    let mut lines = search_field_lines(
         theme,
         width,
         picker.query(),
         picker.search_cursor(),
         true,
         SEARCH_PLACEHOLDER,
-    ));
+    );
 
     let (start, end) = picker.filtered_window();
     let effort_layout = picker.effort_layout(start, end);

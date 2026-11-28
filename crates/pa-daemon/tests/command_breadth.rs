@@ -239,10 +239,6 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         r#"{"type": "cycle_model", "activeSessionId": "sess"}"#,
     ),
     (
-        "set_scoped_models",
-        r#"{"type": "set_scoped_models", "activeSessionId": "sess", "scopedModels": [ ]}"#,
-    ),
-    (
         "set_thinking_level",
         r#"{"type": "set_thinking_level", "activeSessionId": "sess", "level": "high"}"#,
     ),

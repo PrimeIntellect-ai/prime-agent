@@ -4,7 +4,7 @@
 Seeds the account's scoped Prime Inference snapshot for a synthetic key/team
 and disables all external networking in a hosted-only network namespace. This
 measures fresh process startup from controlled cache states, not live catalog
-fetch timing. The current scoped-selection policy is characterized, not approved.
+fetch timing. The current startup-selection policy is characterized, not approved.
 """
 import argparse
 import fcntl
@@ -69,10 +69,8 @@ def prepare(binary, root, scenario):
     (agent / 'auth.json').write_text(json.dumps({'prime-inference': {
         'type': 'api_key', 'key': KEY, 'primeTeam': {'teamId': TEAM, 'name': 'Synthetic team'}}}))
     (agent / 'auth.json').chmod(0o600)
-    scope = [PUBLIC] if scenario == 'excluded' else [PUBLIC, PRIVATE]
     (agent / 'settings.json').write_text(json.dumps({
         'defaultProvider': 'prime-inference', 'defaultModel': PRIVATE,
-        'enabledModels': ['prime-inference/' + value for value in scope],
         'prewarmPythonKernel': False, 'onboardingCompleted': True,
         'onboardingShown': True, 'telemetry': {'noticeShown': True},
         'autoRefine': {'enabled': False}}))
@@ -205,7 +203,7 @@ def wait_for_created_session(terminal, client, active):
 
 def validate_observation(scenario, observed):
     permitted = [PUBLIC, PRIVATE] if scenario == 'authorized' else [PUBLIC]
-    assert observed['selected_model'] in permitted, 'selected an unavailable or excluded model'
+    assert observed['selected_model'] in permitted, 'selected an unavailable model'
     available = observed['available_ids']
     assert PUBLIC in available, 'public fixture model is not available'
     assert (PRIVATE in available) == (scenario != 'unavailable'), 'authorization fixture was not adopted'
@@ -326,7 +324,7 @@ def run(args):
         output = args.receipt.with_suffix('')
         errors = []
         with tempfile.TemporaryDirectory(prefix='pa-startup-') as temp:
-            for scenario in ('authorized', 'unavailable', 'excluded'):
+            for scenario in ('authorized', 'unavailable'):
                 observed = result['runs'][scenario] = {}
                 try:
                     capture(binary, scenario, Path(temp) / scenario, output / scenario, observed)

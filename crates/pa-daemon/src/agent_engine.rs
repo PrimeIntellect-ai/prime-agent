@@ -72,7 +72,7 @@ pub use config::AgentEngineConfig;
 pub(crate) use config::AutonomousAdmission;
 pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
-use config::{GoalRuntimeHandles, ModelResolutionWarning, RestoredSessionModel, StartupScope};
+use config::{GoalRuntimeHandles, ModelResolutionWarning, RestoredSessionModel};
 
 mod reload;
 mod session_engine_impl;
@@ -175,9 +175,9 @@ pub struct AgentSessionEngine {
     /// explicit flag wins.
     restored_model: std::sync::Mutex<Option<RestoredSessionModel>>,
     model_resolution_warning: std::sync::Mutex<ModelResolutionWarning>,
-    /// The create-time `--models` scope (see [`config::StartupScope`]);
-    /// `None` keeps the unscoped chain.
-    startup_scope: std::sync::Mutex<Option<StartupScope>>,
+    /// Whether the create continued an existing session file: a continuing
+    /// session keeps its own model, so the startup chain records no default fallback.
+    startup_is_continuing: std::sync::atomic::AtomicBool,
     /// The session runtime config the reset returns to at every restore: the
     /// create's flags survive every replacement; a mid-session `/model` switch
     /// belongs to the session it switched.

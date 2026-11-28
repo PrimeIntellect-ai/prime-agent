@@ -7,7 +7,7 @@ use super::{
     BranchSummaryRequest, BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun,
     EngineEvent, EngineModelSelection, GoalWakeKind, ParentIdentity, PromptContextBoundary,
     PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome, SideQuestionRequest,
-    StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -579,28 +579,14 @@ impl SessionEngine for AgentSessionEngine {
         })
     }
 
-    fn configure_startup_scope(
-        &self,
-        scoped_models: Vec<pa_core::models::ScopedModel>,
-        patterns: Vec<String>,
-        is_continuing: bool,
-    ) {
-        *self.startup_scope.lock().unwrap() = Some(StartupScope {
-            scoped_models,
-            patterns,
-            is_continuing,
-        });
-        // The create's model selection is complete (the saved-model restore,
-        // then this scope): bind an explicit key to the model it selected.
+    fn configure_startup(&self, is_continuing: bool) {
+        self.startup_is_continuing
+            .store(is_continuing, std::sync::atomic::Ordering::Relaxed);
+        // The create's model selection is complete (the saved-model restore):
+        // bind an explicit key to the model it selected.
         if self.current_selection().api_key.is_some() {
             self.bind_selection_api_key();
         }
-        // The scope changed the startup decisions: drop the stale level; the
-        // next read re-resolves against the scope.
-        *self
-            .effective_thinking
-            .write()
-            .expect("effective thinking lock") = None;
     }
 
     fn model_identity(&self) -> (Option<String>, Option<String>) {

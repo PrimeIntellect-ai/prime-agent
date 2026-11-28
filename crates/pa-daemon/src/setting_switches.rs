@@ -1,5 +1,5 @@
 //! The worker arms for the daemon commands that flip live session settings:
-//! `cycle_model`, `set_scoped_models`, `cycle_thinking_level`,
+//! `cycle_model`, `cycle_thinking_level`,
 //! `set_service_tier`, `set_transport`, `set_steering_mode`,
 //! `set_follow_up_mode`, `set_auto_compaction`, `set_auto_retry`, and
 //! `abort_retry`; the wire contracts are TS-verbatim.
@@ -60,8 +60,7 @@ pub(crate) fn effective_service_tier(
 }
 
 impl Worker {
-    /// `cycle_model { direction? }`: cycle within the scoped model list
-    /// when one is set (clamped to the catalog), else within the catalog; fewer
+    /// `cycle_model { direction? }`: cycle within the available catalog; fewer
     /// than two candidates answer success with `null` data.
     pub(crate) async fn handle_cycle_model(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("cycle_model") {
@@ -71,60 +70,23 @@ impl Worker {
         // run under the replacement gate.
         let _replacement_gate = self.replacement_gate.lock().await;
         let backward = payload.get("direction").and_then(Value::as_str) == Some("backward");
-        let (scoped, current) = {
-            let core = self.core.lock().unwrap();
-            (
-                core.scoped_models.clone(),
-                self.engine.model_metadata().and_then(|model| {
-                    Some((
-                        model.get("provider")?.as_str()?.to_string(),
-                        model.get("id")?.as_str()?.to_string(),
-                    ))
-                }),
-            )
-        };
-        // Candidates: scoped entries (available ones only), else the available catalog.
+        let current = self.engine.model_metadata().and_then(|model| {
+            Some((
+                model.get("provider")?.as_str()?.to_string(),
+                model.get("id")?.as_str()?.to_string(),
+            ))
+        });
         let registry = crate::state_getters::worker_model_registry(&self.config.agent_dir);
-        let available: Vec<pa_types::ai::Model> =
+        let candidates: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();
-        let is_scoped = !scoped.is_empty();
-        let candidates: Vec<(Option<String>, Option<pa_types::ai::Model>)> = if is_scoped {
-            scoped
-                .iter()
-                .filter_map(|entry| {
-                    let model = entry.get("model")?;
-                    let provider = model.get("provider")?.as_str()?;
-                    let id = model.get("id")?.as_str()?;
-                    available
-                        .iter()
-                        .find(|candidate| candidate.provider == provider && candidate.id == id)
-                        .map(|candidate| {
-                            (
-                                entry
-                                    .get("thinkingLevel")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string),
-                                Some(candidate.clone()),
-                            )
-                        })
-                })
-                .collect()
-        } else {
-            available
-                .into_iter()
-                .map(|model| (None, Some(model)))
-                .collect()
-        };
         if candidates.len() <= 1 {
             return response_success(None, "cycle_model", Some(Value::Null));
         }
         let current_index = current
             .and_then(|(provider, id)| {
-                candidates.iter().position(|(_, candidate)| {
-                    candidate
-                        .as_ref()
-                        .is_some_and(|model| model.provider == provider && model.id == id)
-                })
+                candidates
+                    .iter()
+                    .position(|model| model.provider == provider && model.id == id)
             })
             .unwrap_or(0);
         let len = candidates.len();
@@ -133,11 +95,7 @@ impl Worker {
         } else {
             (current_index + 1) % len
         };
-        let (scoped_thinking, next_model) =
-            candidates.get(next_index).cloned().unwrap_or((None, None));
-        let Some(next_model) = next_model else {
-            return response_success(None, "cycle_model", Some(Value::Null));
-        };
+        let next_model = candidates[next_index].clone();
         let provider = next_model.provider.clone();
         let model_id = next_model.id.clone();
         // The allowlist gate before the switch: an off-list candidate answers with the loud
@@ -175,15 +133,6 @@ impl Worker {
                 thinking: None,
             }) {
                 return None;
-            }
-            // A scoped entry may pin the switched-to model's level.
-            if let Some(level) = scoped_thinking
-                .as_deref()
-                .and_then(pa_ai::models::thinking_level_from_str)
-            {
-                if !engine.switch_thinking_level(level) {
-                    return None;
-                }
             }
             let cwd = {
                 let mut core = core.lock().unwrap();
@@ -232,7 +181,6 @@ impl Worker {
                 "model": next_model,
                 "thinkingLevel": thinking_level,
                 "serviceTier": service_tier_wire_name(service_tier),
-                "isScoped": is_scoped,
             })),
         )
     }
@@ -278,55 +226,6 @@ impl Worker {
             core.service_tier = restored.unwrap_or(Some(default_tier));
         }
         self.clamp_service_tier_for_model();
-    }
-
-    /// `set_scoped_models { scopedModels }`: store the scoped model list the cycler
-    /// and the connection state surface.
-    pub(crate) fn handle_set_scoped_models(&self, payload: &Value) -> DaemonResponse {
-        if let Err(response) = self.require_created("set_scoped_models") {
-            return response;
-        }
-        let Some(scoped) = payload.get("scopedModels").and_then(Value::as_array) else {
-            return response_failure(
-                None,
-                "set_scoped_models",
-                "set_scoped_models requires a scopedModels array",
-                None,
-            );
-        };
-        for entry in scoped {
-            let model = entry
-                .get("model")
-                .and_then(Value::as_object)
-                .filter(|model| {
-                    model.get("provider").and_then(Value::as_str).is_some()
-                        && model.get("id").and_then(Value::as_str).is_some()
-                });
-            if model.is_none() {
-                return response_failure(
-                    None,
-                    "set_scoped_models",
-                    "set_scoped_models requires scopedModels entries with a model",
-                    None,
-                );
-            }
-            if let Some(level) = entry.get("thinkingLevel") {
-                if level
-                    .as_str()
-                    .and_then(pa_ai::models::thinking_level_from_str)
-                    .is_none()
-                {
-                    return response_failure(
-                        None,
-                        "set_scoped_models",
-                        "Invalid thinking level: expected one of off, minimal, low, medium, high, xhigh, max",
-                        None,
-                    );
-                }
-            }
-        }
-        self.core.lock().unwrap().scoped_models.clone_from(scoped);
-        response_success(None, "set_scoped_models", None)
     }
 
     /// `cycle_thinking_level`: reasoning models cycle their supported levels (the same flow as
@@ -628,7 +527,6 @@ mod tests {
             json!("one-at-a-time"),
             "the follow-up default keeps the TS one-per-turn behavior"
         );
-        assert_eq!(data["scopedModels"], json!([]));
     }
 
     /// One provider with `count` mock models, all auth-configured.
@@ -692,7 +590,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("agent")).unwrap();
         std::fs::write(
             dir.join("agent").join("settings.json"),
-            json!({ "allowedModels": ["anthropic/*"] }).to_string(),
+            json!({ "allowedModels": ["no-such-provider/*"] }).to_string(),
         )
         .unwrap();
         let worker = Arc::new(Worker::new(worker_config(&dir), None));
@@ -700,19 +598,6 @@ mod tests {
             .dispatch("create", &json!({ "noSession": true, "cwd": dir }))
             .await;
         assert!(created.success);
-        let scoped = worker
-            .dispatch(
-                "set_scoped_models",
-                &json!({
-                    "activeSessionId": "switch-session",
-                    "scopedModels": [
-                        { "model": { "provider": "prime-inference", "id": "mock-1" } },
-                        { "model": { "provider": "prime-inference", "id": "mock-2" } }
-                    ]
-                }),
-            )
-            .await;
-        assert!(scoped.success, "scoped fixture: {scoped:?}");
         let response = worker
             .dispatch(
                 "cycle_model",
@@ -730,179 +615,6 @@ mod tests {
             !error.contains("does not support model switching"),
             "{error}"
         );
-    }
-
-    #[tokio::test]
-    async fn create_resolves_the_models_scope_for_the_session() {
-        let dir = std::env::temp_dir().join(format!("pa-worker-scope-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        models_fixture(&dir, 2);
-        // The real engine (no script) resolves the model against the registry.
-        let mut config = worker_config(&dir);
-        config.script = None;
-        let worker = Arc::new(Worker::new(config, None));
-        let created = worker
-            .dispatch(
-                "create",
-                &json!({
-                    "noSession": true,
-                    "cwd": dir,
-                    "models": ["prime-inference/mock-2:high", "prime-inference/mock-1"],
-                }),
-            )
-            .await;
-        assert!(created.success, "create failed: {created:?}");
-        let state = worker
-            .dispatch(
-                "get_connection_state",
-                &json!({ "activeSessionId": "switch-session" }),
-            )
-            .await;
-        let data = state.data.expect("state data");
-        let scoped = data["scopedModels"].as_array().expect("scopedModels");
-        let scoped_keys = scoped
-            .iter()
-            .map(|entry| {
-                format!(
-                    "{}/{}",
-                    entry["model"]["provider"].as_str().unwrap_or_default(),
-                    entry["model"]["id"].as_str().unwrap_or_default()
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            scoped_keys,
-            vec!["prime-inference/mock-2", "prime-inference/mock-1"],
-            "the scope keeps the request's order: {data}"
-        );
-        // No explicit model flags: the startup chain starts on the first scoped model.
-        assert_eq!(data["model"]["id"], "mock-2", "the state's model: {data}");
-        // The scoped entry's `:thinking` rides the picked startup model (`--thinking` absent).
-        assert_eq!(
-            data["thinkingLevel"], "high",
-            "the scoped entry's level set the startup thinking: {data}"
-        );
-
-        // Settings `enabledModels` fallback: a create without `models` resolves the same way.
-        std::fs::write(
-            dir.join("agent").join("settings.json"),
-            json!({ "enabledModels": ["prime-inference/mock-1", "prime-inference/mock-2"] })
-                .to_string(),
-        )
-        .unwrap();
-        let mut config = worker_config(&dir);
-        config.script = None;
-        let fallback = Arc::new(Worker::new(config, None));
-        let created = fallback
-            .dispatch("create", &json!({ "noSession": true, "cwd": dir }))
-            .await;
-        assert!(created.success, "fallback create failed: {created:?}");
-        let state = fallback
-            .dispatch(
-                "get_connection_state",
-                &json!({ "activeSessionId": "switch-session" }),
-            )
-            .await;
-        let data = state.data.expect("state data");
-        let ids = data["scopedModels"]
-            .as_array()
-            .expect("scopedModels")
-            .iter()
-            .map(|entry| entry["model"]["id"].clone())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            vec![json!("mock-1"), json!("mock-2")],
-            "the settings fallback resolved the same scope: {data}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_fresh_scoped_create_persists_the_scoped_startup_pick_in_its_file() {
-        let dir =
-            std::env::temp_dir().join(format!("pa-worker-scope-file-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        models_fixture(&dir, 2);
-        let mut config = worker_config(&dir);
-        config.script = None;
-        let worker = Arc::new(Worker::new(config, None));
-        // A session path that does NOT exist yet: a post-create existence check would see the
-        // file this create just wrote.
-        let session_path = dir.join("fresh-scoped-session.jsonl");
-        let created = worker
-            .dispatch(
-                "create",
-                &json!({
-                    "sessionPath": session_path,
-                    "cwd": dir,
-                    "models": ["prime-inference/mock-2:high", "prime-inference/mock-1"],
-                }),
-            )
-            .await;
-        assert!(created.success, "create failed: {created:?}");
-        // The live startup state starts scoped: mock-2 with its `:high` entry.
-        let state = worker
-            .dispatch(
-                "get_connection_state",
-                &json!({ "activeSessionId": "switch-session" }),
-            )
-            .await;
-        let data = state.data.expect("state data");
-        assert_eq!(data["model"]["id"], "mock-2", "the state's model: {data}");
-        assert_eq!(
-            data["thinkingLevel"], "high",
-            "the state's thinking: {data}"
-        );
-        let file = std::fs::read_to_string(&session_path).expect("the session file");
-        assert!(
-            file.contains("\"type\":\"model_change\"")
-                && file.contains("\"provider\":\"prime-inference\"")
-                && file.contains("\"modelId\":\"mock-2\""),
-            "the prefix's model_change carries the scoped pick: {file}"
-        );
-        assert!(
-            file.contains("\"type\":\"thinking_level_change\"")
-                && file.contains("\"thinkingLevel\":\"high\""),
-            "the prefix's thinking_level_change carries the scoped level: {file}"
-        );
-    }
-
-    #[tokio::test]
-    async fn set_scoped_models_stores_and_validates() {
-        let worker = created_worker().await;
-        let scoped = json!([
-            { "model": { "provider": "prime-inference", "id": "mock-1" } },
-            {
-                "model": { "provider": "prime-inference", "id": "mock-2" },
-                "thinkingLevel": "high",
-            },
-        ]);
-        let response = worker
-            .dispatch(
-                "set_scoped_models",
-                &json!({ "activeSessionId": "switch-session", "scopedModels": scoped }),
-            )
-            .await;
-        assert!(response.success, "failed: {response:?}");
-        let state = worker
-            .dispatch(
-                "get_connection_state",
-                &json!({ "activeSessionId": "switch-session" }),
-            )
-            .await;
-        assert_eq!(state.data.expect("data")["scopedModels"], scoped);
-
-        for bad in [
-            json!({ "activeSessionId": "switch-session" }),
-            json!({ "activeSessionId": "switch-session", "scopedModels": [{}] }),
-            json!({
-                "activeSessionId": "switch-session",
-                "scopedModels": [{ "model": { "provider": "p", "id": "m" }, "thinkingLevel": "sideways" }],
-            }),
-        ] {
-            let response = worker.dispatch("set_scoped_models", &bad).await;
-            assert!(!response.success, "must reject: {bad}");
-        }
     }
 
     #[tokio::test]

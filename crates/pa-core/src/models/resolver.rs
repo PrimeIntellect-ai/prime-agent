@@ -37,13 +37,6 @@ pub fn default_model_per_provider(provider: &str) -> Option<&'static str> {
     })
 }
 
-/// A resolved model plus an explicit thinking level from the pattern.
-#[derive(Debug, Clone)]
-pub struct ScopedModel {
-    pub model: Model,
-    pub thinking_level: Option<ThinkingLevel>,
-}
-
 /// True when a model id looks like an alias (no date suffix).
 fn is_alias(id: &str) -> bool {
     if id.ends_with("-latest") {
@@ -282,108 +275,6 @@ fn fuzzy_exact<'a>(pattern: &str, available_models: &'a [Model]) -> Option<&'a M
         .or_else(|| fuzzy_match_model(pattern, available_models))
 }
 
-/// Glob match (`?*[]` patterns, case-insensitive) against provider/id and id.
-fn glob_matches(pattern: &str, model: &Model) -> bool {
-    let full_id = format!("{}/{}", model.provider, model.id);
-    let matcher = globset::Glob::new(pattern)
-        .ok()
-        .and_then(|glob| glob.compile_matcher().into());
-    match matcher {
-        Some(matcher) => matcher.is_match(&full_id) || matcher.is_match(&model.id),
-        None => false,
-    }
-}
-
-/// Whether the scope would select this reference if it became available.
-/// Only the reference may join the authorized candidates; unrelated models
-/// from the full catalog must not change fuzzy selection.
-#[must_use]
-pub fn scope_patterns_select_reference(
-    patterns: &[String],
-    provider: &str,
-    model_id: &str,
-    available_models: &[Model],
-    all_models: &[Model],
-) -> bool {
-    let mut candidates = available_models.to_vec();
-    if !candidates
-        .iter()
-        .any(|model| model.provider == provider && model.id == model_id)
-    {
-        let Some(reference) = all_models
-            .iter()
-            .find(|model| model.provider == provider && model.id == model_id)
-            .cloned()
-            .or_else(|| build_fallback_model(provider, model_id, all_models))
-        else {
-            return false;
-        };
-        candidates.push(reference);
-    }
-    resolve_model_scope_from_models(patterns, &candidates)
-        .iter()
-        .any(|scoped| scoped.model.provider == provider && scoped.model.id == model_id)
-}
-
-fn pattern_matches<'a>(
-    pattern: &str,
-    available_models: &'a [Model],
-) -> (Vec<&'a Model>, Option<ThinkingLevel>, Option<String>) {
-    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-        let (glob_pattern, thinking_level) = match pattern.rfind(':') {
-            Some(idx) if is_valid_thinking_level(&pattern[idx + 1..]) => {
-                (&pattern[..idx], parse_thinking_level(&pattern[idx + 1..]))
-            }
-            _ => (pattern, None),
-        };
-        let case_fold = glob_pattern.to_lowercase();
-        let matching = available_models
-            .iter()
-            .filter(|model| glob_matches(&case_fold, model) || glob_matches(glob_pattern, model))
-            .collect();
-        return (matching, thinking_level, None);
-    }
-    let parsed = parse_model_pattern(pattern, available_models, false);
-    (
-        parsed.model.into_iter().collect(),
-        parsed.thinking_level,
-        parsed.warning,
-    )
-}
-
-/// Resolve model patterns to scoped models: exact/fuzzy for plain patterns,
-/// glob expansion for wildcard patterns; `pattern:level` applies a level.
-#[must_use]
-pub fn resolve_model_scope_from_models(
-    patterns: &[String],
-    available_models: &[Model],
-) -> Vec<ScopedModel> {
-    let mut scoped: Vec<ScopedModel> = Vec::new();
-    for pattern in patterns {
-        let (matching, thinking_level, warning) = pattern_matches(pattern, available_models);
-        if let Some(warning) = &warning {
-            eprintln!("Warning: {warning}");
-        }
-        if matching.is_empty() {
-            eprintln!("Warning: No models match pattern \"{pattern}\"");
-            continue;
-        }
-        for model in matching {
-            if !scoped.iter().any(|sm| models_equal(&sm.model, model)) {
-                scoped.push(ScopedModel {
-                    model: model.clone(),
-                    thinking_level,
-                });
-            }
-        }
-    }
-    scoped
-}
-
-fn models_equal(a: &Model, b: &Model) -> bool {
-    a.provider == b.provider && a.id == b.id
-}
-
 #[derive(Debug, Default)]
 pub struct ResolveCliModelResult {
     pub model: Option<Model>,
@@ -577,18 +468,12 @@ pub fn failover_candidates(current: &Model, available: &[Model]) -> Vec<Model> {
     candidates.into_iter().cloned().collect()
 }
 
-/// Inputs to the startup-model lookup (TS `findInitialModel`, composed with
-/// the `--models`-scope handling from `prepareSessionOptions`).
+/// Inputs to the startup-model lookup (TS `findInitialModel`).
 #[derive(Clone, Copy)]
 pub struct InitialModelOptions<'a> {
     pub cli_provider: Option<&'a str>,
     /// Explicit `--model` flag (a `provider/model` reference is inferred).
     pub cli_model: Option<&'a str>,
-    /// Models resolved from `--models` patterns (against the available
-    /// catalog, TS `resolveModelScope`).
-    pub scoped_models: &'a [ScopedModel],
-    /// A continued/resumed session skips the scoped-model step (TS `isContinuing`).
-    pub is_continuing: bool,
     /// Saved default provider (settings `defaultProvider`).
     pub default_provider: Option<&'a str>,
     /// Saved default model id (settings `defaultModel`).
@@ -601,12 +486,10 @@ pub struct InitialModelOptions<'a> {
 /// The startup model, in the TS priority order:
 /// 1. CLI flags (`--provider` + `--model`, resolved against the full catalog;
 ///    an unresolved flagged model resolves to `None`, the caller's error)
-/// 2. The `--models` scope: the saved default when it is in scope, else the
-///    first scoped model (skipped for a continued session)
-/// 3. The saved settings default, rebuilt from the provider template when the
+/// 2. The saved settings default, rebuilt from the provider template when the
 ///    saved id is missing from the catalog
-/// 4. The featured default (prime-inference glm-5.3, then per-provider ids)
-/// 5. The first available model.
+/// 3. The featured default (prime-inference glm-5.3, then per-provider ids)
+/// 4. The first available model.
 #[must_use]
 pub fn find_initial_model(options: &InitialModelOptions<'_>) -> Option<Model> {
     if let (Some(provider), Some(pattern)) = (options.cli_provider, options.cli_model) {
@@ -614,20 +497,6 @@ pub fn find_initial_model(options: &InitialModelOptions<'_>) -> Option<Model> {
         // A flagged model that cannot resolve fails the whole lookup; the
         // caller surfaces the error (TS exits the process at this point).
         return resolved.model;
-    }
-    if !options.scoped_models.is_empty() && !options.is_continuing {
-        let saved_in_scope = options
-            .default_provider
-            .zip(options.default_model_id)
-            .and_then(|(provider, id)| {
-                options
-                    .scoped_models
-                    .iter()
-                    .find(|scoped| scoped.model.provider == provider && scoped.model.id == id)
-            });
-        return saved_in_scope
-            .or_else(|| options.scoped_models.first())
-            .map(|scoped| scoped.model.clone());
     }
     if let (Some(provider), Some(id)) = (options.default_provider, options.default_model_id) {
         if let Some(found) = options
@@ -654,7 +523,7 @@ pub fn find_initial_model(options: &InitialModelOptions<'_>) -> Option<Model> {
 /// The private-model predicate without a full `Model` value (TS
 /// `isPrivatePrimeInferenceModel({ provider, id })`).
 #[must_use]
-pub(super) fn is_private_prime_inference_reference(provider: &str, model_id: &str) -> bool {
+fn is_private_prime_inference_reference(provider: &str, model_id: &str) -> bool {
     provider == "prime-inference"
         && super::prime_inference::is_private_prime_inference_model_id(model_id)
 }
@@ -681,100 +550,6 @@ mod tests {
             model("prime-inference", "z-ai/glm-5.3", "GLM"),
             model("openrouter", "openai/gpt-4o", "GPT-4o"),
         ]
-    }
-
-    #[test]
-    fn a_display_name_pattern_selects_a_cataloged_private_default() {
-        let all = private_prime_inference_models();
-        assert!(scope_patterns_select_reference(
-            &["GLM 5.2 Fast".to_string()],
-            "prime-inference",
-            "internal/glm-5.2-fast",
-            &all,
-            &all,
-        ));
-    }
-
-    #[test]
-    fn a_fuzzy_scope_uses_the_catalog_winner_not_a_singleton_default() {
-        let mut all = private_prime_inference_models();
-        all.push(model("prime-inference", "z-ai/glm-5.3", "GLM 5.3"));
-        let patterns = vec!["glm".to_string()];
-        let scoped = resolve_model_scope_from_models(&patterns, &all);
-        assert_eq!(
-            scoped
-                .iter()
-                .map(|entry| (entry.model.provider.as_str(), entry.model.id.as_str()))
-                .collect::<Vec<_>>(),
-            [("prime-inference", "z-ai/glm-5.3")]
-        );
-        assert!(!scope_patterns_select_reference(
-            &patterns,
-            "prime-inference",
-            "internal/glm-5.2-fast",
-            &all,
-            &all,
-        ));
-        assert!(scope_patterns_select_reference(
-            &patterns,
-            "prime-inference",
-            "z-ai/glm-5.3",
-            &all,
-            &all,
-        ));
-    }
-
-    #[test]
-    fn an_unlisted_private_reference_competes_with_the_full_catalog() {
-        let mut all = private_prime_inference_models();
-        all.push(model("prime-inference", "z-ai/glm-5.3", "GLM 5.3"));
-        for (pattern, selected) in [
-            ("glm", false),
-            ("prime-inference/internal/glm-5.9-turbo", true),
-            ("prime-inference/internal/*:high", true),
-        ] {
-            assert_eq!(
-                scope_patterns_select_reference(
-                    &[pattern.to_string()],
-                    "prime-inference",
-                    "internal/glm-5.9-turbo",
-                    &all,
-                    &all,
-                ),
-                selected,
-                "pattern {pattern}"
-            );
-        }
-    }
-
-    #[test]
-    fn unavailable_competitors_do_not_hide_a_missing_scoped_default() {
-        let available = vec![model("prime-inference", "a-glm-5.2", "Public GLM 5.2")];
-        let mut all = private_prime_inference_models();
-        all.extend(available.iter().cloned());
-        all.push(model("custom", "zz-glm-5.2", "Unavailable GLM 5.2"));
-        let patterns = vec!["glm-5.2".to_string()];
-        assert_eq!(
-            resolve_model_scope_from_models(&patterns, &available)
-                .iter()
-                .map(|entry| entry.model.id.as_str())
-                .collect::<Vec<_>>(),
-            ["a-glm-5.2"]
-        );
-        assert!(scope_patterns_select_reference(
-            &patterns,
-            "prime-inference",
-            "internal/glm-5.2-fast",
-            &available,
-            &all,
-        ));
-        assert!(!scope_patterns_select_reference(
-            &patterns,
-            "prime-inference",
-            "internal/glm-5.2-fast",
-            &all,
-            &all,
-        ));
     }
 
     #[test]
@@ -823,17 +598,6 @@ mod tests {
         // Aliases beat dated versions in fuzzy matching.
         let fuzzy = fuzzy_match_model("claude-sonnet", &catalog);
         assert_eq!(fuzzy.map(|m| m.id.as_str()), Some("claude-sonnet-4-5"));
-    }
-
-    #[test]
-    fn scoped_patterns_and_thinking_levels() {
-        let catalog = catalog();
-        let patterns = vec!["claude-sonnet".to_string(), "z-ai/glm-5.3:high".to_string()];
-        let scoped = resolve_model_scope_from_models(&patterns, &catalog);
-        assert_eq!(scoped.len(), 2);
-        assert_eq!(scoped[0].model.id, "claude-sonnet-4-5");
-        assert!(scoped[0].thinking_level.is_none());
-        assert_eq!(scoped[1].thinking_level, Some(ThinkingLevel::High));
     }
 
     #[test]
@@ -925,8 +689,6 @@ mod tests {
         let options = InitialModelOptions {
             cli_provider: Some("anthropic"),
             cli_model: Some("claude-sonnet-4-5"),
-            scoped_models: &[],
-            is_continuing: false,
             default_provider: Some("openrouter"),
             default_model_id: Some("openai/gpt-4o"),
             all_models: &catalog,
@@ -943,8 +705,6 @@ mod tests {
         let options = InitialModelOptions {
             cli_provider: None,
             cli_model: None,
-            scoped_models: &[],
-            is_continuing: false,
             default_provider: Some("anthropic"),
             default_model_id: Some("claude-sonnet-4-5"),
             all_models: &catalog,
@@ -961,8 +721,6 @@ mod tests {
         let options = InitialModelOptions {
             cli_provider: None,
             cli_model: None,
-            scoped_models: &[],
-            is_continuing: false,
             default_provider: Some("anthropic"),
             default_model_id: Some("claude-future-model"),
             all_models: &catalog,
@@ -979,8 +737,6 @@ mod tests {
         let options = InitialModelOptions {
             cli_provider: None,
             cli_model: None,
-            scoped_models: &[],
-            is_continuing: false,
             default_provider: None,
             default_model_id: None,
             all_models: &catalog,
@@ -1006,34 +762,5 @@ mod tests {
             ..options
         };
         assert_eq!(find_initial_model(&empty), None);
-    }
-
-    #[test]
-    fn initial_model_scope_prefers_saved_default_in_scope() {
-        let catalog = catalog();
-        let scoped = resolve_model_scope_from_models(
-            &["claude-sonnet".to_string(), "glm".to_string()],
-            &catalog,
-        );
-        let options = InitialModelOptions {
-            cli_provider: None,
-            cli_model: None,
-            scoped_models: &scoped,
-            is_continuing: false,
-            default_provider: Some("prime-inference"),
-            default_model_id: Some("z-ai/glm-5.3"),
-            all_models: &catalog,
-            available_models: &catalog,
-        };
-        let model = find_initial_model(&options).expect("scoped model resolves");
-        assert_eq!(model.provider, "prime-inference");
-        assert_eq!(model.id, "z-ai/glm-5.3");
-        let continued = InitialModelOptions {
-            is_continuing: true,
-            ..options
-        };
-        let model = find_initial_model(&continued).expect("saved default resolves");
-        assert_eq!(model.provider, "prime-inference");
-        assert_eq!(model.id, "z-ai/glm-5.3");
     }
 }

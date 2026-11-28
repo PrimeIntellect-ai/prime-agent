@@ -258,15 +258,12 @@ pub(crate) fn headless_daemon_create(
     if let Some(model) = &config.model {
         create_config["model"] = serde_json::json!(model);
     }
-    // ACP and A2A keep `--api-key` and `--models` off their resident
-    // creates, whose config is persisted; the run-scoped print session
-    // carries them like the interactive create.
+    // ACP and A2A keep `--api-key` off their resident creates, whose config
+    // is persisted; the run-scoped print session carries it like the
+    // interactive create.
     if !resident {
         if let Some(api_key) = &config.api_key {
             create_config["apiKey"] = serde_json::json!(api_key);
-        }
-        if let Some(models) = &config.models {
-            create_config["models"] = serde_json::json!(models);
         }
     }
     if let Some(thinking) = config.thinking {

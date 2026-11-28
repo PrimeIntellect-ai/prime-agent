@@ -293,16 +293,9 @@ pub trait SessionEngine: Send + Sync {
     /// the flags are authoritative and survive every session replacement.
     fn configure_create_model(&self, _selection: EngineModelSelection) {}
 
-    /// The create command's `--models` scope, plus whether the session
-    /// continues an existing file: fresh sessions start on the first
-    /// scoped model or the saved default; continuing sessions keep their own.
-    fn configure_startup_scope(
-        &self,
-        _scoped_models: Vec<pa_core::models::ScopedModel>,
-        _patterns: Vec<String>,
-        _is_continuing: bool,
-    ) {
-    }
+    /// The create's model selection settled (after the saved-model restore),
+    /// plus whether the session continues an existing file.
+    fn configure_startup(&self, _is_continuing: bool) {}
 
     /// Set the session's resolved service-tier preference before the next request.
     fn configure_service_tier(&self, _tier: Option<pa_types::ai::ServiceTier>) {}

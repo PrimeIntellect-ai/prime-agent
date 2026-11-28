@@ -50,7 +50,6 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         steering_mode: "all".to_string(),
         follow_up_mode: "one-at-a-time".to_string(),
         forced_all_steering: false,
-        scoped_models: Vec::new(),
         retry_abort_requested: false,
         queued_input_suspended: false,
         pending_next_turn: Vec::new(),

@@ -93,7 +93,6 @@ async fn get_connection_state_matches_the_ts_shape() {
         "sessionActions",
         "compactionCount",
         "goal",
-        "scopedModels",
         "activeToolNames",
     ] {
         assert!(data.get(field).is_some(), "missing {field}: {data}");

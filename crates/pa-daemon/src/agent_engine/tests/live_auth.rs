@@ -282,9 +282,9 @@ fn an_explicit_key_serves_only_the_provider_it_was_configured_for() {
 }
 
 /// An explicit key without a provider binds to the model the create's
-/// selection settles on: the startup scope picks the provider.
+/// selection settles on: the saved-model restore picks the provider.
 #[test]
-fn an_explicit_key_without_a_provider_binds_after_the_startup_scope() {
+fn an_explicit_key_without_a_provider_binds_after_the_restore() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     write_credential_backed_faux_provider(&agent_dir);
@@ -305,24 +305,23 @@ fn an_explicit_key_without_a_provider_binds_after_the_startup_scope() {
     })
     .expect("engine");
     engine.configure_create_model(EngineModelSelection {
-        api_key: Some("sk-scoped".to_string()),
+        api_key: Some("sk-explicit".to_string()),
         ..Default::default()
     });
     assert_eq!(engine.resolve_model().unwrap().provider, "battery");
-    let mut primary = engine.resolve_model().unwrap();
-    primary.provider = "primary".to_string();
-    engine.configure_startup_scope(
-        vec![pa_core::models::ScopedModel {
-            model: primary.clone(),
-            thinking_level: None,
-        }],
-        vec!["primary/mock-1".to_string()],
-        false,
-    );
-    assert_eq!(engine.resolve_model().unwrap().provider, "primary");
+    let session_file = dir.path().join("session.jsonl");
+    engine.set_session_file(session_file.clone());
+    *engine.restored_model.lock().unwrap() = Some(RestoredSessionModel {
+        session_file,
+        model: Some(("primary".to_string(), "mock-1".to_string())),
+        fallback_message: None,
+    });
+    engine.configure_startup(false);
+    let primary = engine.resolve_model().unwrap();
+    assert_eq!(primary.provider, "primary");
     assert_eq!(
         engine.resolve_request_auth(&primary).api_key.as_deref(),
-        Some("sk-scoped")
+        Some("sk-explicit")
     );
 }
 

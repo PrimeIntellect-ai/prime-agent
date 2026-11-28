@@ -144,15 +144,6 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         Box::pin(std::future::ready(()))
     }
 
-    fn scoped_models_used(
-        &self,
-        _action: &'static str,
-        _scoped: bool,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        self.count("tui_scoped_models_count");
-        Box::pin(std::future::ready(()))
-    }
-
     fn ipython_bash_rendered(
         &self,
         bash_lines: usize,

@@ -170,9 +170,6 @@ pub(crate) struct SessionUi {
     session_dir: Option<PathBuf>,
     script_path: Option<PathBuf>,
     model_selection: ModelSelection,
-    /// The `--models` scope patterns carried into every `create` config: the daemon resolves them
-    /// per create, so a `/new` session keeps the scope.
-    models: Option<Vec<String>>,
     /// The `/model` picker's catalog: a startup snapshot (the bundled
     /// fallback), replaced by the daemon's `get_model_catalog` response.
     model_catalog: Vec<pa_types::ai::Model>,

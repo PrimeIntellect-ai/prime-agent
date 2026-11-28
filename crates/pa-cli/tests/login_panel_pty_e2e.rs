@@ -172,7 +172,6 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
 
 fn child_options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,
@@ -245,7 +244,6 @@ impl pa_tui::client_auth::ClientAuthCommands for ScriptedClientAuth {
 
 fn mcp_child_options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
         client_auth: Some(pa_tui::client_auth::ClientAuthCommandsHandle(Arc::new(
             ScriptedClientAuth,
         ))),
@@ -337,7 +335,6 @@ impl ProviderAuthCommands for ScriptedModelPickerAuth {
 /// configured providers, the scripted auth hook.
 fn model_sign_in_child_options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
         model_catalog: vec![unauthenticated_catalog_model()],
         provider_auth: Some(ProviderAuthCommandsHandle(Arc::new(
             ScriptedModelPickerAuth,

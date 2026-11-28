@@ -247,8 +247,6 @@ pub struct AgentConnectionState {
     pub compaction_count: u32,
     pub goal: Value,
     #[serde(default)]
-    pub scoped_models: Vec<Value>,
-    #[serde(default)]
     pub active_tool_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<Value>,

@@ -3,10 +3,7 @@
 //! session's live-model and thinking-level surfaces, and the request
 //! API-key seam.
 
-use super::{
-    AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine,
-    StartupScope,
-};
+use super::{AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine};
 
 impl AgentSessionEngine {
     /// The startup chain: the saved settings default, then the featured
@@ -20,19 +17,9 @@ impl AgentSessionEngine {
             .get_default_provider()
             .zip(settings.get_default_model())
             .map(|(provider, model)| (provider.to_string(), model.to_string()));
-        // The create-time `--models` scope: a fresh session starts on the
-        // saved default when in scope, else the first scoped model.
-        let scope = self
-            .startup_scope
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .unwrap_or_default();
         let resolved = pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
             cli_provider: None,
             cli_model: None,
-            scoped_models: &scope.scoped_models,
-            is_continuing: scope.is_continuing,
             default_provider: default.as_ref().map(|(provider, _)| provider.as_str()),
             default_model_id: default.as_ref().map(|(_, model)| model.as_str()),
             all_models: &all,
@@ -40,21 +27,18 @@ impl AgentSessionEngine {
         })
         .or_else(|| all.first().cloned());
         if let (Some(model), Some(default)) = (&resolved, &default) {
-            self.record_startup_default_fallback(model, default, &scope, &available, &all);
+            self.record_startup_default_fallback(model, default);
         }
         resolved
     }
 
-    fn record_startup_default_fallback(
-        &self,
-        model: &Model,
-        default: &(String, String),
-        scope: &StartupScope,
-        available_models: &[Model],
-        all_models: &[Model],
-    ) {
+    fn record_startup_default_fallback(&self, model: &Model, default: &(String, String)) {
         let (provider, model_id) = default;
-        if scope.is_continuing || (model.provider == *provider && model.id == *model_id) {
+        if self
+            .startup_is_continuing
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || (model.provider == *provider && model.id == *model_id)
+        {
             return;
         }
         let session_file = self
@@ -71,17 +55,6 @@ impl AgentSessionEngine {
             .as_ref()
             .is_some_and(|decision| decision.session_file == session_file)
         {
-            return;
-        }
-        let wanted = scope.patterns.is_empty()
-            || pa_core::models::scope_patterns_select_reference(
-                &scope.patterns,
-                provider,
-                model_id,
-                available_models,
-                all_models,
-            );
-        if !wanted {
             return;
         }
         let message = format!(
@@ -395,34 +368,6 @@ impl AgentSessionEngine {
         let selection = self.current_selection();
         let requested = selection
             .thinking
-            .or_else(|| {
-                // An unflagged fresh session that starts on a scoped entry
-                // takes that entry's `:thinking` (the explicit `--thinking`
-                // above still wins).
-                if selection.model.is_some() {
-                    return None;
-                }
-                let scope = self
-                    .startup_scope
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                scope
-                    .filter(|scope| !scope.is_continuing)?
-                    .scoped_models
-                    .iter()
-                    .find(|scoped| {
-                        model.as_ref().is_ok_and(|model| {
-                            scoped.model.provider == model.provider && scoped.model.id == model.id
-                        })
-                    })?
-                    .thinking_level
-                    .and_then(|level| {
-                        let wire = serde_json::to_value(level).ok()?;
-                        wire.as_str()
-                            .and_then(pa_ai::models::thinking_level_from_str)
-                    })
-            })
             .or_else(|| {
                 let settings =
                     pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);

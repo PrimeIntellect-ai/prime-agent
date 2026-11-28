@@ -204,7 +204,7 @@ def fixture_state(root, active):
             "sessionActions": {"queuedCount": 0, "steering": [], "followUps": []},
             "goal": {"active": False, "status": "idle", "tokensUsed": 0,
                      "timeUsedSeconds": 0, "continuationsUsed": 0},
-            "scopedModels": [], "activeToolNames": []}
+            "activeToolNames": []}
 
 
 class Supervisor:

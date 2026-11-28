@@ -147,7 +147,6 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
 
 fn options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

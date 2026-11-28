@@ -302,16 +302,12 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ("app.suspend", def!(&["ctrl+z"], "Suspend to background")),
     ("app.model.select", def!(&["ctrl+l"], "Open model selector")),
     (
-        "app.model.toggleScope",
-        def!(&["alt+s"], "Toggle model selector scope"),
-    ),
-    (
         "app.model.cycleForward",
-        def!(&["alt+m"], "Cycle to the next scoped model"),
+        def!(&["alt+m"], "Cycle to the next model"),
     ),
     (
         "app.model.cycleBackward",
-        def!(&["shift+alt+m"], "Cycle to the previous scoped model"),
+        def!(&["shift+alt+m"], "Cycle to the previous model"),
     ),
     (
         "app.tools.expand",

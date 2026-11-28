@@ -115,7 +115,6 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "heartbeat_update",
     "set_model",
     "cycle_model",
-    "set_scoped_models",
     "set_thinking_level",
     "cycle_thinking_level",
     "set_service_tier",
@@ -787,9 +786,6 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::CycleModel {
             active_session_id, ..
         }
-        | DaemonCommand::SetScopedModels {
-            active_session_id, ..
-        }
         | DaemonCommand::SetThinkingLevel {
             active_session_id, ..
         }
@@ -1037,7 +1033,6 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::HeartbeatUpdate { .. } => "heartbeat_update",
         DaemonCommand::SetModel { .. } => "set_model",
         DaemonCommand::CycleModel { .. } => "cycle_model",
-        DaemonCommand::SetScopedModels { .. } => "set_scoped_models",
         DaemonCommand::SetThinkingLevel { .. } => "set_thinking_level",
         DaemonCommand::SetServiceTier { .. } => "set_service_tier",
         DaemonCommand::CycleThinkingLevel { .. } => "cycle_thinking_level",

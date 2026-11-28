@@ -339,7 +339,6 @@ fn slim_attach() -> Value {
                 "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
                 "compactionCount": 0,
                 "goal": null,
-                "scopedModels": [],
                 "activeToolNames": [],
             },
             "messages": [
@@ -2042,7 +2041,6 @@ fn attach_snapshot_carries_the_goal_state() {
                     "timeUsedSeconds": 1,
                     "continuationsUsed": 0
                 },
-                "scopedModels": [],
                 "activeToolNames": []
             },
             "messages": [],

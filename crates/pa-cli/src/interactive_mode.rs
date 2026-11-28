@@ -499,9 +499,6 @@ fn build_tui_options(
             // The worker clamps `--thinking` to the model's levels.
             thinking: config.thinking,
         },
-        // The raw `--models` patterns ride the create config (the daemon
-        // owns the resolution).
-        models: config.models.clone(),
         no_session: options.session.no_session,
         session,
         initial_message: options.initial_message.clone(),
