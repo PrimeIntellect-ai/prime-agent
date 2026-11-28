@@ -5,8 +5,8 @@ use super::{
     create_daemon_event_meta, deliver_inbox_arrival_row_locked, emit_refinement_event_for_session,
     gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot, DaemonOutbound,
     EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint,
-    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
-    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
+    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, TurnWaiter,
+    Value, WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
 };
 
 use std::sync::{Arc, Mutex};
@@ -60,6 +60,8 @@ impl TurnRunner {
             let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
+                    // A stopping runner starts nothing either.
+                    super::queue::release_start_waiters(&mut core);
                     drop(core);
                     // The shutdown handler waits on the idle notify before
                     // disposing the kernel; the runner's last chance to fire it.
@@ -70,6 +72,9 @@ impl TurnRunner {
                 // compaction is a busy state the resume sites do NOT clear.
                 if core.queued_input_parked(&self.input_pauses) {
                     core.busy = false;
+                    // A parked runner starts nothing: a prompt waiting on its
+                    // run's start answers now, like an admission while parked.
+                    super::queue::release_start_waiters(&mut core);
                     None
                 } else if let Some(due) = core.inbox_wake_hold(tokio::time::Instant::now()) {
                     core.busy = false;
@@ -507,12 +512,18 @@ impl TurnRunner {
             .iter()
             .filter_map(|item| item.admission_id.clone())
             .collect();
-        // The done senders leave the items behind (done = None): on
-        // shutdown, the batch's unaccepted tail returns to its lane below.
-        let items_done: Vec<oneshot::Sender<TurnSettle>> = items
-            .iter_mut()
-            .filter_map(|item| item.done.take())
-            .collect();
+        // The waiters leave the items behind (done = None): on shutdown,
+        // the batch's unaccepted tail returns to its lane below. A start
+        // waiter answers now, after this run's `agent_start` went out.
+        let mut items_done: Vec<oneshot::Sender<TurnSettle>> = Vec::new();
+        for waiter in items.iter_mut().filter_map(|item| item.done.take()) {
+            match waiter {
+                TurnWaiter::Settled(done) => items_done.push(done),
+                TurnWaiter::Started(started) => {
+                    let _ = started.send(());
+                }
+            }
+        }
         let turn_outcome = Arc::new(std::sync::Mutex::new(None::<TurnSettle>));
         let turn_outcome_slot = Arc::clone(&turn_outcome);
         // Whether the last `agent_start` on the wire is still unclosed: the

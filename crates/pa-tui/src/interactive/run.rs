@@ -187,6 +187,29 @@ async fn settled_sequence(
         .ok_or_else(|| anyhow::anyhow!("get_rlm_children carried no eventSequence"))
 }
 
+/// The steps after folding a batch of daemon frames.
+async fn after_client_events(session: &mut SessionUi, view: &mut AgentView, was_active: bool) {
+    // A settled turn or compaction refreshes the tray's context usage.
+    let compaction_settled = std::mem::take(&mut session.compaction_settled);
+    if compaction_settled || (was_active && !session.run_busy()) {
+        session.refresh_stats().await;
+        session.rebuild_tray(view);
+    }
+    // A `session_binding` supersede notice: the session lives under a new active id, so re-attach
+    // to it — the transcript rebuilds from the snapshot (silent, no banner). A failed re-attach
+    // changes nothing (the old one detaches only after a new attach succeeds); the next supersede
+    // notice or submit-path retry re-attaches once a worker can serve the session.
+    if let Some(current) = session.pending_rebind.take() {
+        match session
+            .attach_session(&current, crate::session_ui::DockFold::FirstFrame)
+            .await
+        {
+            Ok(()) => session.rebuild_view(view, &crate::session_ui::RebuildKind::Rebind),
+            Err(error) => session.note(&format!("session rebind failed: {error:#}"), view),
+        }
+    }
+}
+
 async fn run_interactive_surface(
     options: InteractiveOptions,
     ui: UiMode,
@@ -1370,32 +1393,7 @@ async fn run_interactive_surface(
                     while let Some(Ok(event)) = events.as_mut().map(mpsc::UnboundedReceiver::try_recv) {
                         session.apply_client_event(event, &mut view);
                     }
-                    // A settled turn or compaction refreshes the tray's context usage.
-                    let compaction_settled = std::mem::take(&mut session.compaction_settled);
-                    if compaction_settled || (was_active && !session.run_busy()) {
-                        session.refresh_stats().await;
-                        session.rebuild_tray(&mut view);
-                    }
-                    // A `session_binding` supersede notice: the session lives under a new active
-                    // id, so re-attach to it — the transcript rebuilds from the snapshot (silent,
-                    // no banner). A failed re-attach changes nothing (the old one detaches only
-                    // after a new attach succeeds); the next supersede notice or submit-path retry
-                    // re-attaches once a worker can serve the session.
-                    if let Some(current) = session.pending_rebind.take() {
-                        match session
-                            .attach_session(&current, crate::session_ui::DockFold::FirstFrame)
-                            .await
-                        {
-                            Ok(()) => session.rebuild_view(
-                                &mut view,
-                                &crate::session_ui::RebuildKind::Rebind,
-                            ),
-                            Err(error) => session.note(
-                                &format!("session rebind failed: {error:#}"),
-                                &mut view,
-                            ),
-                        }
-                    }
+                    after_client_events(&mut session, &mut view, was_active).await;
                 } else {
                     // The closed stream parks its arm; a recovery already in flight owns the run,
                     // otherwise the loss is a daemon hiccup.
@@ -1518,6 +1516,13 @@ async fn run_interactive_surface(
             }
             maybe_prompt = prompt_rx.recv() => {
                 if let Some(note) = maybe_prompt {
+                    // The daemon answers a prompt it started after that run's `agent_start`, and
+                    // the reader queued every frame before the answer: fold them first, so the
+                    // outcome lands on the run it started.
+                    while let Some(Ok(event)) = events.as_mut().map(mpsc::UnboundedReceiver::try_recv) {
+                        session.apply_client_event(event, &mut view);
+                    }
+                    after_client_events(&mut session, &mut view, was_active).await;
                     // Protocol corruption stays fatal exactly like the inline submit's ladder.
                     session.apply_prompt_outcome(note, &mut view).await?;
                 }

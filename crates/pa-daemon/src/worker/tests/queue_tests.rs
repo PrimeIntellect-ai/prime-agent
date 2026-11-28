@@ -594,3 +594,50 @@ async fn require_busy_steer_queues_only_into_a_running_turn() {
         .collect();
     assert_eq!(texts, ["held turn", "mid-turn note"]);
 }
+
+/// An idle session's prompt answers after its run's `agent_start`, so a client that folds the
+/// frames it received before the ack never holds an accepted prompt with no run in sight.
+#[tokio::test]
+async fn an_idle_sessions_prompt_ack_follows_its_agent_start() {
+    let worker = created_dispatch_worker().await;
+    let mut subscription = worker.events.subscribe();
+    let prompt = worker
+        .dispatch(
+            "prompt",
+            &json!({ "activeSessionId": "suspension-session", "message": "go" }),
+        )
+        .await;
+    assert!(prompt.success, "prompt failed: {prompt:?}");
+    let before_ack = session_events_since(&mut subscription);
+    assert!(
+        before_ack
+            .iter()
+            .any(|event| event["type"] == "agent_start"),
+        "the ack waits for its run's agent_start: {before_ack:?}"
+    );
+}
+
+/// A prompt placed ahead of a background row is still the runner's next pickup, so its ack waits
+/// for its run's `agent_start` too.
+#[tokio::test]
+async fn a_prompt_ahead_of_a_background_row_acks_after_its_agent_start() {
+    let worker = created_dispatch_worker().await;
+    let mut background = priority_test_item("background row", TurnPolicy::Injected);
+    background.priority = QueuePriority::Background;
+    worker.core.lock().unwrap().steering.push_back(background);
+    let mut subscription = worker.events.subscribe();
+    let prompt = worker
+        .dispatch(
+            "prompt",
+            &json!({ "activeSessionId": "suspension-session", "message": "go" }),
+        )
+        .await;
+    assert!(prompt.success, "prompt failed: {prompt:?}");
+    let before_ack = session_events_since(&mut subscription);
+    assert!(
+        before_ack
+            .iter()
+            .any(|event| event["type"] == "agent_start"),
+        "the ack waits for its run's agent_start: {before_ack:?}"
+    );
+}

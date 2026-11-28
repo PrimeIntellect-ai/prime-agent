@@ -297,7 +297,7 @@ impl AgentCronSchedulerHooks for QueueHooks {
                     admission_id: None,
                     images: Vec::new(),
                     queue_key,
-                    done: Some(done_tx),
+                    done: Some(crate::worker::TurnWaiter::Settled(done_tx)),
                     queue_visible: true,
                     policy: crate::worker::TurnPolicy::Injected,
                     forced_batch: false,

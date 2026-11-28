@@ -25,7 +25,7 @@ async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
                     queue_key: None,
                     admission_id: None,
                     images: Vec::new(),
-                    done: Some(done_tx),
+                    done: Some(TurnWaiter::Settled(done_tx)),
                     queue_visible: true,
                     policy: TurnPolicy::Queued,
                     forced_batch: false,

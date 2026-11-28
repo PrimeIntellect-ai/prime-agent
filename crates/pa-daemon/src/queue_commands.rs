@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Lane;
-use crate::worker::{parse_prompt_images, TurnSettle, Worker};
+use crate::worker::{parse_prompt_images, Worker};
 
 /// The wire lane names: `"steering"` and `"followUp"`.
 fn wire_lane(value: Option<&Value>) -> Option<Lane> {
@@ -172,7 +172,7 @@ fn mutate_lane(
         "delete" => {
             if let Some(mut item) = lane.remove(index) {
                 if let Some(done) = item.done.take() {
-                    let _ = done.send(TurnSettle::Withdrawn(deleted_message.to_string()));
+                    done.withdraw(deleted_message);
                 }
             }
         }
@@ -539,7 +539,7 @@ mod tests {
                 queue_key: None,
                 admission_id: None,
                 images: Vec::new(),
-                done: Some(done_tx),
+                done: Some(crate::worker::TurnWaiter::Settled(done_tx)),
                 queue_visible: true,
                 policy: crate::worker::TurnPolicy::Queued,
                 forced_batch: false,

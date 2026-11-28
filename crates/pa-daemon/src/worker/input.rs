@@ -2,9 +2,10 @@
 //! operations, and agent-message delivery.
 use super::{
     admit_inbox_notice, enqueue_priority, json, oneshot, parse_custom_message, parse_prompt_images,
-    response_success, sender_is_child_of, AgentFamilyRelationship, AgentMessagePromptPayload, Lane,
-    QueueCheckpoint, QueuePriority, QueuedItem, TurnPolicy, Worker, AGENT_MESSAGE_SOURCE,
-    DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION, QUEUED_INPUT_SUSPENDED,
+    priority_index, response_success, sender_is_child_of, AgentFamilyRelationship,
+    AgentMessagePromptPayload, Lane, QueueCheckpoint, QueuePriority, QueuedItem, TurnPolicy,
+    TurnWaiter, Worker, AGENT_MESSAGE_SOURCE, DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
+    QUEUED_INPUT_SUSPENDED,
 };
 
 use serde_json::Value;
@@ -89,7 +90,7 @@ impl Worker {
             );
         }
         let (done_tx, done_rx) = oneshot::channel();
-        let done = if wait { Some(done_tx) } else { None };
+        let mut started = None;
         let (snapshot, queued_behind_work) = {
             let mut core = self.core.lock().unwrap();
             // TS commits before accepting the prompt into its action queue.
@@ -124,12 +125,13 @@ impl Worker {
             };
             // This RPC command is human-origin only for a plain user row.
             // Caller-supplied custom rows never gain human priority.
+            let priority = if custom_message.is_some() {
+                QueuePriority::Background
+            } else {
+                QueuePriority::Human
+            };
             let item = QueuedItem {
-                priority: if custom_message.is_some() {
-                    QueuePriority::Background
-                } else {
-                    QueuePriority::Human
-                },
+                priority,
                 preview: None,
                 message: message.to_string(),
                 custom_message,
@@ -137,7 +139,22 @@ impl Worker {
                 queue_key: None,
                 admission_id: admission_id.clone(),
                 images: images.clone(),
-                done,
+                // The ack of a prompt the runner takes next waits for its run's
+                // `agent_start`: the response's flush gate then delivers that
+                // frame first, so a client never holds the ack of a run it
+                // cannot see yet. A parked runner answers at once.
+                done: if wait {
+                    Some(TurnWaiter::Settled(done_tx))
+                } else if !queued_behind_work
+                    && priority_index(&core.steering, priority) == 0
+                    && !core.queued_input_parked(&self.input_pauses)
+                {
+                    let (started_tx, started_rx) = oneshot::channel();
+                    started = Some(started_rx);
+                    Some(TurnWaiter::Started(started_tx))
+                } else {
+                    None
+                },
                 queue_visible: queued_behind_work,
                 policy: if queued_behind_work {
                     TurnPolicy::Queued
@@ -163,6 +180,11 @@ impl Worker {
         }
         self.work_notify.notify_one();
         if !wait {
+            // A prompt withdrawn before its run answers on the dropped
+            // sender.
+            if let Some(started) = started {
+                let _ = started.await;
+            }
             return response_success(None, "prompt", None);
         }
         match done_rx.await {
