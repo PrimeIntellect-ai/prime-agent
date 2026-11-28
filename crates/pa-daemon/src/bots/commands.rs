@@ -980,32 +980,28 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_record_without_a_status_stamp_counts_from_the_next_load() {
-        let (dir, _platform, manager) = setup();
-        let mut record = manager.spawn(&spec("bot-a")).await.unwrap();
-        record.status_since = None;
-        let mut registry = super::super::registry::BotRegistry::load(dir.path()).unwrap();
-        registry.put(record).unwrap();
-        let loaded = super::super::registry::BotRegistry::load(dir.path()).unwrap();
-        assert!(loaded.get("bot-a").unwrap().status_since.is_some());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_pause_off_process_ends_the_running_time_at_the_idle_grace() {
+    async fn a_pause_off_process_ends_the_running_time_at_its_checkpoint() {
         let (dir, platform, manager) = setup();
         let mut bot = manager.spawn(&spec("bot-a")).await.unwrap();
-        // The bot paused itself an hour ago, while this daemon was down.
+        // The bot ran from an hour ago and paused itself ten minutes in,
+        // while this daemon was down; the pause took a checkpoint then.
+        let since = bot.status_since.unwrap() - 3_600_000;
+        bot.status_since = Some(since);
+        let mut registry = super::super::registry::BotRegistry::load(dir.path()).unwrap();
+        registry.put(bot.clone()).unwrap();
         let sandbox = bot.sandbox_id.clone().unwrap();
         platform.state().sandboxes.get_mut(&sandbox).unwrap().status = BotStatus::Paused;
-        bot.status_since = bot.status_since.map(|since| since - 3_600_000);
-        let mut registry = super::super::registry::BotRegistry::load(dir.path()).unwrap();
-        registry.put(bot).unwrap();
+        let paused_at = since + 600_000;
+        let stamp = crate::util::iso_from_unix_ms(u64::try_from(paused_at).unwrap());
+        platform.external_checkpoint_at(&sandbox, true, &stamp);
         let platform: std::sync::Arc<dyn super::super::platform::BotPlatform> = platform;
         let manager = BotManager::new(dir.path(), platform).unwrap();
 
         let resumed = manager.ensure_running("bot-a").await.unwrap();
-        let grace = i64::try_from(super::super::replies::PAUSE_GRACE.as_millis()).unwrap();
-        assert_eq!(resumed.running_ms, grace, "only the idle grace counts");
+        assert_eq!(
+            resumed.running_ms, 600_000,
+            "only the time up to the pause counts"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1064,7 +1060,7 @@ mod tests {
         let row = serde_json::json!({
             "botId": "bot-c", "name": "helper", "ownerSessionId": "guest-session",
             "sandboxId": "sbx-9", "status": "running", "createdAt": 1_i64,
-            "guestSessionId": "guest-sbx-9", "closedRunningMs": 1000_i64,
+            "guestSessionId": "guest-sbx-9", "statusSince": 1_i64, "closedRunningMs": 1000_i64,
             "github": false,
         });
         manager.merge_children("bot-a", &[row]).await.unwrap();
