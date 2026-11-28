@@ -726,8 +726,8 @@ impl Supervisor {
 
 impl Supervisor {
     /// The `/secrets` commands. Each answers with the current list; a
-    /// change also sends running and paused bots their new header rules
-    /// in the background.
+    /// change first sends running and paused bots their new header rules
+    /// (retries run in the background).
     pub(crate) async fn handle_bot_secrets(
         self: &Arc<Self>,
         command_id: &str,
@@ -777,7 +777,7 @@ impl Supervisor {
             return response_failure(Some(command_id), type_name, &format!("{error:#}"), None);
         }
         if changed && super::registry::BotRegistry::path_in(&agent_dir).exists() {
-            tokio::spawn(refresh_bot_rules(agent_dir.clone()));
+            refresh_bot_rules(&agent_dir).await;
         }
         let dir = agent_dir.clone();
         match blocking(move || {
@@ -820,41 +820,53 @@ fn lock_failures() -> std::sync::MutexGuard<'static, Vec<String>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Send every bot its new header rules; retry while some bot kept its old
-/// ones. The bots still failing after the retries are listed by `/secrets`.
-/// A retry waits without the refresh lock, and a newer change ends the
-/// older run's retries, so a new change reaches the bots at once.
-async fn refresh_bot_rules(agent_dir: std::path::PathBuf) {
+/// Send every bot its new header rules; while some bot kept its old ones,
+/// retry in the background. The first pass runs before the change
+/// answers, so the answer reports it. The bots still failing after the
+/// retries are listed by `/secrets`. A retry waits without the refresh
+/// lock, and a newer change ends the older run's retries, so a new change
+/// reaches the bots at once.
+async fn refresh_bot_rules(agent_dir: &Path) {
     use std::sync::atomic::Ordering;
     let generation = RULES_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let manager = match super::manager_for(&agent_dir) {
+    let manager = match super::manager_for(agent_dir) {
         Ok(manager) => manager,
         Err(error) => {
             *lock_failures() = vec![format!("all bots: {error:#}")];
             return;
         }
     };
-    let delays = std::iter::once(None).chain(RULES_RETRY_DELAYS.into_iter().map(Some));
-    for delay in delays {
-        if let Some(delay) = delay {
+    if refresh_pass(&manager, generation, false).await {
+        return;
+    }
+    tokio::spawn(async move {
+        for (retry, delay) in RULES_RETRY_DELAYS.into_iter().enumerate() {
             tokio::time::sleep(delay).await;
-        }
-        let _refresh = RULES_REFRESH.lock().await;
-        if RULES_GENERATION.load(Ordering::SeqCst) != generation {
-            return;
-        }
-        let failures = manager.refresh_network_rules().await;
-        let done = failures.is_empty();
-        if done || delay == RULES_RETRY_DELAYS.last().copied() {
-            for failure in &failures {
-                eprintln!("bot secrets: kept the old header rules for {failure}");
+            let last = retry + 1 == RULES_RETRY_DELAYS.len();
+            if refresh_pass(&manager, generation, last).await {
+                return;
             }
         }
-        *lock_failures() = failures;
-        if done {
-            return;
+    });
+}
+
+/// One pass of the refresh run `generation`. True when the run is over:
+/// every bot got its rules, or a newer run started.
+async fn refresh_pass(manager: &BotManager, generation: u64, last: bool) -> bool {
+    use std::sync::atomic::Ordering;
+    let _refresh = RULES_REFRESH.lock().await;
+    if RULES_GENERATION.load(Ordering::SeqCst) != generation {
+        return true;
+    }
+    let failures = manager.refresh_network_rules().await;
+    let done = failures.is_empty();
+    if done || last {
+        for failure in &failures {
+            eprintln!("bot secrets: kept the old header rules for {failure}");
         }
     }
+    *lock_failures() = failures;
+    done
 }
 
 /// The Prime account fingerprint that names its GitHub secrets; empty
