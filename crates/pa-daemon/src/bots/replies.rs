@@ -612,6 +612,12 @@ impl Supervisor {
         if let Err(error) = self.sync_child_bots(&manager, record, &mut client).await {
             eprintln!("pa-daemon: bots: {bot_id}: child bot sync failed: {error:#}");
         }
+        // The bot's global-harness refinements merge into the owner's. The
+        // probe is one cheap guest call; a failure never blocks delivery,
+        // and the next settle or wake retries it.
+        if let Err(error) = manager.pull_global_harness(record).await {
+            eprintln!("pa-daemon: bots: {bot_id}: the harness pull failed: {error:#}");
+        }
         Ok(())
     }
 

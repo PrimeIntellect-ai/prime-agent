@@ -12,6 +12,7 @@ pub mod exec_stream;
 pub mod files;
 pub mod github;
 pub mod guest;
+pub mod harness_sync;
 pub mod ledger;
 pub mod link;
 pub mod logins;

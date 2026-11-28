@@ -605,6 +605,7 @@ fn scope_prefix(scope: HarnessScope, id: &str) -> String {
 }
 
 pub mod executor;
+pub mod merge;
 pub mod planner;
 pub mod ranking;
 

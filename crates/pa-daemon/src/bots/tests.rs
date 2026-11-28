@@ -73,6 +73,16 @@ pub(crate) struct FakeState {
     pub secret_puts: usize,
     /// Each network rules update: the sandbox and its rule hosts.
     pub rule_updates: Vec<(String, Vec<String>)>,
+    /// The guest files uploads and syncs wrote, by sandbox and path.
+    pub harness_files: HashMap<String, BTreeMap<String, Vec<u8>>>,
+    /// How many guest file downloads ran.
+    pub harness_downloads: usize,
+    /// The next download answers, then rewrites the stored file: a guest
+    /// harness save that lands mid-sync.
+    pub harness_write_after_download: bool,
+    /// The next probe answers, then rewrites the stored file: a guest
+    /// harness save between the probe and the download.
+    pub harness_write_after_probe: bool,
 }
 
 /// An in-memory Prime account: sandboxes are running as soon as they exist.
@@ -392,6 +402,53 @@ impl BotPlatform for FakePlatform {
                 // The guest's tarball copy is present.
             } else if script == version::TARBALL_RESTORE_SCRIPT {
                 state.installs += 1;
+            } else if script == super::harness_sync::HARNESS_PROBE_SCRIPT {
+                // The sha256 probe of the bot's global harness state.
+                let path = env["PA_HARNESS_STATE"].clone();
+                output.stdout = match state
+                    .harness_files
+                    .get(sandbox_id)
+                    .and_then(|files| files.get(&path))
+                {
+                    Some(bytes) => super::sha256_hex(bytes),
+                    None => super::harness_sync::NO_STATE_MARKER.to_string(),
+                };
+                if std::mem::take(&mut state.harness_write_after_probe) {
+                    // A guest harness save lands right after the probe.
+                    state
+                        .harness_files
+                        .get_mut(sandbox_id)
+                        .and_then(|files| files.get_mut(&path))
+                        .expect("the probed guest state")
+                        .extend_from_slice(b" ");
+                }
+            } else if script == super::harness_sync::HARNESS_MOVE_SCRIPT {
+                // The real script only replaces an unchanged state file.
+                let files = state
+                    .harness_files
+                    .entry(sandbox_id.to_string())
+                    .or_default();
+                let current = files.get(&env["PA_HARNESS_STATE"]).cloned();
+                // The real script's `[ -n ]` reads an empty value as no
+                // expectation at all.
+                let expected = env
+                    .get("PA_EXPECTED_SHA")
+                    .filter(|sha| !sha.is_empty())
+                    .cloned();
+                let unchanged = match (&expected, &current) {
+                    (Some(expected), Some(bytes)) => super::sha256_hex(bytes) == *expected,
+                    (Some(_), None) | (None, Some(_)) => false,
+                    (None, None) => true,
+                };
+                if unchanged {
+                    let bytes = files
+                        .remove(&env["PA_HARNESS_TMP"])
+                        .expect("the uploaded temp harness state");
+                    files.insert(env["PA_HARNESS_STATE"].clone(), bytes);
+                } else {
+                    output.exit_code = 3;
+                    output.stderr = "the bot's harness changed during the sync".to_string();
+                }
             } else {
                 assert!(env.contains_key("BOT_CLIENT"), "unexpected guest script");
                 let file = env
@@ -423,7 +480,44 @@ impl BotPlatform for FakePlatform {
             if state.upload_fails {
                 return Err(PlatformError::Transient("upload refused".into()));
             }
+            state
+                .harness_files
+                .entry(sandbox_id.to_string())
+                .or_default()
+                .insert(path.to_string(), bytes.to_vec());
             Ok(())
+        }
+        .boxed()
+    }
+
+    fn download<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<Vec<u8>>> {
+        async move {
+            let mut state = self.state();
+            if state.sandbox(sandbox_id)?.status != BotStatus::Running {
+                return Err(PlatformError::Transient("gateway not ready".into()));
+            }
+            state.harness_downloads += 1;
+            let bytes = state
+                .harness_files
+                .get(sandbox_id)
+                .and_then(|files| files.get(path))
+                .cloned()
+                .ok_or_else(|| PlatformError::NotFound(format!("no {path} in the bot")))?;
+            if std::mem::take(&mut state.harness_write_after_download) {
+                // A guest harness save lands between the download and the
+                // push: the stored file moves past the downloaded bytes.
+                state
+                    .harness_files
+                    .get_mut(sandbox_id)
+                    .and_then(|files| files.get_mut(path))
+                    .expect("the downloaded guest state")
+                    .extend_from_slice(b" ");
+            }
+            Ok(bytes)
         }
         .boxed()
     }
@@ -2124,6 +2218,13 @@ impl BotPlatform for ThrowawaySecret {
         bytes: &'a [u8],
     ) -> BoxFuture<'a, PlatformResult<()>> {
         self.inner.upload(sandbox_id, path, bytes)
+    }
+    fn download<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<Vec<u8>>> {
+        self.inner.download(sandbox_id, path)
     }
     fn open_stream<'a>(
         &'a self,
