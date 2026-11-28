@@ -2379,6 +2379,7 @@ impl BotManager {
         if spawns.remove(bot_id) {
             let _ = write_spawns_marker(&self.agent_dir, &spawns);
         }
+        super::ledger::BotLedger::new(&self.agent_dir, bot_id).delete();
         self.delete_orphans(checkpoints).await
     }
 }

@@ -26,10 +26,12 @@ fn bot_row() -> Value {
 
 /// A fake supervisor that serves the bot commands and records them. Once
 /// `running_reads` is set, the bot stays running for that many more
-/// `list_bots` reads, then pauses.
+/// `list_bots` reads, then pauses. Once `good_reads` is set, that many
+/// more `list_bots` reads succeed, then they fail.
 async fn fake_supervisor(
     commands: Arc<std::sync::Mutex<Vec<Value>>>,
     running_reads: Arc<std::sync::Mutex<Option<usize>>>,
+    good_reads: Arc<std::sync::Mutex<Option<usize>>>,
 ) -> std::path::PathBuf {
     let socket = std::env::temp_dir().join(format!(
         "pa-bot-spawn-{}.sock",
@@ -40,6 +42,7 @@ async fn fake_supervisor(
         while let Ok(stream) = listener.accept().await {
             let commands = Arc::clone(&commands);
             let running_reads = Arc::clone(&running_reads);
+            let good_reads = Arc::clone(&good_reads);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.split();
                 let mut reader = BufReader::new(reader);
@@ -59,7 +62,13 @@ async fn fake_supervisor(
                         "spawn_bot" | "delete_bot" => {
                             response_success(Some(&id), &kind, Some(bot_row()))
                         }
+                        "list_bots" if *good_reads.lock().unwrap() == Some(0) => {
+                            response_failure(Some(&id), &kind, "the supervisor is busy", None)
+                        }
                         "list_bots" => {
+                            if let Some(reads) = good_reads.lock().unwrap().as_mut() {
+                                *reads -= 1;
+                            }
                             // A deleted bot leaves the supervisor's list.
                             let deleted = commands
                                 .lock()
@@ -109,7 +118,12 @@ fn request(name: &str, target: RlmSpawnTarget) -> RlmSpawnRequest {
 async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
     let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
     let running_reads = Arc::new(std::sync::Mutex::new(None));
-    let socket = fake_supervisor(Arc::clone(&commands), Arc::clone(&running_reads)).await;
+    let socket = fake_supervisor(
+        Arc::clone(&commands),
+        Arc::clone(&running_reads),
+        Arc::new(std::sync::Mutex::new(None)),
+    )
+    .await;
     let sessions = SupervisorChildSessions::new(
         Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
         std::env::temp_dir(),
@@ -202,7 +216,7 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
         ),
         sessions.delete_subagent("scout".to_string()),
     );
-    assert!(collected.unwrap()[0].settled);
+    assert_eq!(collected.unwrap()[0].status, "cancelled");
     let deleted = deleted.unwrap();
     assert_eq!(deleted.outcome, Some("deleted"));
     assert!(commands.lock().unwrap().iter().any(
@@ -219,6 +233,44 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
     assert!(collected[0].settled);
 }
 
+/// A waiting collect whose bot list read fails keeps the last snapshot:
+/// a failed read never reports the bot as finished.
+#[tokio::test]
+async fn a_failed_bot_list_read_does_not_settle_a_waiting_collect() {
+    let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // The selector resolves on the first read; every re-read fails.
+    let good_reads = Arc::new(std::sync::Mutex::new(Some(1)));
+    let socket = fake_supervisor(
+        Arc::clone(&commands),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::clone(&good_reads),
+    )
+    .await;
+    let sessions = SupervisorChildSessions::new(
+        Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
+        std::env::temp_dir(),
+        "parent-live".to_string(),
+        Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+            std::env::temp_dir(),
+            /*telemetry_disabled*/ true,
+        )),
+        String::new(),
+    );
+    sessions.set_identity(ParentIdentity {
+        session_id: Some("parent-file".to_string()),
+        model: Some("mock/mock-1".to_string()),
+        cwd: Some(std::env::temp_dir().to_string_lossy().to_string()),
+        ..ParentIdentity::with_default_depth()
+    });
+
+    let collected = sessions
+        .collect(vec!["scout".to_string()], 1_500)
+        .await
+        .unwrap();
+    assert_eq!(collected[0].status, "running");
+    assert!(!collected[0].settled);
+}
+
 /// A spawn that inherits a subscription model the bot cannot use (the
 /// login is off for bots) runs on the Prime Inference default model
 /// instead, and the spawn handle says so.
@@ -226,7 +278,12 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
 async fn an_inherited_login_model_falls_back_to_prime_inference() {
     let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
     let running_reads = Arc::new(std::sync::Mutex::new(None));
-    let socket = fake_supervisor(Arc::clone(&commands), Arc::clone(&running_reads)).await;
+    let socket = fake_supervisor(
+        Arc::clone(&commands),
+        Arc::clone(&running_reads),
+        Arc::new(std::sync::Mutex::new(None)),
+    )
+    .await;
     let dir = tempfile::TempDir::new().unwrap();
     // An Anthropic login plus a Prime Inference key, and the login off for
     // bots: the inherited model cannot run in the bot.

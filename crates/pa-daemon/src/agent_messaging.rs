@@ -23,17 +23,30 @@ pub(crate) async fn owned_bot_rows(
     link: &SupervisorLink,
     owner_session_id: Option<&str>,
 ) -> Vec<Value> {
+    read_owned_bot_rows(link, owner_session_id)
+        .await
+        .unwrap_or_default()
+}
+
+/// [`owned_bot_rows`], with the failed read as an error.
+pub(crate) async fn read_owned_bot_rows(
+    link: &SupervisorLink,
+    owner_session_id: Option<&str>,
+) -> anyhow::Result<Vec<Value>> {
     let Some(owner) = owner_session_id else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    link.request_success(
-        json!({ "type": "list_bots", "ownerSessionId": owner }),
-        std::time::Duration::from_secs(30),
-    )
-    .await
-    .ok()
-    .and_then(|data| data.get("bots").and_then(Value::as_array).cloned())
-    .unwrap_or_default()
+    let data = link
+        .request_success(
+            json!({ "type": "list_bots", "ownerSessionId": owner }),
+            std::time::Duration::from_secs(2),
+        )
+        .await?;
+    Ok(data
+        .get("bots")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
 }
 
 /// One session's durable family identity: the ids its family references it

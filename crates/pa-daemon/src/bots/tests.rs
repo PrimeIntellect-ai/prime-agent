@@ -1933,21 +1933,13 @@ async fn live_ask(
     manager: &BotManager,
     agent_dir: &std::path::Path,
     bot: &super::BotRecord,
-    msg_id: &str,
     task: &str,
 ) -> anyhow::Result<String> {
     let ledger = super::ledger::BotLedger::new(agent_dir, &bot.bot_id);
     let mut guest = super::guest::GuestClient::connect(manager, bot).await?;
-    super::send::send_message(
-        &ledger,
-        &mut guest,
-        &bot.guest_session_id,
-        msg_id,
-        task,
-        None,
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    super::send::send_message(&mut guest, &bot.guest_session_id, task, None)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut reply = String::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
     while reply.is_empty() && tokio::time::Instant::now() < deadline {
@@ -2205,7 +2197,7 @@ async fn ask_until(
     let task = "Reply with the single word pong and nothing else.";
     for _ in 0..12 {
         *asked += 1;
-        let reply = live_ask(manager, agent_dir, bot, &format!("m{asked}"), task).await?;
+        let reply = live_ask(manager, agent_dir, bot, task).await?;
         eprintln!("live update: reply {asked}: {reply:?}");
         if reply.to_lowercase().contains("pong") == want_answer {
             return Ok(reply);
@@ -2345,19 +2337,19 @@ async fn live_spawn_reply_pause_resume_delete() {
         let spawned = manager.spawn(&spec).await?;
         step("spawned");
         let task = "Reply with the single word pong and nothing else.";
-        let first = live_ask(&manager, dir.path(), &spawned, "m1", task).await?;
+        let first = live_ask(&manager, dir.path(), &spawned, task).await?;
         step("first reply");
         let paused = manager.pause(&bot_id).await?;
         step("paused");
         let resumed = manager.ensure_running(&bot_id).await?;
         step("resumed");
         let task = "Repeat the word you replied with before, in capital letters only.";
-        let second = live_ask(&manager, dir.path(), &resumed, "m2", task).await?;
+        let second = live_ask(&manager, dir.path(), &resumed, task).await?;
         step("second reply");
         let task = "Run each shell command with bash() and await it: `node --version`, \
                     `npm --version`, `uv pip install six`. Reply with one line only: \
                     NODE=<node output> NPM=<npm output> UV=<uv pip exit code>";
-        let tools = live_ask(&manager, dir.path(), &resumed, "m3", task).await?;
+        let tools = live_ask(&manager, dir.path(), &resumed, task).await?;
         step("tools reply");
         anyhow::Ok((spawned, first, paused, resumed, second, tools))
     }
@@ -2392,21 +2384,13 @@ async fn live_ask_long(
     manager: &BotManager,
     dir: &std::path::Path,
     bot: &super::BotRecord,
-    msg_id: &str,
     task: &str,
 ) -> anyhow::Result<String> {
     let ledger = super::ledger::BotLedger::new(dir, &bot.bot_id);
     let mut guest = super::guest::GuestClient::connect(manager, bot).await?;
-    super::send::send_message(
-        &ledger,
-        &mut guest,
-        &bot.guest_session_id,
-        msg_id,
-        task,
-        None,
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    super::send::send_message(&mut guest, &bot.guest_session_id, task, None)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut reply = String::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(540);
     while reply.is_empty() && tokio::time::Instant::now() < deadline {
@@ -2475,7 +2459,7 @@ async fn live_a_bot_spawns_a_bot_and_delete_cascades() {
         let parent = manager.spawn(&spec).await?;
         step("parent spawned");
         let task = "Reply with the single word pong and nothing else.";
-        let first = live_ask_long(&manager, dir.path(), &parent, "m1", task).await?;
+        let first = live_ask_long(&manager, dir.path(), &parent, task).await?;
         step("parent first reply");
         // An error, not a panic: the cleanup delete below still runs.
         anyhow::ensure!(first.to_lowercase().contains("pong"), "first: {first:?}");
@@ -2483,7 +2467,7 @@ async fn live_a_bot_spawns_a_bot_and_delete_cascades() {
                     and nothing else.', name='child', target='sandbox'). Wait for the child's \
                     final answer, then reply with exactly that word in capital letters and \
                     nothing else.";
-        let second = live_ask_long(&manager, dir.path(), &parent, "m2", task).await?;
+        let second = live_ask_long(&manager, dir.path(), &parent, task).await?;
         step("parent second reply");
         // The child lived: its sandbox carries the parent label, and the
         // guest created it directly (this daemon has no record of it).

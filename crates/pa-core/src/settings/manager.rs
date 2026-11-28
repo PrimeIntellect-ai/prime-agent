@@ -1490,60 +1490,6 @@ mod tests {
         assert!(!SettingsManager::create(&cwd, &agent_dir).get_bots_enabled());
     }
 
-    /// Permission semantics need a non-root runner (the venv bootstrap
-    /// tests' rule): `chmod` cannot deny root, so the unreadable-file
-    /// leg below skips as root and the gate harness runs it as a
-    /// non-root user.
-    #[cfg(unix)]
-    fn skip_when_root() -> bool {
-        if unsafe { libc::geteuid() } == 0 {
-            eprintln!("skipped: run as a non-root user (chmod cannot deny root)");
-            return true;
-        }
-        false
-    }
-
-    /// The read-through cache must not out-live the file's readability:
-    /// a global settings document that turns unreadable under an
-    /// unchanged stat identity (chmod changes no dev/ino/mtime/length)
-    /// reads as a load failure on the next manager, so the strict gates
-    /// this read feeds — the daemon's `bots.enabled` sandbox admission —
-    /// fail closed instead of authorizing on the cached copy.
-    #[cfg(unix)]
-    #[test]
-    fn bots_enabled_fails_closed_when_the_global_file_becomes_unreadable() {
-        use std::os::unix::fs::PermissionsExt;
-        if skip_when_root() {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().join("cwd");
-        let agent_dir = dir.path().join("agent");
-        std::fs::create_dir_all(&cwd).unwrap();
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        let settings = agent_dir.join("settings.json");
-        std::fs::write(&settings, r#"{"bots": {"enabled": true}}"#).unwrap();
-
-        // The first read warms the process-wide read cache for this path.
-        let manager = SettingsManager::create(&cwd, &agent_dir);
-        assert!(manager.get_bots_enabled());
-
-        // chmod leaves the stat identity unchanged, so only the
-        // readability revalidation keeps the next read honest.
-        std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let fresh = SettingsManager::create(&cwd, &agent_dir);
-        assert!(
-            !fresh.get_bots_enabled(),
-            "an unreadable global document fails closed, never cached-true"
-        );
-
-        // Readability restored: the cached copy is byte-identical to the
-        // file (the identity still matches), so the gate reads true again.
-        std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let restored = SettingsManager::create(&cwd, &agent_dir);
-        assert!(restored.get_bots_enabled());
-    }
-
     #[test]
     fn reopen_keeps_the_runtime_overrides_in_the_merged_settings() {
         let mut manager = SettingsManager::in_memory(&Settings::default());

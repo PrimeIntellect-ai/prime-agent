@@ -5,7 +5,7 @@
 //! delivers the settled run's final answer and each new guest outbox line
 //! to the owner, once. The owner receives them through the `send_message`
 //! route, like a local child's message. The bot ledger records every delivery before it starts, so a
-//! restart never delivers twice: an interrupted delivery becomes `uncertain`.
+//! restart never delivers twice: an interrupted delivery is never retried.
 //! A bot with no new work for [`PAUSE_GRACE`] and no attached TUI is paused.
 
 use std::collections::HashMap;
@@ -210,8 +210,8 @@ enum Delivery {
 /// `sent`. A run in which the bot messaged its owner has those messages as
 /// its answer; its own final answer is not delivered. Write times of
 /// delivered lines stay in the ledger, so a run that settles after its
-/// message was delivered is still attributed. A delivery that fails, or
-/// that a crash interrupted, is `uncertain` and is never retried. A run
+/// message was delivered is still attributed. A delivery that fails is
+/// `uncertain`; neither it nor one a crash interrupted is retried. A run
 /// with no answer text delivers what `no_answer` gives, read once the run
 /// settled (the error of an expired owner login). Returns the number of settled runs with an
 /// answer (0 or 1).

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use super::{
     follows, pause_verdict, sync_deliveries, Follow, GuestCommands, PauseVerdict, PAUSE_GRACE,
 };
-use crate::bots::ledger::{recover_all, BotLedger, DeliveryState};
+use crate::bots::ledger::{BotLedger, DeliveryState};
 use crate::bots::remote_parent::READ_PAGE_LINES;
 use pa_core::session_engine::agent_messaging::DEFAULT_AGENT_MESSAGE_MAX_CHARS;
 
@@ -129,14 +129,10 @@ async fn a_restart_never_delivers_a_reply_twice() {
     guest.rows.extend(late_turn);
     assert!(sync(dir.path(), &mut guest).await.is_empty());
 
-    // A crash after the `sending` write: boot recovery makes that turn
-    // uncertain, and it is never resent.
+    // A crash after the `sending` write: that turn is never resent.
     guest.turn("a3", "third answer");
     let ledger = BotLedger::new(dir.path(), "bot-1");
     ledger.mark_turn("a3", DeliveryState::Sending).unwrap();
-    assert_eq!(recover_all(dir.path()).unwrap().uncertain.len(), 1);
-    let turn = ledger.delivery_marks().unwrap().delivered_turn.unwrap();
-    assert_eq!(turn.state, DeliveryState::Uncertain);
     guest.turn("a4", "fourth answer");
     assert_eq!(sync(dir.path(), &mut guest).await, ["fourth answer"]);
 

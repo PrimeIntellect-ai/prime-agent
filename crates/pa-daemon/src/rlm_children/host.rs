@@ -820,23 +820,44 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // A bot has no completion event: re-read the selected bots after
             // the local waits, and poll the running ones inside the budget.
             if timeout_ms > 0 && !bots.is_empty() {
+                let mut poll = BOT_COLLECT_POLL_MIN;
                 loop {
-                    let fresh = owned_bots(&this, &identity).await;
-                    for bot in &mut bots {
-                        match fresh
-                            .iter()
-                            .find(|row| row.get("botId") == bot.get("botId"))
-                        {
-                            Some(row) => bot.clone_from(row),
-                            // A bot deleted meanwhile settles from its tombstone.
-                            None => bot["status"] = json!("deleted"),
+                    // A failed read keeps the last snapshots.
+                    if let Ok(fresh) = crate::agent_messaging::read_owned_bot_rows(
+                        &this.link,
+                        identity.session_id.as_deref(),
+                    )
+                    .await
+                    {
+                        let deleted_children = this
+                            .deleted_children
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        for bot in &mut bots {
+                            let bot_id =
+                                bot.get("botId").and_then(Value::as_str).unwrap_or_default();
+                            match fresh
+                                .iter()
+                                .find(|row| row.get("botId") == bot.get("botId"))
+                            {
+                                Some(row) => bot.clone_from(row),
+                                // A bot deleted meanwhile settles once its tombstone exists.
+                                None if deleted_children
+                                    .values()
+                                    .any(|deleted| deleted.matches(bot_id)) =>
+                                {
+                                    bot["status"] = json!("deleted");
+                                }
+                                None => {}
+                            }
                         }
                     }
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() || bots.iter().all(|bot| bot_result(bot).settled) {
                         break;
                     }
-                    tokio::time::sleep(remaining.min(BOT_COLLECT_POLL)).await;
+                    tokio::time::sleep(remaining.min(poll)).await;
+                    poll = (poll * 2).min(BOT_COLLECT_POLL_MAX);
                 }
             }
             // Live entries first, the deleted generations' envelopes after,
@@ -1020,8 +1041,10 @@ fn session_file_carries_spawn_kickoff(session_file: Option<&str>, spawn_row_id: 
         })
 }
 
-/// How often a waiting `rlm.collect` re-reads a running bot.
-const BOT_COLLECT_POLL: Duration = Duration::from_secs(1);
+/// A waiting `rlm.collect` re-reads a running bot after this, doubling up
+/// to [`BOT_COLLECT_POLL_MAX`].
+const BOT_COLLECT_POLL_MIN: Duration = Duration::from_secs(1);
+const BOT_COLLECT_POLL_MAX: Duration = Duration::from_secs(10);
 /// Budget for `spawn_bot` and `delete_bot`, past the supervisor's own
 /// deadline, so the worker never gives up first.
 const BOT_COMMAND_TIMEOUT: Duration = Duration::from_mins(15);
