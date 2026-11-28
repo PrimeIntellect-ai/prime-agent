@@ -957,6 +957,10 @@ impl Agent {
         }
     }
 
+    pub async fn system_prompt(&self) -> String {
+        self.inner.shared.lock().await.state.system_prompt.clone()
+    }
+
     pub async fn set_system_prompt(&self, system_prompt: impl Into<String>) {
         self.inner.shared.lock().await.state.system_prompt = system_prompt.into();
     }

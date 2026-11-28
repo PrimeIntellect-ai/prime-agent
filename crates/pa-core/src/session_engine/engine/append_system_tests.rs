@@ -65,7 +65,7 @@ async fn assert_prompt_case(case: PromptCase) {
         let calls = provider.calls();
         assert_eq!(calls.len(), 1);
         let prompt = calls[0].system_prompt.as_deref().unwrap();
-        assert_eq!(prompt, engine.system_prompt);
+        assert_eq!(prompt, engine.system_prompt().await);
         if case.custom_system {
             assert!(prompt.starts_with("CUSTOM_SYSTEM_SENTINEL"));
         } else {

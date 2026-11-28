@@ -265,7 +265,7 @@ impl AgentSessionEngine {
                             .set_model_and_thinking_level(model, primary.thinking_level)
                             .await;
                         if let Some(core) = core {
-                            core.update_model_facts(&primary.model);
+                            core.update_model_facts(&primary.model).await;
                         }
                         if let Some(persistence) = persistence {
                             persistence
@@ -346,7 +346,7 @@ impl AgentSessionEngine {
                 agent.set_model(agent_model).await;
                 agent.set_thinking_level(thinking_level).await;
                 if let Some(core) = &core {
-                    core.update_model_facts(&primary_model);
+                    core.update_model_facts(&primary_model).await;
                 }
                 if let Some(persistence) = persistence.filter(|_| !session_restored) {
                     persistence
@@ -596,7 +596,7 @@ impl AgentSessionEngine {
                         agent.set_model(agent_model).await;
                         agent.set_thinking_level(map_thinking_level(clamped)).await;
                         if let Some(core) = &core {
-                            core.update_model_facts(&next);
+                            core.update_model_facts(&next).await;
                         }
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
