@@ -224,8 +224,10 @@ impl SessionUi {
                     if request > self.bots_catalog_request {
                         self.bots_catalog_request = request;
                         self.bots_catalog.clone_from(&catalog.rows);
+                        // Only a change the dock shows takes a frame.
+                        let dock = view.chrome.activity.clone();
                         self.update_subagent_summary(view);
-                        self.dirty = true;
+                        self.dirty |= view.chrome.activity != dock;
                     }
                 }
                 let Some(Overlay::Bots(page)) = view.overlay.as_mut() else {

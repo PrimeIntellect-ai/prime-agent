@@ -17,7 +17,7 @@ const ROW_PREFIX: &str = "bot:";
 /// The bots fetch's wait (the session view's request bound).
 const FETCH_TIMEOUT_MS: u64 = 10_000;
 
-/// Fetch the bots once, as the view mounts; the answer lands as `BotsLoaded`.
+/// Fetch the bots; the answer lands as `BotsLoaded`, which arms the next fetch.
 pub(super) fn spawn_bots_fetch(client: &DaemonClient, ui_tx: mpsc::UnboundedSender<UiInput>) {
     let client = client.clone();
     tokio::spawn(async move {

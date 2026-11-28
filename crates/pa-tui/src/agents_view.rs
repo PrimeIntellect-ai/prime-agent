@@ -875,8 +875,9 @@ async fn run_agents_view_surface(
         persistent_shells::spawn_list_fetch(&client, ui_tx.clone());
     }
     let mut shells_fetch_at: Option<tokio::time::Instant> = None;
-    // The bot rows: one fetch as the view mounts.
+    // The bot rows' poll: one fetch in flight, the next armed when it lands.
     bots::spawn_bots_fetch(&client, ui_tx.clone());
+    let mut bots_fetch_at: Option<tokio::time::Instant> = None;
     // The activity lines' counts: one cycle in flight at a time, the next armed when it lands.
     if activity_fetch.is_none() {
         activity_fetch = Some(session_activity::spawn_session_activity_fetch(
@@ -1053,7 +1054,12 @@ async fn run_agents_view_surface(
                 UiInput::KillResult { key, outcome } => {
                     mode.kill_result(&key, outcome);
                 }
-                UiInput::BotsLoaded(result) => mode.apply_bots_loaded(result),
+                UiInput::BotsLoaded(result) => {
+                    mode.apply_bots_loaded(result);
+                    bots_fetch_at = Some(
+                        tokio::time::Instant::now() + crate::interactive::ACTIVITY_POLL_INTERVAL,
+                    );
+                }
                 UiInput::BotAttached(result) => mode.bot_attached(result),
                 // The saved-catalog scan landed: the Inactive section builds now.
                 UiInput::SavedLoaded {
@@ -1186,6 +1192,7 @@ async fn run_agents_view_surface(
             // precondition passes, so the arms below must never unwrap an Option.
             let flush_at = saved_flush;
             let shells_at = shells_fetch_at;
+            let bots_at = bots_fetch_at;
             let content_search_at = mode.content_search.deadline();
             let status_at = mode.status_expiry(std::time::Instant::now());
             tokio::select! {
@@ -1279,6 +1286,15 @@ async fn run_agents_view_surface(
                     } => {
                         shells_fetch_at = None;
                         persistent_shells::spawn_list_fetch(&client, ui_tx.clone());
+                    }
+                    () = async {
+                        match bots_at {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        bots_fetch_at = None;
+                        bots::spawn_bots_fetch(&client, ui_tx.clone());
                     }
                     () = async {
                         match activity_fetch_at {
