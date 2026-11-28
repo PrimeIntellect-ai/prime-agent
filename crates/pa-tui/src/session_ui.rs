@@ -17,6 +17,7 @@ mod notes;
 mod panels;
 mod prompt;
 mod queue;
+mod run_state;
 mod sessions_fork;
 mod settings;
 mod share;
@@ -44,6 +45,7 @@ pub(crate) use panels::ActivityUpdates;
 use prompt::PromptOrder;
 pub(crate) use prompt::PromptSubmitNote;
 pub(crate) use prompt::SubmitBehavior;
+use run_state::{RunEvent, RunState};
 use sessions_fork::{create_session, terminal_columns};
 pub(crate) use settings::PendingConfirm;
 pub(crate) use settings::ReloadNote;
@@ -240,14 +242,14 @@ pub(crate) struct SessionUi {
     pending_model_provider: Option<String>,
     pending_thinking_suffix: Option<String>,
     pending_queue: Option<crate::queued::QueuedMessages>,
+    /// Like `pending_snapshot`: the rebuild that follows every attach applies it, before any event.
+    pending_run_streaming: Option<bool>,
     queue_selection: crate::queued::QueueSelection,
     context: Option<crate::chrome::ContextUsage>,
     list_rows: Vec<Value>,
-    pub(crate) turn_active: bool,
-    /// An agent run is in flight (`agent_start` .. `agent_end`): the OSC
-    /// 7501 report stays working across the run's per-step turn
-    /// boundaries.
-    pub(crate) run_open: bool,
+    /// The client's mirror of the daemon's agent run: one state whose only
+    /// writer also owns the working loader.
+    run_state: RunState,
     /// The open run's outcome so far: done, error after a failed step,
     /// idle after a cancellation.
     run_outcome: crate::program_status::Status,
@@ -258,10 +260,6 @@ pub(crate) struct SessionUi {
     /// done/error input), set at the run's end and cleared at the next
     /// turn's start, at attach, and when the session closes.
     pub(crate) settled: Option<crate::program_status::Status>,
-    /// Completed turns observed on this connection. A prompt ACK may arrive
-    /// after its entire streamed turn; it must not restart the loader then.
-    turn_ends_seen: u64,
-    last_prompt_turn_end: u64,
     /// The session's queue delivery mode: `all` delivers the queued steering prefix as one batched
     /// turn at the boundary; `one-at-a-time` one per turn (product default `all`).
     pub(crate) steering_mode: String,
@@ -517,11 +515,11 @@ impl SessionUi {
         std::mem::take(&mut self.trim_after_frame)
     }
 
-    /// The chat surface's OSC 7501 report: working while a turn or the
-    /// run it belongs to is in flight, including a pending provider retry,
-    /// or while a compaction runs; else the remembered outcome or idle.
+    /// The chat surface's OSC 7501 report: working while a submitted or live
+    /// run is in flight, including a pending provider retry, or while a
+    /// compaction runs; else the remembered outcome or idle.
     pub(crate) fn program_status(&self, view: &AgentView) -> crate::program_status::Status {
-        if self.turn_active || self.run_open || view.retry.is_some() || view.compaction.is_some() {
+        if self.run_busy() || view.retry.is_some() || view.compaction.is_some() {
             crate::program_status::Status::Working
         } else {
             self.settled.unwrap_or(crate::program_status::Status::Idle)
