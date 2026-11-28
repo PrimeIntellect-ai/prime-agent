@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use serde_json::Value;
 
-use crate::agents_view_state::{section_rank, section_title, Section};
+use crate::agents_view_state::{now_ms, relative_age_ms, section_rank, section_title, Section};
 use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::menu_panel::{hint_row, menu_list_layout, scroll_row, scrub_controls};
 use crate::theme::{Theme, ThemeColor};
@@ -28,10 +28,11 @@ pub struct BotRow {
     pub version: String,
     pub sandbox_id: String,
     pub checkpoint_id: Option<String>,
-    pub created_at: String,
-    /// The UTC ISO stamp of the bot's last settled turn, falling back to `createdAt` for a bot
+    /// Unix milliseconds of the bot's creation.
+    pub created_at: i64,
+    /// Unix milliseconds of the bot's last settled turn, falling back to `createdAt` for a bot
     /// that never ran a turn.
-    pub last_activity_at: String,
+    pub last_activity_at: i64,
     pub has_turn: bool,
     /// A TUI holds a live attach on the bot.
     pub attached: bool,
@@ -82,7 +83,7 @@ impl BotRow {
     }
 
     /// The dim note under the title: the status and the last turn.
-    fn note(&self) -> String {
+    fn note(&self, now_ms: u64) -> String {
         let mut note = self.status.clone();
         if self.attached {
             note.push_str(" \u{b7} attached");
@@ -96,8 +97,8 @@ impl BotRow {
         if self.has_turn {
             let _ = write!(
                 note,
-                " \u{b7} last turn {}",
-                short_stamp(&self.last_activity_at)
+                " \u{b7} last turn {} ago",
+                relative_age_ms(self.last_activity_at, now_ms)
             );
         } else {
             note.push_str(" \u{b7} no turn yet");
@@ -105,16 +106,16 @@ impl BotRow {
         note
     }
 
-    /// The pause line: when the idle bot pauses, or since when it is paused.
-    fn pause_note(&self, now_ms: i64) -> String {
+    /// The pause line: when the idle bot pauses, or how long ago it paused.
+    fn pause_note(&self, now_ms: u64) -> String {
         match (self.status.as_str(), self.pause_at, self.status_since) {
             ("running", _, _) if self.attached => "stays running while attached".into(),
             ("running", Some(at), _) => {
-                let minutes = ((at - now_ms).max(0) + 59_999) / 60_000;
+                let minutes = ((at - now_ms as i64).max(0) + 59_999) / 60_000;
                 let minutes = minutes.max(1);
                 format!("pauses in {minutes} min")
             }
-            ("paused", _, Some(since)) => format!("paused since {}", iso_from_unix_ms(since)),
+            ("paused", _, Some(since)) => format!("paused {} ago", relative_age_ms(since, now_ms)),
             _ => "\u{2014}".into(),
         }
     }
@@ -131,7 +132,7 @@ impl BotRow {
     }
 
     /// The detail pane's raw facts.
-    fn detail_pairs(&self, now_ms: i64) -> Vec<(String, String)> {
+    fn detail_pairs(&self, now_ms: u64) -> Vec<(String, String)> {
         vec![
             ("pause".into(), self.pause_note(now_ms)),
             ("cost".into(), self.cost_note()),
@@ -154,41 +155,16 @@ impl BotRow {
                 "spawns".into(),
                 if self.spawns_bots { "on" } else { "off" }.into(),
             ),
-            ("created".into(), self.created_at.clone()),
-            ("activity".into(), self.last_activity_at.clone()),
+            (
+                "created".into(),
+                format!("{} ago", relative_age_ms(self.created_at, now_ms)),
+            ),
+            (
+                "activity".into(),
+                format!("{} ago", relative_age_ms(self.last_activity_at, now_ms)),
+            ),
         ]
     }
-}
-
-/// `2026-11-23T05:10:42Z` -> `11-23 05:10`: the row's compact stamp. A stamp in another
-/// shape shows as is.
-fn short_stamp(stamp: &str) -> String {
-    match (stamp.get(5..10), stamp.get(11..16)) {
-        (Some(day), Some(time)) if stamp.len() >= 16 => format!("{day} {time}"),
-        _ => stamp.to_string(),
-    }
-}
-
-/// Unix milliseconds as a UTC ISO stamp (`2026-11-23T05:10:42Z`).
-fn iso_from_unix_ms(ms: i64) -> String {
-    let secs = ms.div_euclid(1000);
-    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Civil date from days since 1970-01-01 (H. Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
 }
 
 /// The rows of one `list_bots` answer, plus the count of rows that did not parse.
@@ -215,7 +191,7 @@ pub fn parse_bots(value: &Value) -> Result<BotsCatalog, String> {
         .ok_or_else(|| MALFORMED_BOTS_REPLY.to_string())?;
     let text = |row: &Value, key: &str| row.get(key).and_then(Value::as_str).map(scrub_controls);
     // The stamps are Unix milliseconds.
-    let stamp = |row: &Value, key: &str| row.get(key).and_then(Value::as_i64).map(iso_from_unix_ms);
+    let stamp = |row: &Value, key: &str| row.get(key).and_then(Value::as_i64);
     let mut bots: Vec<BotRow> = rows
         .iter()
         .filter_map(|row| {
@@ -230,7 +206,7 @@ pub fn parse_bots(value: &Value) -> Result<BotsCatalog, String> {
                 sandbox_id: text(row, "sandboxId").unwrap_or_default(),
                 checkpoint_id: text(row, "checkpointId"),
                 has_turn: last_turn.is_some(),
-                last_activity_at: last_turn.unwrap_or_else(|| created_at.clone()),
+                last_activity_at: last_turn.unwrap_or(created_at),
                 created_at,
                 attached: row
                     .get("attached")
@@ -261,8 +237,7 @@ pub fn parse_bots(value: &Value) -> Result<BotsCatalog, String> {
         })
         .collect();
     let skipped = rows.len() - bots.len();
-    // The sort the agents page orders by: section first, then recency within a section (the
-    // ISO stamps share one format, so the lexicographic order is the chronological order).
+    // The sort the agents page orders by: section first, then recency within a section.
     bots.sort_by(|a, b| {
         section_rank(a.section())
             .cmp(&section_rank(b.section()))
@@ -512,6 +487,7 @@ impl BotsView {
         kb: &KeybindingsManager,
         viewport_rows: usize,
     ) -> Vec<Line> {
+        let now = now_ms();
         let mut lines =
             vec![vec![theme.fg_span(
                 ThemeColor::BorderMuted,
@@ -705,7 +681,8 @@ impl BotsView {
                         line.push(theme.fg(ThemeColor::Dim, version));
                         lines.push(truncate_line(&line, width, ""));
                         // Row 2: the dim note.
-                        let note = vec![Span::raw("    "), theme.fg(ThemeColor::Dim, row.note())];
+                        let note =
+                            vec![Span::raw("    "), theme.fg(ThemeColor::Dim, row.note(now))];
                         lines.push(truncate_line(&note, width, ""));
                     }
                 }
@@ -718,12 +695,7 @@ impl BotsView {
                 lines.push(vec![
                     theme.fg_span(ThemeColor::Muted, "  Details".to_string())
                 ]);
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |elapsed| {
-                        i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
-                    });
-                for (key, value) in row.detail_pairs(now_ms) {
+                for (key, value) in row.detail_pairs(now) {
                     let line = vec![
                         Span::raw("  "),
                         theme.fg(ThemeColor::Muted, format!("{key:<12}")),

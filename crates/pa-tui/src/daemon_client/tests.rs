@@ -681,3 +681,32 @@ async fn without_capability_upgrade_is_a_no_op() {
     assert_eq!(client.direct_session_id(), None);
     client.close();
 }
+
+#[tokio::test]
+async fn a_bot_line_longer_than_the_frame_cap_closes_the_link() {
+    let (client_end, mut guest) = tokio::net::UnixStream::pair().unwrap();
+    let hello = json!({
+        "type": "daemon_hello",
+        "protocol": { "name": "prime-agent.daemon", "version": 7 },
+        "serverCapabilities": [],
+    });
+    guest
+        .write_all(format!("{hello}\n").as_bytes())
+        .await
+        .unwrap();
+    let writer = tokio::spawn(async move {
+        let line = vec![b'a'; pa_types::daemon::MAX_BOT_FRAME_BYTES as usize + 1];
+        guest.write_all(&line).await.unwrap();
+        // The link stays open: only the cap can end the reader.
+        guest
+    });
+    let (client, _events) = DaemonClient::connect_stream(Box::new(client_end))
+        .await
+        .unwrap();
+    let mut dead = client.reader_dead_rx.clone();
+    tokio::time::timeout(Duration::from_secs(10), dead.wait_for(|dead| *dead))
+        .await
+        .expect("the reader stops at the frame cap")
+        .unwrap();
+    drop(writer.await.unwrap());
+}

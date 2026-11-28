@@ -14,8 +14,9 @@ use crate::bots_view::{parse_bots, BotsAction, BotsView};
 use crate::interactive::reconnect::ConnectionEvent;
 use crate::interactive::{BotAttach, SelectionOrigin, SessionPanel, SessionSelection};
 
-/// The attach wait: longer than the daemon's 15-minute budget to resume a paused sandbox.
-const ATTACH_TIMEOUT_MS: u64 = 16 * 60 * 1000;
+/// The wait for `attach_bot`, `pause_bot`, and `resume_bot`: none on this side. The daemon bounds
+/// its own steps, a dropped connection fails the request, and a closed page drops a late answer.
+const BOT_OPERATION_TIMEOUT_MS: u64 = u64::MAX;
 
 /// One background `/bots` delivery: a fetched `list_bots` answer, or an attach outcome.
 pub(crate) enum BotsUpdate {
@@ -79,7 +80,7 @@ pub(crate) async fn request_bot_attach(
                 bot_id: bot_id.clone(),
                 rest: Map::default(),
             },
-            ATTACH_TIMEOUT_MS,
+            BOT_OPERATION_TIMEOUT_MS,
         )
         .await
         .map_err(|error| page_error(&error))?;
@@ -201,7 +202,7 @@ impl SessionUi {
                 }
             };
             let result = client
-                .request_ok_with_timeout(command, ATTACH_TIMEOUT_MS)
+                .request_ok_with_timeout(command, BOT_OPERATION_TIMEOUT_MS)
                 .await
                 .map(|_| ())
                 .map_err(|error| page_error(&error));
@@ -334,13 +335,20 @@ impl SessionUi {
 
     /// The refusal for a command that acts on this Mac, when this view is attached to a bot.
     pub(super) fn bot_refusal(&self, command: &str) -> Option<String> {
+        LOCAL_ONLY_COMMANDS
+            .contains(&command)
+            .then(|| self.bot_local_refusal(&format!("/{command}")))?
+    }
+
+    /// The refusal for `action`, which runs on this Mac, when this view is attached to a bot: a
+    /// session switch would leave the bot for this Mac's daemon, which does not know the bot's
+    /// session ids.
+    pub(super) fn bot_local_refusal(&self, action: &str) -> Option<String> {
         let bot = self.bot.as_ref()?;
-        LOCAL_ONLY_COMMANDS.contains(&command).then(|| {
-            format!(
-                "/{command} runs on this Mac, not in the bot {}. Leave the bot view to use it.",
-                bot.name
-            )
-        })
+        Some(format!(
+            "{action} runs on this Mac, not in the bot {}. Leave the bot view to use it.",
+            bot.name
+        ))
     }
 
     /// Whether `event` is a lost link of this bot view. A bot view never reconnects: the

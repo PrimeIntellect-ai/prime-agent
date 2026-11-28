@@ -15,7 +15,7 @@ use pa_types::daemon::{
     DaemonProtocolInfo, DaemonResponse, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION,
 };
 use serde_json::{Map, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::direct_transport::{
@@ -353,7 +353,7 @@ impl DaemonClient {
             )
         })?;
         let label = format!("Socket: {}", socket_path.display());
-        let (mut client, events) = Self::handshake(connect, &label).await?;
+        let (mut client, events) = Self::handshake(connect, &label, None).await?;
         client.socket_path = socket_path.to_path_buf();
         Ok((client, events))
     }
@@ -368,7 +368,12 @@ impl DaemonClient {
     pub async fn connect_stream(
         stream: Box<dyn pa_types::platform::transport::TransportStream>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
-        let (mut client, events) = Self::handshake(stream, "Endpoint: bot link").await?;
+        let (mut client, events) = Self::handshake(
+            stream,
+            "Endpoint: bot link",
+            Some(pa_types::daemon::MAX_BOT_FRAME_BYTES),
+        )
+        .await?;
         // Messages name the endpoint by its socket path; a stream has none.
         client.socket_path = PathBuf::from("bot link");
         client.direct_capable = false;
@@ -376,10 +381,11 @@ impl DaemonClient {
     }
 
     /// The shared connect tail: the reader and writer tasks plus the hello handshake. `label`
-    /// names the endpoint in error messages.
+    /// names the endpoint in error messages; a line longer than `frame_cap` closes the connection.
     async fn handshake(
         connect: Box<dyn pa_types::platform::transport::TransportStream>,
         label: &str,
+        frame_cap: Option<u64>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
         let (reader_half, writer_half) = connect.split();
         let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
@@ -416,8 +422,13 @@ impl DaemonClient {
             let mut hello_tx = Some(hello_tx);
             loop {
                 line.clear();
-                match reader.read_line(&mut line).await {
+                let read = match frame_cap {
+                    Some(cap) => (&mut reader).take(cap + 1).read_line(&mut line).await,
+                    None => reader.read_line(&mut line).await,
+                };
+                match read {
                     Ok(0) | Err(_) => break,
+                    Ok(read) if frame_cap.is_some_and(|cap| read as u64 > cap) => break,
                     Ok(_) => {}
                 }
                 let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {

@@ -133,10 +133,14 @@ impl super::SessionUi {
     /// Open a state's child session: hand off like `/resume <session>`
     /// (the selection plus the leave-now signal), with the child's depth
     /// and this page on its selected row as the origin leaving the child
-    /// returns to. A child the roster cannot open yet reports on the
-    /// page's error line.
+    /// returns to. A child the roster cannot open yet, or any child in a
+    /// bot view, reports on the page's error line.
     fn open_factory_child(&mut self, view: &mut AgentView, child_id: &str) {
-        if let Some((selection, rlm_depth)) =
+        if let Some(refusal) = self.bot_local_refusal("Opening a child session") {
+            if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
+                factory_view.set_error(Some(refusal));
+            }
+        } else if let Some((selection, rlm_depth)) =
             factory_child_selection(&self.roster, &self.session_identity(), child_id)
         {
             self.pending_selection = Some(selection);

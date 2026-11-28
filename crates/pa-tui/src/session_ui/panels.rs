@@ -215,6 +215,11 @@ impl SessionUi {
     pub(super) fn open_scoped_agents_view(&mut self, view: &mut AgentView) {
         self.subagents_focused = false;
         self.update_subagent_summary(view);
+        if let Some(refusal) = self.bot_local_refusal("The agents view") {
+            self.error_row(&refusal, view);
+            self.dirty = true;
+            return;
+        }
         // `tui subagents open`: fire-and-forget.
         if let Some(telemetry) = self.telemetry.clone() {
             let children_total = self.subagent_counts.total as u64;
