@@ -361,14 +361,19 @@ impl BotManager {
         .await
         {
             Err(_) => bail!("the harness download timed out"),
-            Ok(Err(PlatformError::NotFound(_))) => Vec::new(),
+            // A missing file is the only case that must stay missing.
+            Ok(Err(PlatformError::NotFound(_))) => {
+                return Ok((empty_harness_state(), None));
+            }
             Ok(Err(error)) => return Err(anyhow!("the harness download failed: {error}")),
             Ok(Ok(bytes)) => bytes,
         };
-        if downloaded.is_empty() {
-            return Ok((empty_harness_state(), None));
-        }
         let digest = sha256_hex(&downloaded);
+        if downloaded.is_empty() {
+            // An empty file reads as the empty state, but it exists: the
+            // push expects its digest and may replace it.
+            return Ok((empty_harness_state(), Some(digest)));
+        }
         let state = serde_json::from_slice(&downloaded)
             .with_context(|| "the bot's harness state is malformed")?;
         Ok((state, Some(digest)))
@@ -829,6 +834,34 @@ mod tests {
         }
         let owner = load_owner(&dir);
         assert!(owner.entries[&RefinementKind::Memory].contains_key("bot-memory"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_guest_state_file_is_restored_not_wedged() {
+        let (dir, platform, manager) = setup();
+        let owner = state_with(&[("owner-memory", 1)]);
+        save_owner(&dir, &owner);
+        let record = manager.spawn(&spec("bot-a")).await.unwrap();
+        let sandbox_id = record.sandbox_id.clone().unwrap();
+
+        // The guest file exists but is empty (a truncated or wiped state).
+        platform
+            .state()
+            .harness_files
+            .get_mut(&sandbox_id)
+            .unwrap()
+            .insert(GUEST_HARNESS_STATE.to_string(), Vec::new());
+        manager
+            .sync_global_harness(&record, deadline())
+            .await
+            .unwrap();
+
+        // The push replaced the empty file with the owner's state instead
+        // of refusing it as a file that must not exist.
+        assert_eq!(
+            platform.state().harness_files[&sandbox_id][GUEST_HARNESS_STATE],
+            canonical_bytes(&owner).unwrap()
+        );
     }
 
     #[tokio::test(start_paused = true)]
