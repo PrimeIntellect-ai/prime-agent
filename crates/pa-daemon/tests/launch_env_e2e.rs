@@ -541,6 +541,8 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
     });
     let handle = children
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
             bots: false,

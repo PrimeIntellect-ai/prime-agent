@@ -157,6 +157,8 @@ async fn sessions_with_gated_supervisor(
 
 fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
     RlmSpawnRequest {
+        cpu: None,
+        memory_gb: None,
         target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
         github: None,
         bots: false,

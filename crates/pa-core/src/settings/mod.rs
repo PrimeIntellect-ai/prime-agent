@@ -18,5 +18,5 @@ pub use storage::{
 pub use types::{
     AutoRefineSettings, AutonomousSettings, BotGitIdentity, BotSecretDef, CompactionSettings,
     QueueModeSetting, Settings, ThinkingLevelSetting, TransportSetting, UpdateChannel,
-    WebSearchProvider,
+    WebSearchProvider, DEFAULT_BOTS_MAX_CPU, DEFAULT_BOTS_MAX_MEMORY_GB,
 };

@@ -61,6 +61,8 @@ async fn a_bot_without_the_nested_context_may_not_spawn_bots() {
         owner_session_id: "owner-1".into(),
         depth: super::MAX_BOT_DEPTH,
         max_bots: 10,
+        max_cpu: 16,
+        max_memory_gb: 32,
         network_rules: BTreeMap::default(),
     };
     let path = super::nested::NestedContext::path_in(dir.path());

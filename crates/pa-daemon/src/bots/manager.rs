@@ -566,6 +566,23 @@ impl BotManager {
         failures
     }
 
+    /// The owner's nested-spawn limits from this daemon's settings:
+    /// `bots.maxBots`, `bots.maxCpu`, and `bots.maxMemoryGb`, the values
+    /// a bots-capable bot's context carries into its guest.
+    async fn nested_limits(&self) -> Result<(usize, u32, u32)> {
+        let agent_dir = self.agent_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
+            (
+                settings.get_bots_max_bots() as usize,
+                settings.get_bots_max_cpu(),
+                settings.get_bots_max_memory_gb(),
+            )
+        })
+        .await
+        .context("the bots limits read failed")
+    }
+
     /// Rewrite a running bot's guest nested context from `rules`: the same
     /// write `allow_spawns` performs, so the children see the current
     /// credentials, not the bootstrap-time snapshot.
@@ -575,18 +592,14 @@ impl BotManager {
         sandbox_id: &str,
         rules: BTreeMap<String, pa_sandbox::HeaderRule>,
     ) -> Result<()> {
-        let agent_dir = self.agent_dir.clone();
-        let max_bots = tokio::task::spawn_blocking(move || {
-            pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir).get_bots_max_bots()
-                as usize
-        })
-        .await
-        .context("the bots.maxBots read failed")?;
+        let (max_bots, max_cpu, max_memory_gb) = self.nested_limits().await?;
         let context = super::nested::NestedContext {
             bot_id: record.bot_id.clone(),
             owner_session_id: record.owner_session_id.clone(),
             depth: 1,
             max_bots,
+            max_cpu,
+            max_memory_gb,
             network_rules: rules,
         };
         let team = self.sandbox_key_and_team().await?.1;
@@ -669,6 +682,55 @@ impl BotManager {
         registry.put(record)
     }
 
+    /// Refuse a sandbox size above the owner's caps (`bots.maxCpu`,
+    /// `bots.maxMemoryGb`), naming the cap, before any create runs. An
+    /// omitted size reads as the small platform default, so a cap below
+    /// the default refuses the default too. Inside a bot, the owner's
+    /// caps ride the nested context: the guest's own settings never
+    /// widen them.
+    ///
+    /// # Errors
+    /// Returns an error when the effective size is above its cap, or the
+    /// caps cannot be read.
+    async fn assert_within_size_caps(
+        &self,
+        cpu: Option<u32>,
+        memory_gb: Option<u32>,
+    ) -> Result<()> {
+        let cpu = cpu.unwrap_or_else(super::platform::default_cpu_cores);
+        let memory_gb = memory_gb.unwrap_or_else(super::platform::default_memory_gb);
+        let agent_dir = self.agent_dir.clone();
+        let nested = super::nested::NestedContext::read(&self.agent_dir);
+        let (max_cpu, max_memory_gb) = tokio::task::spawn_blocking(move || {
+            nested.map_or_else(
+                || {
+                    let settings =
+                        pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
+                    (
+                        settings.get_bots_max_cpu(),
+                        settings.get_bots_max_memory_gb(),
+                    )
+                },
+                |context| (context.max_cpu, context.max_memory_gb),
+            )
+        })
+        .await
+        .context("the bots size-cap settings read failed")?;
+        if cpu > max_cpu {
+            bail!(
+                "the bot's cpu={cpu} exceeds bots.maxCpu {max_cpu}: pass a smaller cpu or raise \
+                 bots.maxCpu in the daemon settings.json"
+            );
+        }
+        if memory_gb > max_memory_gb {
+            bail!(
+                "the bot's memory_gb={memory_gb} exceeds bots.maxMemoryGb {max_memory_gb}: \
+                 pass a smaller memory_gb or raise bots.maxMemoryGb in the daemon settings.json"
+            );
+        }
+        Ok(())
+    }
+
     /// Provision a new bot: a running sandbox with this binary's exact
     /// version installed and the bot session open in the guest daemon. A
     /// failed spawn deletes what it created.
@@ -681,6 +743,8 @@ impl BotManager {
         if self.get(&spec.bot_id).is_some() {
             return self.ensure_running_locked(&spec.bot_id).await;
         }
+        self.assert_within_size_caps(spec.cpu, spec.memory_gb)
+            .await?;
         let label = bot_label(&spec.bot_id);
         let existing = retry(|| self.platform.list(&label)).await?;
         if existing.iter().any(|sandbox| !sandbox.status.is_terminal()) {
@@ -717,6 +781,8 @@ impl BotManager {
             pause_at: None,
             status_since: None,
             running_ms: 0,
+            cpu: spec.cpu,
+            memory_gb: spec.memory_gb,
         })?;
         if spec.bots {
             let mut spawns = read_spawns_marker(&self.agent_dir);
@@ -1076,18 +1142,14 @@ impl BotManager {
             self.refresh_logins(&record).await;
             self.watch_logins();
         }
-        let agent_dir = self.agent_dir.clone();
-        let max_bots = tokio::task::spawn_blocking(move || {
-            pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir).get_bots_max_bots()
-                as usize
-        })
-        .await
-        .context("the bots.maxBots read failed")?;
+        let (max_bots, max_cpu, max_memory_gb) = self.nested_limits().await?;
         let context = super::nested::NestedContext {
             bot_id: record.bot_id.clone(),
             owner_session_id: record.owner_session_id.clone(),
             depth: 1,
             max_bots,
+            max_cpu,
+            max_memory_gb,
             network_rules: credentials.network_rules.clone(),
         };
         let team = self.sandbox_key_and_team().await?.1;
@@ -1700,6 +1762,14 @@ impl BotManager {
         if record.github {
             labels.push(GITHUB_LABEL.to_string());
         }
+        // The size rides a label too, so a registry rebuilt from labels
+        // recovers a sized spawn's size.
+        if let Some(cpu) = record.cpu {
+            labels.push(super::cpu_label(cpu));
+        }
+        if let Some(memory_gb) = record.memory_gb {
+            labels.push(super::memory_label(memory_gb));
+        }
         labels.extend(record.logins.iter().map(|provider| login_label(provider)));
         let request = BotCreate {
             name: record.name.clone(),
@@ -1708,6 +1778,8 @@ impl BotManager {
             idempotency_key: idempotency_key(&record.bot_id, record.generation, &source),
             checkpoint_id: checkpoint_id.map(str::to_string),
             network_rules: credentials.network_rules.clone(),
+            cpu: record.cpu,
+            memory_gb: record.memory_gb,
         };
         let created = retry(|| self.platform.create(&request)).await?;
         lock(&self.guest_auth).insert(created.id.clone(), credentials);
@@ -1793,7 +1865,7 @@ impl BotManager {
         // so a cold boot still commits as the owner. The relay self-pause
         // settings and the bot-list cap ride the same blocking read.
         let missing_identity = record.git_identity.is_none();
-        let (factory_enabled, identity, self_pause, max_bots) =
+        let (factory_enabled, identity, self_pause, max_bots, max_cpu, max_memory_gb) =
             tokio::task::spawn_blocking(move || {
                 let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
                 let identity = missing_identity
@@ -1804,6 +1876,8 @@ impl BotManager {
                     identity,
                     SelfPauseSettings::read(&agent_dir),
                     settings.get_bots_max_bots() as usize,
+                    settings.get_bots_max_cpu(),
+                    settings.get_bots_max_memory_gb(),
                 )
             })
             .await
@@ -1858,6 +1932,8 @@ impl BotManager {
                     owner_session_id: record.owner_session_id.clone(),
                     depth: 1,
                     max_bots,
+                    max_cpu,
+                    max_memory_gb,
                     network_rules: guest.network_rules.clone(),
                 };
                 env.insert(
@@ -2714,6 +2790,16 @@ fn child_record(
         // The record adds the open interval from `status_since` itself.
         running_ms,
         pause_token: existing.pause_token,
+        // The guest row carries the child's size; an older guest's row
+        // keeps what the registry already holds.
+        cpu: field("cpu")
+            .as_u64()
+            .and_then(|cpu| u32::try_from(cpu).ok())
+            .or(existing.cpu),
+        memory_gb: field("memoryGb")
+            .as_u64()
+            .and_then(|memory_gb| u32::try_from(memory_gb).ok())
+            .or(existing.memory_gb),
     })
 }
 
@@ -2759,6 +2845,10 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         pause_at: None,
         status_since: None,
         running_ms: 0,
+        // The size labels a sized create wrote survive the lost registry.
+        cpu: label_value(&sandbox.labels, super::CPU_LABEL_PREFIX).and_then(|cpu| cpu.parse().ok()),
+        memory_gb: label_value(&sandbox.labels, super::MEMORY_LABEL_PREFIX)
+            .and_then(|memory_gb| memory_gb.parse().ok()),
     }
 }
 

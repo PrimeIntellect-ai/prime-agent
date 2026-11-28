@@ -28,10 +28,29 @@ pub struct NestedContext {
     pub depth: u32,
     /// `bots.maxBots` from the owner's settings.
     pub max_bots: usize,
+    /// `bots.maxCpu` from the owner's settings: the guest enforces it on
+    /// its own spawns, so an owner's cap bounds the whole bot tree.
+    #[serde(default = "default_max_cpu")]
+    pub max_cpu: u32,
+    /// `bots.maxMemoryGb` from the owner's settings, carried for the same
+    /// reason as `max_cpu`.
+    #[serde(default = "default_max_memory_gb")]
+    pub max_memory_gb: u32,
     /// The sandbox's header rules, which the bot's children inherit minus
     /// the sandbox API rule.
     #[serde(default)]
     pub network_rules: BTreeMap<String, pa_sandbox::HeaderRule>,
+}
+
+/// The `max_cpu` an older context file carries: the setting's default.
+fn default_max_cpu() -> u32 {
+    pa_core::settings::DEFAULT_BOTS_MAX_CPU
+}
+
+/// The `max_memory_gb` an older context file carries: the setting's
+/// default.
+fn default_max_memory_gb() -> u32 {
+    pa_core::settings::DEFAULT_BOTS_MAX_MEMORY_GB
 }
 
 impl NestedContext {
@@ -113,6 +132,8 @@ mod tests {
             owner_session_id: "owner-1".into(),
             depth,
             max_bots: 10,
+            max_cpu: 16,
+            max_memory_gb: 32,
             network_rules: BTreeMap::from([
                 (
                     super::super::credentials::sandbox_api_host(),

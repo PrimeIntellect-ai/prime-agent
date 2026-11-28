@@ -359,6 +359,14 @@ pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
 /// The default `bots.maxBots`: the owner's bot list size cap.
 pub const DEFAULT_BOTS_MAX_BOTS: usize = 10;
 
+/// The default `bots.maxCpu`: the largest vCPU count a bot sandbox may
+/// request (the platform's own ceiling is 16).
+pub const DEFAULT_BOTS_MAX_CPU: u32 = 16;
+
+/// The default `bots.maxMemoryGb`: the largest memory in GB a bot
+/// sandbox may request.
+pub const DEFAULT_BOTS_MAX_MEMORY_GB: u32 = 32;
+
 /// The default inbox reminder repeat interval: 10 minutes.
 pub const DEFAULT_AGENT_INBOX_REMINDER_INTERVAL_MS: u64 = 600_000;
 

@@ -637,6 +637,12 @@ pub enum DaemonCommand {
         /// The bot may spawn its own bots (the nested-spawn flag).
         #[serde(default)]
         bots: bool,
+        /// The bot sandbox's vCPU count; `None` keeps the small default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cpu: Option<u32>,
+        /// The bot sandbox's memory in GB; `None` keeps the small default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory_gb: Option<u32>,
         #[serde(flatten)]
         rest: JsonMap,
     },

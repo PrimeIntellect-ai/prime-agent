@@ -420,6 +420,8 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
 
     let handle = children
         .spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
             bots: false,

@@ -64,6 +64,11 @@ pub const BOTS_LABEL: &str = "prime-agent-bot-spawns";
 pub const PAUSE_SECRET_MARK: &str = "PRIME_AGENT_BOT_PAUSE_";
 /// The label prefix that names each owner login a bot carries.
 pub const LOGIN_LABEL_PREFIX: &str = "prime-agent-bot-login:";
+/// The label prefix that names a bot sandbox's vCPU count, so a registry
+/// rebuilt from labels recovers a sized spawn's size.
+pub const CPU_LABEL_PREFIX: &str = "prime-agent-bot-cpu:";
+/// The label prefix that names a bot sandbox's memory in GB.
+pub const MEMORY_LABEL_PREFIX: &str = "prime-agent-bot-mem:";
 /// The guest daemon's socket.
 pub const GUEST_DAEMON_SOCKET: &str = "/root/.prime/agent/bot-daemon.sock";
 /// The guest daemon's self-pause configuration file, rewritten by the
@@ -98,6 +103,18 @@ pub fn login_label(provider: &str) -> String {
     format!("{LOGIN_LABEL_PREFIX}{provider}")
 }
 
+/// The label that names a bot sandbox's vCPU count.
+#[must_use]
+pub fn cpu_label(cpu: u32) -> String {
+    format!("{CPU_LABEL_PREFIX}{cpu}")
+}
+
+/// The label that names a bot sandbox's memory in GB.
+#[must_use]
+pub fn memory_label(memory_gb: u32) -> String {
+    format!("{MEMORY_LABEL_PREFIX}{memory_gb}")
+}
+
 /// What a new bot needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BotSpec {
@@ -117,6 +134,10 @@ pub struct BotSpec {
     pub git_identity: Option<BotGitIdentity>,
     /// The bot may spawn its own bots (`rlm.spawn(..., bots=True)`).
     pub bots: bool,
+    /// The bot sandbox's vCPU count; `None` keeps the small default.
+    pub cpu: Option<u32>,
+    /// The bot sandbox's memory in GB; `None` keeps the small default.
+    pub memory_gb: Option<u32>,
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {

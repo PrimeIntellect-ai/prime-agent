@@ -188,6 +188,12 @@ pub struct RlmSpawnRequest {
     /// bots. `None` and `false` are the same: a bot spawns bots only when
     /// asked to.
     pub bots: bool,
+    /// The `cpu` kwarg (sandbox targets only): the bot sandbox's vCPU
+    /// count. `None` keeps the small default.
+    pub cpu: Option<u32>,
+    /// The `memory_gb` kwarg (sandbox targets only): the bot sandbox's
+    /// memory in GB. `None` keeps the small default.
+    pub memory_gb: Option<u32>,
 }
 
 /// The factory executor's run tag on a spawned child (`rlm.spawn`'s
@@ -725,6 +731,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         OPERATION,
         &[
             "name", "model", "thinking", "cwd", "factory", "kind", "target", "github", "bots",
+            "cpu", "memoryGb",
         ],
     )?;
     let kind = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
@@ -760,6 +767,8 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     if bots && target != RlmSpawnTarget::Sandbox {
         anyhow::bail!("{OPERATION} bots applies only to target=\"sandbox\" (a bot).");
     }
+    let cpu = spawn_size_kwarg(&kwargs, "cpu", target, OPERATION)?;
+    let memory_gb = spawn_size_kwarg(&kwargs, "memoryGb", target, OPERATION)?;
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
@@ -789,6 +798,8 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         })?),
     };
     Ok(RlmSpawnRequest {
+        cpu,
+        memory_gb,
         prompt: prompt.to_string(),
         name,
         model,
@@ -801,6 +812,36 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         factory,
         target,
     })
+}
+
+/// One sandbox-size kwarg (`cpu` / `memoryGb`): a positive whole number
+/// that applies only to a sandbox target. `None` and JSON `null` read
+/// as the default size.
+fn spawn_size_kwarg(
+    kwargs: &Map<String, Value>,
+    key: &str,
+    target: RlmSpawnTarget,
+    operation: &str,
+) -> anyhow::Result<Option<u32>> {
+    let Some(value) = kwargs.get(key) else {
+        return Ok(None);
+    };
+    if value == &Value::Null {
+        return Ok(None);
+    }
+    // Zero, negative, fractional, and non-number shapes all fail here:
+    // the sandbox API sizes are whole units.
+    let Some(size) = value
+        .as_u64()
+        .and_then(|size| u32::try_from(size).ok())
+        .filter(|size| *size > 0)
+    else {
+        anyhow::bail!("{operation} {key} must be a positive whole number");
+    };
+    if target != RlmSpawnTarget::Sandbox {
+        anyhow::bail!("{operation} {key} applies only to target=\"sandbox\" (a bot).");
+    }
+    Ok(Some(size))
 }
 
 fn register_create_session(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
@@ -1724,6 +1765,79 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.to_string(), "rlm.spawn bots must be a bool");
+    }
+
+    #[tokio::test]
+    async fn spawn_size_kwargs_parse() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = RecordingHost::new();
+        let spawn_requests = Arc::clone(&host.spawn_requests);
+        let wiring = wired(dir.path(), Some(host));
+
+        // The sizes parse onto a sandbox target.
+        let admitted = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p",
+                    "kwargs": { "name": "w1", "target": "sandbox", "cpu": 8, "memoryGb": 16 } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(admitted["rlm_child_id"], "sub-1");
+        assert_eq!(spawn_requests.lock().await[0].cpu, Some(8));
+        assert_eq!(spawn_requests.lock().await[0].memory_gb, Some(16));
+
+        // Omitted sizes stay None.
+        call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p",
+                    "kwargs": { "name": "w2", "target": "sandbox" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(spawn_requests.lock().await[1].cpu, None);
+        assert_eq!(spawn_requests.lock().await[1].memory_gb, None);
+
+        // The sizes apply only to a sandbox target.
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p", "kwargs": { "name": "w3", "cpu": 8 } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.spawn cpu applies only to target=\"sandbox\" (a bot)."
+        );
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p", "kwargs": { "name": "w4", "memoryGb": 16 } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.spawn memoryGb applies only to target=\"sandbox\" (a bot)."
+        );
+
+        // Zero, negative, fractional, and non-numbers are refused.
+        for bad in [json!(0), json!(-1), json!(2.5), json!("eight"), json!(true)] {
+            let error = call(
+                &wiring,
+                "rlm.run",
+                json!({ "type": "rlm.run", "prompt": "p",
+                        "kwargs": { "name": "w5", "target": "sandbox", "cpu": bad } }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "rlm.spawn cpu must be a positive whole number"
+            );
+        }
     }
 
     #[tokio::test]

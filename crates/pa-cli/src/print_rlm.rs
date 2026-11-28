@@ -1299,6 +1299,8 @@ mod tests {
         Arc::get_mut(&mut node).unwrap().max_depth = 2;
         let gate = node.spawn_gate.lock().await;
         let mut spawn = InlineHost(Arc::clone(&node)).spawn(RlmSpawnRequest {
+            cpu: None,
+            memory_gb: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
             bots: false,
