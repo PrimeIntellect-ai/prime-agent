@@ -52,6 +52,9 @@ pub(crate) struct FakeState {
     /// Creates the platform refused (a disk-only restore of a checkpoint
     /// that holds memory), in order.
     pub refused_creates: Vec<BotCreate>,
+    /// The next create answers a transport error before the platform
+    /// processes it (no commit, no idempotency replay).
+    pub transient_next_create: bool,
     /// Each checkpoint's sandbox and creation stamp, as the platform's
     /// checkpoint list reports them.
     pub checkpoint_origins: HashMap<String, (String, String)>,
@@ -201,6 +204,9 @@ impl FakeState {
 impl BotPlatform for FakePlatform {
     fn create<'a>(&'a self, request: &'a BotCreate) -> BoxFuture<'a, PlatformResult<BotSandbox>> {
         async move {
+            if std::mem::take(&mut self.state().transient_next_create) {
+                return Err(PlatformError::Transient("connection reset".into()));
+            }
             let existing = self.state().keys.get(&request.idempotency_key).cloned();
             if let Some(id) = existing {
                 return Ok(self.state().sandboxes[&id].clone());
@@ -1735,6 +1741,44 @@ async fn a_refused_disk_restore_retries_with_memory_under_a_fresh_key() {
         manager.get("bot-a").unwrap().status,
         BotStatus::Running,
         "the fallback restore brings the bot back"
+    );
+}
+
+/// A transient failure on the disk create's first attempt must not lose
+/// the memory fallback: the refusal surfaces from a later retry, and the
+/// create still restores with the memory under the fresh key.
+#[tokio::test(start_paused = true)]
+async fn a_refusal_after_a_transient_create_still_falls_back_to_memory() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let paused = manager.pause("bot-a").await.unwrap();
+    let checkpoint = paused.checkpoint_id.clone().unwrap();
+    let sandbox_id = paused.sandbox_id.unwrap();
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    // The metadata lies (the checkpoint holds memory), and the disk
+    // create's first attempt dies on the transport.
+    platform.state().misreport_memory = true;
+    platform.state().transient_next_create = true;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let refused = platform.state().refused_creates.clone();
+    assert_eq!(refused.len(), 1, "the retried disk create was refused");
+    assert_eq!(refused[0].restore_memory, None);
+    let creates = platform.state().creates.clone();
+    assert_eq!(creates.len(), 2, "spawn, then the memory retry");
+    let retried = &creates[1];
+    assert_eq!(retried.checkpoint_id.as_deref(), Some(checkpoint.as_str()));
+    assert_eq!(retried.restore_memory, Some(true));
+    assert_ne!(retried.idempotency_key, refused[0].idempotency_key);
+    assert_eq!(
+        manager.get("bot-a").unwrap().status,
+        BotStatus::Running,
+        "the fallback still brings the bot back"
     );
 }
 

@@ -1,0 +1,1 @@
+- Fixed a bot restore still failing when the disk-only create first hit a transient error and only its retry met the platform's memory-only refusal: the refusal now surfaces from any create attempt, so the memory fallback always runs.

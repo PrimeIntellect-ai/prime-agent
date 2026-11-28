@@ -1791,12 +1791,13 @@ impl BotManager {
             cpu: record.cpu,
             memory_gb: record.memory_gb,
         };
-        let created = match self.platform.create(&request).await {
+        let created = match retry_create(|| self.platform.create(&request)).await {
             Ok(created) => created,
             // The checkpoint held memory after all (its metadata said it
             // did not): restore it with its memory under the memory key.
-            // The refusal is permanent, so it never enters the transient
-            // retry loop.
+            // The refusal is permanent and surfaces from any attempt, so
+            // this runs whether the disk create failed at once or after
+            // a transient fault.
             Err(error) if request.restore_memory.is_none() && refuses_disk_restore(&error) => {
                 let Some(checkpoint) = checkpoint else {
                     return Err(error.into());
@@ -1806,9 +1807,9 @@ impl BotManager {
                 memory.restore_memory = Some(true);
                 memory.idempotency_key =
                     idempotency_key(&record.bot_id, record.generation, &memory_source);
-                retry(|| self.platform.create(&memory)).await?
+                retry_create(|| self.platform.create(&memory)).await?
             }
-            Err(_) => retry(|| self.platform.create(&request)).await?,
+            Err(error) => return Err(error.into()),
         };
         lock(&self.guest_auth).insert(created.id.clone(), credentials);
         record.sandbox_id = Some(created.id.clone());
@@ -2939,6 +2940,32 @@ where
     let mut attempt = 1;
     loop {
         match call().await {
+            Err(PlatformError::Conflict(_) | PlatformError::Transient(_))
+                if attempt < RETRY_ATTEMPTS =>
+            {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(5));
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Retry a create's transient failures like [`retry`], but surface a
+/// restore-memory refusal at once: it is permanent, so the retry budget
+/// must not burn on it and the caller can restore with the memory
+/// instead.
+async fn retry_create<T, F, Fut>(mut call: F) -> PlatformResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = PlatformResult<T>>,
+{
+    let mut delay = Duration::from_millis(250);
+    let mut attempt = 1;
+    loop {
+        match call().await {
+            Err(error) if refuses_disk_restore(&error) => return Err(error),
             Err(PlatformError::Conflict(_) | PlatformError::Transient(_))
                 if attempt < RETRY_ATTEMPTS =>
             {
