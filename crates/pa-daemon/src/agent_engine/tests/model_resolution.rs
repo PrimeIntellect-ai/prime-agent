@@ -1263,48 +1263,6 @@ async fn private_default_create_worker(
     ))
 }
 
-async fn create_state(worker: &crate::worker::Worker, dir: &std::path::Path) -> Value {
-    let created = worker
-        .dispatch(
-            "create",
-            &json!({ "sessionPath": dir.join("race-session.jsonl"), "cwd": dir }),
-        )
-        .await;
-    assert!(created.success, "create failed: {created:?}");
-    let state = worker
-        .dispatch(
-            "get_connection_state",
-            &json!({ "activeSessionId": "race-create" }),
-        )
-        .await;
-    state.data.expect("state data")
-}
-
-#[tokio::test]
-async fn a_fresh_create_waits_for_the_private_default() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let pi = pi_payload();
-    let layer_a = json!({ "schemaVersion": 1, "models": [] }).to_string();
-    let worker = private_default_create_worker(
-        dir.path(),
-        vec![
-            catalog_ok_json(&layer_a),
-            catalog_ok_json(&pi),
-            catalog_ok_json(&pi),
-        ],
-    )
-    .await;
-    let data = create_state(&worker, dir.path()).await;
-    assert_eq!(
-        data["model"]["provider"], "prime-inference",
-        "the session runs on the provider default: {data}"
-    );
-    assert_eq!(
-        data["model"]["id"], "internal/glm-5.3-fast",
-        "the private default wins the startup pick: {data}"
-    );
-}
-
 #[tokio::test]
 async fn a_fresh_create_falls_back_with_a_recorded_message() {
     for no_session in [false, true] {

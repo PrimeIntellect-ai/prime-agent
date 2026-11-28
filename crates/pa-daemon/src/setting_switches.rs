@@ -590,7 +590,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("agent")).unwrap();
         std::fs::write(
             dir.join("agent").join("settings.json"),
-            json!({ "allowedModels": ["anthropic/*"] }).to_string(),
+            json!({ "allowedModels": ["no-such-provider/*"] }).to_string(),
         )
         .unwrap();
         let worker = Arc::new(Worker::new(worker_config(&dir), None));
